@@ -636,6 +636,18 @@ pub async fn rank_streams(
     })
 }
 
+fn select_video_stream(
+    data: &PlayUrlData,
+    quality: crate::storage::VideoQuality,
+) -> Result<&DashStream> {
+    data.dash
+        .video
+        .iter()
+        .filter(|stream| stream.id <= quality.qn())
+        .max_by_key(|stream| (stream.id, stream.bandwidth))
+        .ok_or_else(|| anyhow!("播放地址没有符合画质上限的视频流"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,6 +668,43 @@ mod tests {
             Some(1)
         );
         assert_eq!(data.dash.audio[0].base_url.as_deref(), Some("https://a/a"));
+    }
+
+    #[test]
+    fn video_stream_selection_respects_quality_cap() {
+        let data: PlayUrlData = serde_json::from_value(serde_json::json!({
+            "dash": {
+                "video": [
+                    {"id": 120, "bandwidth": 300},
+                    {"id": 80, "bandwidth": 200},
+                    {"id": 64, "bandwidth": 100}
+                ],
+                "audio": [],
+                "dolby": null,
+                "flac": null
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            select_video_stream(&data, crate::storage::VideoQuality::Best)
+                .unwrap()
+                .id,
+            120
+        );
+        assert_eq!(
+            select_video_stream(&data, crate::storage::VideoQuality::Q1080p)
+                .unwrap()
+                .id,
+            80
+        );
+        assert_eq!(
+            select_video_stream(&data, crate::storage::VideoQuality::Q720p)
+                .unwrap()
+                .id,
+            64
+        );
+        assert!(select_video_stream(&data, crate::storage::VideoQuality::Q360p).is_err());
     }
 
     #[test]

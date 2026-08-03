@@ -2,9 +2,9 @@ use crate::app::{App, PreviousPage};
 use crate::application::{AppAction, network};
 use crate::infrastructure::{media, persistence};
 use crate::presentation::tui::{
-    BangumiDetailPage, BangumiPage, DynamicDetailPage, DynamicPage, FavoritesPage, HistoryPage,
-    HomePage, LiveDetailPage, LivePage, LoginPage, NavItem, Page, SearchPage, SettingsPage, Theme,
-    UpPage,
+    ArticleDetailPage, BangumiDetailPage, BangumiPage, DynamicDetailPage, DynamicPage,
+    FavoritesPage, HistoryPage, HomePage, LiveDetailPage, LivePage, LoginPage, NavItem, Page,
+    SearchPage, SettingsPage, Theme, UpPage,
 };
 use std::sync::Arc;
 
@@ -119,6 +119,7 @@ impl App {
                     playback,
                     self.credentials.as_ref(),
                     self.config.danmaku.clone(),
+                    self.config.video_quality,
                     self.playback_event_tx.clone(),
                     session_id,
                 )
@@ -173,6 +174,7 @@ impl App {
                         playback,
                         self.credentials.as_ref(),
                         self.config.danmaku.clone(),
+                        self.config.video_quality,
                         self.playback_event_tx.clone(),
                         session_id,
                     )
@@ -761,6 +763,40 @@ impl App {
                     });
                 }
             }
+            AppAction::DeleteHistoryItems(keys) => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    if let Page::History(page) = &mut self.current_page {
+                        page.cancel_deletion();
+                    }
+                    return;
+                }
+                if keys.is_empty() {
+                    return;
+                }
+                let req_id = self.next_request_id("history_delete");
+                self.send_network_command(network::NetworkCommand::DeleteHistory { req_id, keys });
+            }
+            AppAction::OpenArticle(cvid) => {
+                let page = ArticleDetailPage::new(cvid);
+                let previous =
+                    std::mem::replace(&mut self.current_page, Page::ArticleDetail(Box::new(page)));
+                self.navigation_stack.push(previous);
+                let req_id = self.next_request_id("article_detail");
+                self.send_network_command(network::NetworkCommand::LoadArticle { req_id, cvid });
+            }
+            AppAction::OpenHistoryBangumi { season_id, ep_id } => {
+                let page =
+                    BangumiDetailPage::new_for_episode(season_id, ep_id, self.config.auto_play);
+                let previous =
+                    std::mem::replace(&mut self.current_page, Page::BangumiDetail(Box::new(page)));
+                self.navigation_stack.push(previous);
+                let req_id = self.next_request_id("bangumi_detail");
+                self.send_network_command(network::NetworkCommand::LoadBangumiDetail {
+                    req_id,
+                    season_id,
+                });
+            }
             AppAction::SwitchToHistory => {
                 self.sidebar.select(NavItem::History);
                 self.current_page = Page::History(HistoryPage::new());
@@ -839,6 +875,7 @@ impl App {
                     self.credentials.is_some(),
                     self.config.danmaku.clone(),
                     self.config.auto_play,
+                    self.config.video_quality,
                 );
                 self.current_page = Page::Settings(Box::new(page));
             }
@@ -923,6 +960,10 @@ impl App {
             }
             AppAction::SaveAutoPlay(enabled) => {
                 self.config.auto_play = enabled;
+                let _ = persistence::save_config(&self.config);
+            }
+            AppAction::SaveVideoQuality(quality) => {
+                self.config.video_quality = quality;
                 let _ = persistence::save_config(&self.config);
             }
             AppAction::SwitchToLive => {
@@ -1074,13 +1115,27 @@ impl App {
                 season_id: _,
                 title: _,
             } => {
-                let _ = media::play_bangumi_episode(
+                let session_id = self.allocate_playback_session();
+                self.playback.session_id = None;
+                self.playback.status = crate::domain::playback::PlaybackStatus::Starting;
+                let danmaku_config = self.danmaku_config_tx.borrow().clone();
+                match media::play_bangumi_episode(
                     self.api_client.clone(),
                     ep_id,
                     self.credentials.as_ref(),
-                    self.danmaku_config_tx.borrow().clone(),
+                    danmaku_config,
+                    self.config.video_quality,
+                    self.playback_event_tx.clone(),
+                    session_id,
                 )
-                .await;
+                .await
+                {
+                    Ok(()) => self.playback.begin_session(session_id),
+                    Err(error) => {
+                        self.playback.status = crate::domain::playback::PlaybackStatus::Failed;
+                        self.playback.last_error = Some(format!("启动番剧播放器失败: {error:#}"));
+                    }
+                }
             }
             AppAction::None => {}
         }
@@ -1103,6 +1158,7 @@ impl App {
             order,
             start_index,
             self.credentials.as_ref(),
+            self.config.video_quality,
             self.playback_event_tx.clone(),
             session_id,
         )
@@ -1175,6 +1231,7 @@ impl App {
                         false,
                         self.config.danmaku.clone(),
                         self.config.auto_play,
+                        self.config.video_quality,
                     )));
                 }
             }
@@ -1186,6 +1243,7 @@ impl App {
                         self.credentials.is_some(),
                         self.config.danmaku.clone(),
                         self.config.auto_play,
+                        self.config.video_quality,
                     );
                     self.current_page = Page::Settings(Box::new(page));
                 }
@@ -1267,6 +1325,9 @@ impl App {
             }
             Page::DynamicDetail(_) => {
                 // DynamicDetail is initialized when created
+            }
+            Page::ArticleDetail(_) => {
+                // ArticleDetail is initialized when opened from history.
             }
             Page::History(page) => {
                 if self.credentials.is_none() {

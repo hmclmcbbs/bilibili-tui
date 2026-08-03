@@ -4,7 +4,7 @@ use crate::api::live_danmaku_hub::LiveDanmakuHub;
 use crate::api::live_ws::LiveMessage;
 use crate::domain::playback::{PlayOrder, PlaybackEvent, PlaylistItem};
 use crate::domain::playback::PlaybackOptions;
-use crate::storage::{Credentials, DanmakuConfig};
+use crate::storage::{Credentials, DanmakuConfig, VideoQuality};
 use anyhow::Result;
 use std::collections::VecDeque;
 use std::io::Write as StdWrite;
@@ -29,77 +29,6 @@ static LIVE_SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static MPV_IPC_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const LIVE_DANMAKU_SCRIPT: &str = include_str!("live_danmaku.lua");
 
-/// Apply the configured mpv video output.
-///
-/// Only an explicitly configured `mpv_vo` (e.g. "kitty") is honored. We no
-/// longer auto-detect the terminal: mpv is spawned as a child of this TUI with
-/// stdout nulled, so a terminal VO like kitty has no way to write frames back
-/// into the terminal and would silently render nothing. Auto-detection caused
-/// exactly that bug (no window, no terminal output). External window mode
-/// (the default, `--force-window=immediate`) stays intact unless the user
-/// explicitly opts into a terminal VO via config.
-fn apply_mpv_vo(cmd: &mut Command) {
-    let vo = crate::storage::load_config()
-        .ok()
-        .and_then(|config| config.mpv_vo)
-        .filter(|value| !value.trim().is_empty());
-    let Some(vo) = vo else {
-        return;
-    };
-    cmd.arg(format!("--vo={vo}"));
-    // A terminal VO draws inside the terminal; an external window would cover
-    // the TUI and steal focus.
-    cmd.arg("--force-window=no");
-    cmd.arg("--terminal=yes");
-}
-
-/// Pick mpv's hardware decoding mode.
-///
-/// An explicitly configured `mpv_hwdec` (e.g. "nvdec", "vaapi", "no") wins.
-/// Otherwise auto-detect: NVIDIA GPUs get "nvdec" so the discrete card does
-/// the decode instead of falling back to CPU (which is what `auto-safe`
-/// frequently does on hybrid systems); everything else keeps "auto-safe".
-fn apply_mpv_hwdec(cmd: &mut Command) {
-    let configured = crate::storage::load_config()
-        .ok()
-        .and_then(|config| config.mpv_hwdec)
-        .filter(|value| !value.trim().is_empty());
-    let mode = match configured {
-        Some(mode) => mode,
-        None => {
-            if has_nvidia_gpu() {
-                "nvdec".to_string()
-            } else {
-                "auto-safe".to_string()
-            }
-        }
-    };
-    cmd.arg(format!("--hwdec={mode}"));
-}
-
-/// Detect an NVIDIA GPU through the kernel DRM devices. This covers both
-/// nouveau and the proprietary nvidia-drm driver (which exposes the same
-/// vendor id, 0x10de).
-fn has_nvidia_gpu() -> bool {
-    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        let device = entry.path().join("device");
-        let vendor = device.join("vendor");
-        std::fs::read_to_string(vendor)
-            .map(|value| value.trim() == "0x10de")
-            .unwrap_or(false)
-    })
-}
-
-/// Pick mpv's stdout based on the configured video output.
-///
-/// A terminal VO (e.g. `--vo=kitty`) renders frames by writing the Kitty
-/// Graphics Protocol to the controlling terminal. The default null stdout
-/// would silently swallow those frames, so when the user opts into a
-/// terminal VO we point mpv's stdout at /dev/tty instead. stderr is left
-/// untouched by the caller so existing piped diagnostics keep working.
 fn mpv_stdout() -> Stdio {
     let terminal_vo = crate::storage::load_config()
         .ok()
@@ -122,6 +51,59 @@ fn mpv_stdout() -> Stdio {
     Stdio::inherit()
 }
 
+fn ytdl_format(quality: VideoQuality) -> String {
+    match quality.max_height() {
+        None => "bestvideo+bestaudio/best".to_string(),
+        Some(height) => format!("bestvideo[height<={height}]+bestaudio/best[height<={height}]"),
+    }
+}
+
+fn playback_options_from_quality(quality: VideoQuality) -> PlaybackOptions {
+    PlaybackOptions {
+        quality: quality.qn(),
+        prefer_hdr: false,
+        prefer_hires: false,
+    }
+}
+
+fn nvidia_gpu_present() -> bool {
+    std::fs::read_dir("/sys/class/drm")
+        .map(|entries| {
+            entries.flatten().any(|entry| {
+                std::fs::read_to_string(entry.path().join("device/vendor"))
+                    .map(|vendor| vendor.trim() == "0x10de")
+                    .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn apply_mpv_hwdec(cmd: &mut tokio::process::Command) {
+    let configured = crate::storage::load_config()
+        .ok()
+        .and_then(|config| config.mpv_hwdec)
+        .filter(|value| !value.trim().is_empty());
+    let value = configured.unwrap_or_else(|| {
+        // Default to NVDEC when an NVIDIA GPU is present.
+        if nvidia_gpu_present() {
+            "nvdec".to_string()
+        } else {
+            "auto-safe".to_string()
+        }
+    });
+    cmd.arg(format!("--hwdec={value}"));
+}
+
+fn apply_mpv_vo(cmd: &mut tokio::process::Command) {
+    let configured = crate::storage::load_config()
+        .ok()
+        .and_then(|config| config.mpv_vo)
+        .filter(|value| !value.trim().is_empty());
+    if let Some(vo) = configured {
+        cmd.arg(format!("--vo={vo}"));
+    }
+}
+
 /// Play a video using mpv with yt-dlp and report watch progress
 /// This function spawns mpv in a background task to avoid blocking the TUI
 #[allow(clippy::too_many_arguments)]
@@ -135,6 +117,7 @@ pub async fn play_video(
     playback: PlaybackOptions,
     credentials: Option<&Credentials>,
     danmaku_config: DanmakuConfig,
+    video_quality: VideoQuality,
     playback_event_tx: Sender<PlaybackEvent>,
     session_id: u64,
 ) -> Result<()> {
@@ -207,7 +190,7 @@ pub async fn play_video(
         cmd.arg(format!("--audio-file={}", proxy.audio_url));
         cmd.arg(&proxy.video_url);
     } else {
-        cmd.arg("--ytdl-format=bestvideo+bestaudio/best");
+        cmd.arg(format!("--ytdl-format={}", ytdl_format(video_quality)));
         cmd.arg(&webpage_url);
     }
     apply_mpv_vo(&mut cmd);
@@ -748,17 +731,20 @@ async fn switch_to_working_video_cdn(
 
 /// Start one mpv process with multiple Bilibili URLs. mpv owns automatic
 /// advancement, so window/fullscreen/volume state is preserved between items.
+#[allow(clippy::too_many_arguments)]
 pub async fn play_playlist(
     api_client: Arc<ApiClient>,
     items: Vec<PlaylistItem>,
     order: PlayOrder,
     start_index: usize,
     _credentials: Option<&Credentials>,
+    video_quality: VideoQuality,
     playback_event_tx: Sender<PlaybackEvent>,
     session_id: u64,
 ) -> Result<()> {
     let (items, requested_start) = ordered_playlist(items, order, start_index)?;
-    let (first, skipped) = prepare_next_playlist_item(&api_client, &items, requested_start).await;
+    let (first, skipped) =
+        prepare_next_playlist_item(&api_client, &items, requested_start, video_quality).await;
     let Some((start_index, first)) = first else {
         anyhow::bail!("播放列表没有可播放项目: {}", skipped.join("; "));
     };
@@ -796,6 +782,7 @@ pub async fn play_playlist(
             items,
             start_index,
             first,
+            video_quality,
             playback_event_tx.clone(),
             session_id,
         )
@@ -829,6 +816,7 @@ struct PreparedPlaylistItem {
 async fn prepare_playlist_item(
     api_client: &ApiClient,
     item: &PlaylistItem,
+    video_quality: VideoQuality,
 ) -> Result<PreparedPlaylistItem> {
     let (cid, duration) = match (item.cid, item.duration) {
         (Some(cid), Some(duration)) => (cid, duration),
@@ -841,9 +829,10 @@ async fn prepare_playlist_item(
         }
     };
     let play_url = api_client
-        .get_play_url(&item.bvid, cid, PlaybackOptions::default())
+        .get_play_url(&item.bvid, cid, playback_options_from_quality(video_quality))
         .await?;
-    let streams = crate::api::cdn::rank_streams(&play_url, PlaybackOptions::default()).await?;
+    let streams = crate::api::cdn::rank_streams(&play_url, playback_options_from_quality(video_quality))
+        .await?;
     let proxy = proxy::MediaProxy::start(streams).await?;
     Ok(PreparedPlaylistItem {
         cid,
@@ -856,12 +845,13 @@ async fn prepare_next_playlist_item(
     api_client: &ApiClient,
     items: &[PlaylistItem],
     start: usize,
+    video_quality: VideoQuality,
 ) -> (Option<(usize, PreparedPlaylistItem)>, Vec<String>) {
     let mut failures = Vec::new();
     for (index, item) in items.iter().enumerate().skip(start) {
         if let Some(prepared) = accept_prepared_result(
             item,
-            prepare_playlist_item(api_client, item).await,
+            prepare_playlist_item(api_client, item, video_quality).await,
             &mut failures,
         ) {
             return (Some((index, prepared)), failures);
@@ -926,6 +916,7 @@ async fn run_playlist(
     items: Vec<PlaylistItem>,
     mut index: usize,
     mut prepared: PreparedPlaylistItem,
+    video_quality: VideoQuality,
     tx: Sender<PlaybackEvent>,
     session_id: u64,
 ) -> Result<()> {
@@ -1019,7 +1010,12 @@ async fn run_playlist(
                     played_any = true;
                     if !corrupted { prepared.proxy.record_success(); }
                 }
-                let (next, skipped) = prepare_next_playlist_item(&api_client, &items, index + 1).await;
+                let (next, skipped) = prepare_next_playlist_item(
+                    &api_client,
+                    &items,
+                    index + 1,
+                    video_quality,
+                ).await;
                 log_skipped_playlist_items(&skipped);
                 let Some((next_index, next_prepared)) = next else {
                     let _ = mpv_ipc(ipc_path, serde_json::json!(["quit"])).await;
@@ -1193,13 +1189,17 @@ fn ordered_playlist(
     Ok((items, start_index))
 }
 
-/// Play a bangumi episode using mpv with yt-dlp, with full danmaku support.
-/// This function spawns mpv in a background task to avoid blocking the TUI.
+/// Play an authenticated bangumi episode with full danmaku support.
+/// This function spawns mpv in a background task to avoid blocking the TUI,
+/// falling back to yt-dlp when the direct PGC stream cannot be proxied.
 pub async fn play_bangumi_episode(
     api_client: Arc<ApiClient>,
     ep_id: i64,
     credentials: Option<&Credentials>,
     danmaku_config: DanmakuConfig,
+    video_quality: VideoQuality,
+    playback_event_tx: Sender<PlaybackEvent>,
+    session_id: u64,
 ) -> Result<()> {
     // Resolve the episode first: we need its cid to fetch danmaku.
     let episode = api_client.get_bangumi_episode_info(ep_id).await?;
@@ -1211,6 +1211,17 @@ pub async fn play_bangumi_episode(
     };
 
     let video_url = format!("https://www.bilibili.com/bangumi/play/ep{}", ep_id);
+    let media_proxy = match api_client.get_bangumi_play_url(ep_id, video_quality).await {
+        Ok(play_url) => match crate::api::cdn::rank_streams(
+            &play_url,
+            playback_options_from_quality(video_quality),
+        )
+        .await {
+            Ok(streams) => proxy::MediaProxy::start(streams).await.ok(),
+            Err(_) => None,
+        },
+        Err(_) => None,
+    };
 
     // Fetch the danmaku history before spawning mpv; the Lua script renders
     // it incrementally over IPC once playback starts.
@@ -1243,8 +1254,16 @@ pub async fn play_bangumi_episode(
     cmd.arg("--script-opts-append=double_video_fps=no");
     cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
     cmd.arg(format!("--script={}", danmaku_script_path.display()));
-    cmd.arg("--ytdl-format=bestvideo+bestaudio/best");
-    cmd.arg(&video_url);
+    cmd.arg(format!("--referrer={video_url}"));
+    cmd.arg(format!("--http-header-fields=Referer: {video_url}"));
+    if let Some(proxy) = &media_proxy {
+        cmd.arg("--ytdl=no");
+        cmd.arg(format!("--audio-file={}", proxy.audio_url));
+        cmd.arg(&proxy.video_url);
+    } else {
+        cmd.arg(format!("--ytdl-format={}", ytdl_format(video_quality)));
+        cmd.arg(&video_url);
+    }
     apply_mpv_vo(&mut cmd);
 
     let mut child = match cmd.spawn() {
@@ -1266,6 +1285,7 @@ pub async fn play_bangumi_episode(
         let mut last_danmaku_position = 0.0;
         let mut danmaku_interval = tokio::time::interval(Duration::from_millis(50));
         let mut danmaku_ready = false;
+        let mut exit_status = None;
 
         loop {
             tokio::select! {
@@ -1301,7 +1321,7 @@ pub async fn play_bangumi_episode(
                     }
                 }
                 result = child.wait() => {
-                    let _ = result;
+                    exit_status = result.ok();
                     break;
                 }
             }
@@ -1313,6 +1333,22 @@ pub async fn play_bangumi_episode(
         }
         let _ = tokio::fs::remove_file(&ipc_path).await;
         let _ = tokio::fs::remove_file(&danmaku_script_path).await;
+        drop(media_proxy);
+        let event = match exit_status {
+            Some(status) if status.success() => PlaybackEvent::Finished {
+                session_id,
+                bvid: None,
+            },
+            Some(status) => PlaybackEvent::Failed {
+                session_id,
+                error: format!("番剧播放器退出: {status}"),
+            },
+            None => PlaybackEvent::Failed {
+                session_id,
+                error: "番剧播放器失败".to_string(),
+            },
+        };
+        let _ = playback_event_tx.send(event);
     });
 
     Ok(())
