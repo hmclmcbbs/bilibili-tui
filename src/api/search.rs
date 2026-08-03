@@ -61,6 +61,74 @@ impl SearchVideoItem {
     }
 }
 
+/// Search result for a user (UP主)
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchUserItem {
+    pub mid: Option<i64>,
+    pub uname: Option<String>,
+    #[serde(rename = "usign")]
+    pub sign: Option<String>,
+    pub fans: Option<i64>,
+    pub videos: Option<i64>,
+    #[serde(rename = "upic")]
+    pub face: Option<String>,
+    pub level: Option<i64>,
+}
+
+impl SearchUserItem {
+    /// Display name with HTML tags stripped
+    pub fn display_name(&self) -> String {
+        self.uname
+            .as_deref()
+            .unwrap_or("未知UP主")
+            .replace("<em class=\"keyword\">", "")
+            .replace("</em>", "")
+    }
+
+    pub fn sign_text(&self) -> String {
+        self.sign
+            .as_deref()
+            .unwrap_or("这个人很懒，什么都没写")
+            .replace("<em class=\"keyword\">", "")
+            .replace("</em>", "")
+    }
+
+    pub fn format_fans(&self) -> String {
+        match self.fans {
+            Some(n) if n >= 10000 => format!("{:.1}万", n as f64 / 10000.0),
+            Some(n) => format!("{}", n),
+            None => "-".to_string(),
+        }
+    }
+
+    pub fn format_videos(&self) -> String {
+        match self.videos {
+            Some(n) => format!("{}", n),
+            None => "-".to_string(),
+        }
+    }
+
+    pub fn face_url(&self) -> Option<String> {
+        self.face.as_ref().map(|url| {
+            if url.starts_with("//") {
+                format!("https:{}", url)
+            } else {
+                url.clone()
+            }
+        })
+    }
+}
+
+/// Response for user type search
+#[derive(Debug, Deserialize)]
+pub struct SearchUserData {
+    pub result: Option<Vec<SearchUserItem>>,
+    #[serde(rename = "numResults")]
+    pub num_results: Option<i32>,
+    pub page: Option<i32>,
+    pub pagesize: Option<i32>,
+}
+
 /// Hot search item from web endpoint
 #[derive(Debug, Clone, Deserialize)]
 pub struct HotwordItem {

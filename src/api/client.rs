@@ -3,6 +3,7 @@
 use super::wbi;
 use crate::storage::Credentials;
 use anyhow::{Context, Result, anyhow};
+use futures_util::StreamExt;
 use reqwest::Client;
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue, REFERER, USER_AGENT};
 use serde::Deserialize;
@@ -524,7 +525,17 @@ impl ApiClient {
             .ok_or_else(|| anyhow::anyhow!("No data in video info response"))
     }
 
-    pub async fn get_play_url(&self, bvid: &str, cid: i64) -> Result<super::cdn::PlayUrlData> {
+    pub async fn get_play_url(
+        &self,
+        bvid: &str,
+        cid: i64,
+        options: crate::domain::playback::PlaybackOptions,
+    ) -> Result<super::cdn::PlayUrlData> {
+        let qn = if options.quality > 0 {
+            options.quality
+        } else {
+            127 // auto: request the full stream list and pick locally
+        };
         let url = self.build_url(BilibiliApiDomain::Main, "/x/player/wbi/playurl");
         let resp: ApiResponse<super::cdn::PlayUrlData> = self
             .get_with_wbi(
@@ -532,7 +543,7 @@ impl ApiClient {
                 vec![
                     ("bvid", bvid.to_string()),
                     ("cid", cid.to_string()),
-                    ("qn", "127".to_string()),
+                    ("qn", qn.to_string()),
                     ("fnver", "0".to_string()),
                     ("fnval", "4048".to_string()),
                     ("fourk", "1".to_string()),
@@ -546,30 +557,94 @@ impl ApiClient {
             .ok_or_else(|| anyhow!("playurl response has no data"))
     }
 
-    pub async fn get_video_danmaku(&self, cid: i64) -> Result<Vec<super::danmaku::VideoDanmaku>> {
-        let url = format!("https://comment.bilibili.com/{cid}.xml");
-        let response = self.client.get(&url).send().await?.error_for_status()?;
-        let encoding = response
-            .headers()
-            .get(reqwest::header::CONTENT_ENCODING)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let bytes = response.bytes().await?;
-        let body = if encoding.contains("deflate") {
-            let mut decoded = Vec::new();
-            if flate2::read::DeflateDecoder::new(bytes.as_ref())
-                .read_to_end(&mut decoded)
-                .is_err()
-            {
-                decoded.clear();
-                flate2::read::ZlibDecoder::new(bytes.as_ref()).read_to_end(&mut decoded)?;
+    pub async fn get_video_danmaku(
+        &self,
+        cid: i64,
+        duration_secs: i64,
+    ) -> Result<Vec<super::danmaku::VideoDanmaku>> {
+        // Two endpoints complement each other:
+        //   - seg.so (segmented protobuf) returns the full danmaku history
+        //     in 6-minute segments, but for this video it is dominated by
+        //     positioned (mode 7/8) danmaku - only a handful of regular
+        //     rolling comments show up there.
+        //   - The XML endpoint returns the most recent ~600 comments, which
+        //     is where the bulk of regular (mode 1/4/5) danmaku lives.
+        // Fetch both and merge: XML entries that are not already present in
+        // the segmented history (same time + text) get appended.
+        //
+        // Segment requests are fetched concurrently (8 at a time) instead of
+        // serially - for a long video the old loop waited on up to 64
+        // round-trips before mpv could even start.
+        let segment_count = ((duration_secs.max(0) as usize).div_ceil(360)).clamp(1, 64);
+        let mut all = Vec::new();
+        for chunk in (1..=segment_count).collect::<Vec<_>>().chunks(8) {
+            let fetched = futures_util::stream::iter(chunk.iter().copied())
+                .map(|segment_index| {
+                    let client = self.client.clone();
+                    async move {
+                        let url = format!(
+                            "https://api.bilibili.com/x/v2/dm/web/seg.so?type=1&oid={cid}&segment_index={segment_index}"
+                        );
+                        let response = client.get(&url).send().await?;
+                        if !response.status().is_success() {
+                            return Ok::<Vec<super::danmaku::VideoDanmaku>, reqwest::Error>(
+                                Vec::new(),
+                            );
+                        }
+                        let bytes = response.bytes().await?;
+                        Ok(super::danmaku::parse_seg_protobuf(&bytes))
+                    }
+                })
+                .buffered(8)
+                .collect::<Vec<_>>()
+                .await;
+            for parsed in fetched {
+                if let Ok(parsed) = parsed {
+                    all.extend(parsed);
+                }
             }
-            String::from_utf8(decoded)?
-        } else {
-            String::from_utf8(bytes.to_vec())?
-        };
-        super::danmaku::parse_xml(&body)
+        }
+
+        // Always also pull the XML endpoint for the regular danmaku it
+        // carries (the segmented endpoint can be almost all mode 7/8).
+        let xml_url = format!("https://comment.bilibili.com/{cid}.xml");
+        if let Ok(response) = self.client.get(&xml_url).send().await
+            && response.status().is_success()
+        {
+            let encoding = response
+                .headers()
+                .get(reqwest::header::CONTENT_ENCODING)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let bytes = response.bytes().await?;
+            let body = if encoding.contains("deflate") {
+                let mut decoded = Vec::new();
+                if flate2::read::DeflateDecoder::new(bytes.as_ref())
+                    .read_to_end(&mut decoded)
+                    .is_err()
+                {
+                    decoded.clear();
+                    flate2::read::ZlibDecoder::new(bytes.as_ref()).read_to_end(&mut decoded)?;
+                }
+                String::from_utf8(decoded)?
+            } else {
+                String::from_utf8(bytes.to_vec())?
+            };
+            if let Ok(xml_items) = super::danmaku::parse_xml(&body) {
+                for item in xml_items {
+                    let duplicate = all.iter().any(|existing| {
+                        (existing.time - item.time).abs() < 0.5 && existing.text == item.text
+                    });
+                    if !duplicate {
+                        all.push(item);
+                    }
+                }
+            }
+        }
+
+        all.sort_by(|left, right| left.time.total_cmp(&right.time));
+        Ok(all)
     }
 
     /// Load the public profile shown at space.bilibili.com/{mid}.
@@ -687,6 +762,53 @@ impl ApiClient {
             .ok_or_else(|| anyhow!("favorite resources response has no data"))
     }
 
+    /// List video series (合集) created by an uploader.
+    pub async fn get_series_list(
+        &self,
+        mid: i64,
+        page: i32,
+        page_size: i32,
+    ) -> Result<super::space::SeriesListData> {
+        let url = format!(
+            "{}/x/polymer/web-space/seasons_series_list?mid={mid}&page_num={page}&page_size={page_size}",
+            BilibiliApiDomain::Main.as_str()
+        );
+        let resp: ApiResponse<super::space::SeriesListData> = self.get(&url).await?;
+        if resp.code != 0 {
+            return Err(anyhow!(
+                "series list API error {}: {}",
+                resp.code,
+                resp.message
+            ));
+        }
+        resp.data
+            .ok_or_else(|| anyhow!("series list response has no data"))
+    }
+
+    /// Load one page of videos from a series (合集).
+    pub async fn get_series_archives(
+        &self,
+        mid: i64,
+        season_id: i64,
+        page: i32,
+        page_size: i32,
+    ) -> Result<super::space::SeriesArchivesData> {
+        let url = format!(
+            "{}/x/polymer/web-space/seasons_archives_list?mid={mid}&season_id={season_id}&page_num={page}&page_size={page_size}",
+            BilibiliApiDomain::Main.as_str()
+        );
+        let resp: ApiResponse<super::space::SeriesArchivesData> = self.get(&url).await?;
+        if resp.code != 0 {
+            return Err(anyhow!(
+                "series archives API error {}: {}",
+                resp.code,
+                resp.message
+            ));
+        }
+        resp.data
+            .ok_or_else(|| anyhow!("series archives response has no data"))
+    }
+
     pub async fn get_watch_later(
         &self,
         page: i32,
@@ -786,6 +908,30 @@ impl ApiClient {
         }))
     }
 
+    /// Search for users (UP主) by keyword
+    pub async fn search_users(
+        &self,
+        keyword: &str,
+        page: i32,
+    ) -> Result<super::search::SearchUserData> {
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/web-interface/wbi/search/type");
+
+        let params = vec![
+            ("search_type", "bili_user".to_string()),
+            ("keyword", keyword.to_string()),
+            ("page", page.to_string()),
+            ("order", "totalrank".to_string()),
+        ];
+
+        let resp: ApiResponse<super::search::SearchUserData> = self.get_with_wbi(&url, params).await?;
+        Ok(resp.data.unwrap_or(super::search::SearchUserData {
+            result: None,
+            num_results: Some(0),
+            page: Some(page),
+            pagesize: Some(20),
+        }))
+    }
+
     /// Fetch hot search keywords (web)
     pub async fn get_hot_search(&self) -> Result<Vec<super::search::HotwordItem>> {
         const HOTWORD_URL: &str = "https://s.search.bilibili.com/main/hotword";
@@ -851,6 +997,33 @@ impl ApiClient {
         let result: super::bangumi::SeasonResult =
             serde_json::from_value(result_val).map_err(|e| anyhow!("解析番剧详情失败: {}", e))?;
         Ok(result)
+    }
+
+    /// Resolve a single bangumi episode by its ep id, returning the episode
+    /// record (used for its cid, which is needed to fetch danmaku).
+    pub async fn get_bangumi_episode_info(
+        &self,
+        ep_id: i64,
+    ) -> Result<super::bangumi::BangumiEpisode> {
+        let url = format!(
+            "{}/pgc/view/web/season?ep_id={}",
+            BilibiliApiDomain::Main.as_str(),
+            ep_id,
+        );
+        let value = self.get_json(&url).await?;
+        Self::check_code(&value)?;
+        let result_val = value
+            .get("result")
+            .cloned()
+            .ok_or_else(|| anyhow!("API 返回缺少 result 字段"))?;
+        let result: super::bangumi::SeasonResult =
+            serde_json::from_value(result_val).map_err(|e| anyhow!("解析番剧详情失败: {}", e))?;
+        for section in result.all_sections() {
+            if let Some(episode) = section.episodes.iter().find(|ep| ep.id == ep_id) {
+                return Ok(episode.clone());
+            }
+        }
+        Err(anyhow!("未找到剧集 ep{ep_id}"))
     }
 
     // Dynamic Feed API
@@ -1520,8 +1693,11 @@ mod live_contract_tests {
                 .find_map(|media| media.bvid.as_deref())
             {
                 let info = client.get_video_info(bvid).await.expect("video info");
-                let play_url = client.get_play_url(bvid, info.cid).await.expect("playurl");
-                crate::api::cdn::rank_streams(&play_url)
+                let play_url = client
+                    .get_play_url(bvid, info.cid, Default::default())
+                    .await
+                    .expect("playurl");
+                crate::api::cdn::rank_streams(&play_url, Default::default())
                     .await
                     .expect("reachable CDN streams");
             }

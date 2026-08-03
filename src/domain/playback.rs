@@ -1,5 +1,58 @@
 //! Application-level playback queue state.
 
+/// Per-video playback preferences (quality / HDR / Hi-Res).
+///
+/// `quality` is the Bilibili `qn` value; 0 means auto (use the best stream
+/// the server returns). HDR and Hi-Res are preference flags applied while
+/// selecting video/audio streams from the playurl response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaybackOptions {
+    pub quality: i64,
+    pub prefer_hdr: bool,
+    pub prefer_hires: bool,
+}
+
+impl Default for PlaybackOptions {
+    fn default() -> Self {
+        Self {
+            quality: 0,
+            prefer_hdr: false,
+            prefer_hires: false,
+        }
+    }
+}
+
+impl PlaybackOptions {
+    /// Bilibili quality label for a given qn value.
+    pub fn quality_label(qn: i64) -> &'static str {
+        match qn {
+            0 => "自动",
+            127 => "8K",
+            126 => "杜比视界",
+            125 => "HDR",
+            120 => "4K",
+            116 => "1080P60",
+            112 => "1080P+",
+            80 => "1080P",
+            64 => "720P",
+            32 => "480P",
+            16 => "360P",
+            _ => "未知",
+        }
+    }
+
+    /// Quality cycle used by the detail page `m` key.
+    pub fn cycle_quality(&mut self) {
+        const CYCLE: [i64; 8] = [0, 120, 116, 112, 80, 64, 32, 16];
+        let next = CYCLE
+            .iter()
+            .position(|&qn| qn == self.quality)
+            .map(|idx| CYCLE[(idx + 1) % CYCLE.len()])
+            .unwrap_or(0);
+        self.quality = next;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaylistItem {
     pub bvid: String,
@@ -79,6 +132,18 @@ impl PlaybackState {
         self.session_id = Some(session_id);
         self.status = PlaybackStatus::Playing;
         self.last_error = None;
+    }
+
+    /// Whether an mpv session is currently active and owns the terminal input.
+    ///
+    /// While this is true the TUI must not poll/read keyboard events, otherwise
+    /// keys like `q` or `Space` would be consumed by both mpv (which inherits
+    /// our stdin) and the TUI, causing mpv to quit AND the TUI to navigate away.
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self.status,
+            PlaybackStatus::Starting | PlaybackStatus::Playing | PlaybackStatus::Paused
+        )
     }
 
     pub fn apply_event(&mut self, event: &PlaybackEvent) -> bool {

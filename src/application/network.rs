@@ -14,7 +14,7 @@ use crate::api::{
     recommend::{HomeFeed, VideoItem},
     search::HotwordItem,
     search::SearchVideoItem,
-    space::{RelationStat, SpaceInfo, SpaceVideoData, SpaceVideoOrder},
+    space::{RelationStat, SpaceInfo, SpaceVideoData, SpaceVideoOrder, parse_length_to_seconds},
     video::RelatedVideoItem,
     video::VideoInfo,
 };
@@ -42,6 +42,11 @@ pub enum NetworkCommand {
         req_id: u64,
     },
     Search {
+        req_id: u64,
+        keyword: String,
+        page: i32,
+    },
+    SearchUsers {
         req_id: u64,
         keyword: String,
         page: i32,
@@ -80,6 +85,11 @@ pub enum NetworkCommand {
         bvid: String,
         aid: i64,
     },
+    ProbeVideoStreams {
+        req_id: u64,
+        bvid: String,
+        cid: i64,
+    },
     LoadUpPage {
         req_id: u64,
         mid: i64,
@@ -97,6 +107,17 @@ pub enum NetworkCommand {
         media_id: i64,
         page: i32,
         order: FavoriteOrder,
+    },
+    LoadSeriesList {
+        req_id: u64,
+        mid: i64,
+        page: i32,
+    },
+    LoadSeriesArchives {
+        req_id: u64,
+        mid: i64,
+        series_id: i64,
+        page: i32,
     },
     BuildUpPlaylist {
         req_id: u64,
@@ -158,6 +179,13 @@ pub enum NetworkEvent {
         results: Vec<SearchVideoItem>,
         total: i32,
     },
+    SearchUsersLoaded {
+        req_id: u64,
+        keyword: String,
+        page: i32,
+        results: Vec<crate::api::search::SearchUserItem>,
+        total: i32,
+    },
     DynamicLoaded {
         req_id: u64,
         append: bool,
@@ -183,6 +211,14 @@ pub enum NetworkEvent {
         comments: Vec<CommentItem>,
         has_more_comments: bool,
         related_videos: Vec<RelatedVideoItem>,
+        hdr_supported: Option<bool>,
+        hires_supported: Option<bool>,
+    },
+    VideoStreamSupportLoaded {
+        req_id: u64,
+        bvid: String,
+        hdr_supported: Option<bool>,
+        hires_supported: Option<bool>,
     },
     UpPageLoaded {
         req_id: u64,
@@ -207,6 +243,19 @@ pub enum NetworkEvent {
         page: i32,
         order: FavoriteOrder,
         resources: FavoriteResourceData,
+    },
+    SeriesListLoaded {
+        req_id: u64,
+        mid: i64,
+        page: i32,
+        data: crate::api::space::SeriesListData,
+    },
+    SeriesArchivesLoaded {
+        req_id: u64,
+        mid: i64,
+        series_id: i64,
+        page: i32,
+        data: crate::api::space::SeriesArchivesData,
     },
     PlaylistLoaded {
         req_id: u64,
@@ -327,17 +376,41 @@ impl NetworkCommand {
             | Self::LoadFavoritesContent { .. } => "favorites",
             Self::BuildUpPlaylist { .. } | Self::BuildFavoritePlaylist { .. } => "playlist",
             Self::CancelPending => "cancel",
-            Self::LoadHotwords { .. } | Self::Search { .. } => "search",
+            Self::LoadHotwords { .. } | Self::Search { .. } | Self::SearchUsers { .. } => "search",
             Self::LoadDynamicInit { .. }
             | Self::LoadDynamicRefresh { .. }
             | Self::LoadDynamicMore { .. } => "dynamic",
             Self::LoadHistoryInit { .. } | Self::LoadHistoryMore { .. } => "history",
             Self::LoadLiveInit { .. } | Self::LoadLiveMore { .. } => "live",
-            Self::LoadVideoDetail { .. } => "video_detail",
-            Self::LoadUpPage { .. } | Self::LoadUpVideos { .. } => "up",
+            Self::LoadVideoDetail { .. } | Self::ProbeVideoStreams { .. } => "video_detail",
+            Self::LoadUpPage { .. }
+            | Self::LoadUpVideos { .. }
+            | Self::LoadSeriesList { .. }
+            | Self::LoadSeriesArchives { .. } => "up",
             Self::LoadDynamicDetail { .. } => "dynamic_detail",
             Self::LoadBangumiIndex { .. } | Self::LoadBangumiDetail { .. } => "bangumi",
         }
+    }
+}
+
+/// Probe a video's stream list and report whether HDR and Hi-Res are
+/// available.  Returns `(None, None)` when the playurl request fails so the
+/// detail page can show an "unknown" state instead of a wrong "no".
+async fn probe_stream_support(
+    api_client: &ApiClient,
+    bvid: &str,
+    cid: i64,
+) -> (Option<bool>, Option<bool>) {
+    let options = crate::domain::playback::PlaybackOptions::default();
+    match api_client.get_play_url(bvid, cid, options).await {
+        Ok(data) => {
+            // 125 = HDR, 126 = Dolby Vision, 127 = 8K.
+            let hdr = data.dash.video.iter().any(|stream| stream.id >= 125);
+            let hires = data.dash.audio.iter().any(|stream| stream.id == 30252)
+                || data.dash.flac.as_ref().and_then(|flac| flac.audio.as_ref()).is_some();
+            (Some(hdr), Some(hires))
+        }
+        Err(_) => (None, None),
     }
 }
 
@@ -413,6 +486,20 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
             },
             Err(e) => failed(req_id, "search", e),
         },
+        NetworkCommand::SearchUsers {
+            req_id,
+            keyword,
+            page,
+        } => match api_client.search_users(&keyword, page).await {
+            Ok(data) => NetworkEvent::SearchUsersLoaded {
+                req_id,
+                keyword,
+                page,
+                results: data.result.unwrap_or_default(),
+                total: data.num_results.unwrap_or(0),
+            },
+            Err(e) => failed(req_id, "search_users", e),
+        },
         NetworkCommand::LoadUpPage { req_id, mid, order } => {
             match api_client.get_space_info(mid).await {
                 Ok(profile) => {
@@ -472,6 +559,35 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
             },
             Err(error) => failed(req_id, "favorite_resources", error),
         },
+        NetworkCommand::LoadSeriesList { req_id, mid, page } => {
+            match api_client.get_series_list(mid, page, 20).await {
+                Ok(data) => NetworkEvent::SeriesListLoaded {
+                    req_id,
+                    mid,
+                    page,
+                    data,
+                },
+                Err(error) => failed(req_id, "series_list", error),
+            }
+        }
+        NetworkCommand::LoadSeriesArchives {
+            req_id,
+            mid,
+            series_id,
+            page,
+        } => match api_client
+            .get_series_archives(mid, series_id, page, 30)
+            .await
+        {
+            Ok(data) => NetworkEvent::SeriesArchivesLoaded {
+                req_id,
+                mid,
+                series_id,
+                page,
+                data,
+            },
+            Err(error) => failed(req_id, "series_archives", error),
+        },
         NetworkCommand::BuildUpPlaylist {
             req_id,
             mid,
@@ -497,7 +613,11 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                     cid: None,
                     title: video.title,
                     uploader_mid: Some(video.mid.unwrap_or(mid)),
-                    duration: video.duration,
+                    duration: video
+                        .length
+                        .as_deref()
+                        .and_then(parse_length_to_seconds)
+                        .or(video.duration),
                     page: None,
                 }));
                 if empty || items.len() >= total {
@@ -736,21 +856,30 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 Ok(info) => info,
                 Err(e) => return failed(req_id, "video_detail", e),
             };
-            let (comments, has_more_comments) = match api_client.get_comments(aid, 1).await {
-                Ok(data) => {
-                    let comments = data.replies.unwrap_or_default();
-                    let has_more = data
-                        .page
-                        .map(|p| p.count.unwrap_or(0) > comments.len() as i32)
-                        .unwrap_or(false);
-                    (comments, has_more)
-                }
-                Err(_) => (Vec::new(), false),
-            };
-            let related_videos = api_client
-                .get_related_videos(&bvid)
-                .await
-                .unwrap_or_default();
+            let cid = video_info
+                .pages
+                .as_ref()
+                .and_then(|pages| pages.first())
+                .map(|page| page.cid)
+                .unwrap_or(video_info.cid);
+            let ((comments, has_more_comments), related_videos, (hdr_supported, hires_supported)) =
+                tokio::join!(
+                    async {
+                        match api_client.get_comments(aid, 1).await {
+                            Ok(data) => {
+                                let comments = data.replies.unwrap_or_default();
+                                let has_more = data
+                                    .page
+                                    .map(|p| p.count.unwrap_or(0) > comments.len() as i32)
+                                    .unwrap_or(false);
+                                (comments, has_more)
+                            }
+                            Err(_) => (Vec::new(), false),
+                        }
+                    },
+                    async { api_client.get_related_videos(&bvid).await.unwrap_or_default() },
+                    async { probe_stream_support(&api_client, &bvid, cid).await },
+                );
             NetworkEvent::VideoDetailLoaded {
                 req_id,
                 bvid,
@@ -758,6 +887,18 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 comments,
                 has_more_comments,
                 related_videos,
+                hdr_supported,
+                hires_supported,
+            }
+        }
+        NetworkCommand::ProbeVideoStreams { req_id, bvid, cid } => {
+            let (hdr_supported, hires_supported) =
+                probe_stream_support(&api_client, &bvid, cid).await;
+            NetworkEvent::VideoStreamSupportLoaded {
+                req_id,
+                bvid,
+                hdr_supported,
+                hires_supported,
             }
         }
         NetworkCommand::LoadDynamicDetail { req_id, dynamic_id } => {

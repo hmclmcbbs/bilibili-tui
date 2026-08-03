@@ -145,7 +145,7 @@ impl Default for Keybindings {
             next_theme: "t".to_string(),
             play: "p".to_string(),
             open_settings: "s".to_string(),
-            search_focus: "/".to_string(),
+            search_focus: "i".to_string(),
 
             // Comments
             comment: "c".to_string(),
@@ -302,7 +302,7 @@ impl Keybindings {
     }
 
     pub fn matches_search_focus(&self, key: KeyCode) -> bool {
-        self.matches(&self.search_focus, key) || key == KeyCode::Char('i')
+        self.matches(&self.search_focus, key)
     }
 
     pub fn matches_section_prev(&self, key: KeyCode) -> bool {
@@ -441,6 +441,18 @@ pub struct DanmakuConfig {
     pub line_height: f64,
     pub massive_mode: bool,
     pub font_family: String,
+    /// Horizontal pixel offset for advanced (mode 7/8) danmaku.
+    /// Positive shifts right, negative shifts left. 0 = official position.
+    #[serde(default)]
+    pub advanced_offset_x: f64,
+    /// Vertical pixel offset for advanced danmaku.
+    /// Positive shifts down, negative shifts up. 0 = official position.
+    #[serde(default)]
+    pub advanced_offset_y: f64,
+    /// Uniform scale for advanced danmaku around the video center.
+    /// 1.0 = official size/position, 0.9 pulls everything toward the center.
+    #[serde(default = "default_one")]
+    pub advanced_scale: f64,
 }
 
 impl Default for DanmakuConfig {
@@ -462,6 +474,9 @@ impl Default for DanmakuConfig {
                 "Noto Sans CJK SC"
             }
             .to_string(),
+            advanced_offset_x: 0.0,
+            advanced_offset_y: 0.0,
+            advanced_scale: 1.0,
         }
     }
 }
@@ -474,6 +489,15 @@ pub struct AppConfig {
     pub danmaku: DanmakuConfig,
     #[serde(default = "default_true")]
     pub auto_play: bool,
+    /// mpv video output override. Empty/unset means mpv's default (external
+    /// window); "kitty" / "tct" draw inside the terminal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mpv_vo: Option<String>,
+    /// mpv hardware decoding override. Unset means auto-detect: NVIDIA GPUs
+    /// default to "nvdec", everything else to "auto-safe". Set explicitly
+    /// (e.g. "vaapi", "nvdec", "vulkan", "no") to force a mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mpv_hwdec: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -483,12 +507,18 @@ impl Default for AppConfig {
             keybindings: Keybindings::default(),
             danmaku: DanmakuConfig::default(),
             auto_play: true,
+            mpv_vo: None,
+            mpv_hwdec: None,
         }
     }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_one() -> f64 {
+    1.0
 }
 
 /// Get the config directory path

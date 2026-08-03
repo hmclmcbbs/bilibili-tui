@@ -6,6 +6,7 @@ use crate::api::client::ApiClient;
 use crate::api::comment::CommentItem;
 use crate::api::video::{RelatedVideoItem, VideoInfo};
 use crate::application::AppAction;
+use crate::domain::playback::PlaybackOptions;
 use crate::storage::Keybindings;
 use ratatui::{
     crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind},
@@ -50,6 +51,14 @@ pub struct VideoDetailPage {
     /// Scroll position in episode list
     pub episode_scroll: usize,
     pub auto_play_pending: bool,
+    /// Playback quality / HDR / Hi-Res selection for the next play action.
+    pub playback: PlaybackOptions,
+    /// Whether the current video has an HDR stream. None = unknown / probe failed.
+    pub hdr_supported: Option<bool>,
+    /// Whether the current video has a Hi-Res stream. None = unknown / probe failed.
+    pub hires_supported: Option<bool>,
+    /// True while a stream support probe is in flight.
+    pub streams_probing: bool,
 }
 
 impl VideoDetailPage {
@@ -84,6 +93,10 @@ impl VideoDetailPage {
             current_page_index: 0,
             episode_scroll: 0,
             auto_play_pending: true,
+            playback: PlaybackOptions::default(),
+            hdr_supported: None,
+            hires_supported: None,
+            streams_probing: false,
         }
     }
 
@@ -95,6 +108,7 @@ impl VideoDetailPage {
                     aid: self.aid,
                     pages: pages.clone(),
                     current_index: self.current_page_index,
+                    playback: self.playback,
                 };
             }
             if let Some(page) = pages.first() {
@@ -103,6 +117,7 @@ impl VideoDetailPage {
                     aid: self.aid,
                     cid: page.cid,
                     duration: page.duration,
+                    playback: self.playback,
                 };
             }
         }
@@ -115,6 +130,7 @@ impl VideoDetailPage {
             aid: self.aid,
             cid,
             duration,
+            playback: self.playback,
         }
     }
 
@@ -125,7 +141,33 @@ impl VideoDetailPage {
         // Load video info
         match api_client.get_video_info(&self.bvid).await {
             Ok(info) => {
+                let cid = info
+                    .pages
+                    .as_ref()
+                    .and_then(|pages| pages.first())
+                    .map(|page| page.cid)
+                    .unwrap_or(info.cid);
                 self.video_info = Some(info);
+                self.streams_probing = true;
+                match api_client.get_play_url(&self.bvid, cid, self.playback).await {
+                    Ok(data) => {
+                        self.hdr_supported = Some(data.dash.video.iter().any(|s| s.id >= 125));
+                        self.hires_supported = Some(
+                            data.dash.audio.iter().any(|s| s.id == 30252)
+                                || data
+                                    .dash
+                                    .flac
+                                    .as_ref()
+                                    .and_then(|flac| flac.audio.as_ref())
+                                    .is_some(),
+                        );
+                    }
+                    Err(_) => {
+                        self.hdr_supported = None;
+                        self.hires_supported = None;
+                    }
+                }
+                self.streams_probing = false;
             }
             Err(e) => {
                 self.error_message = Some(format!("加载视频信息失败: {}", e));
@@ -281,6 +323,7 @@ impl VideoDetailPage {
                     Constraint::Length(1), // Title
                     Constraint::Length(1), // Author
                     Constraint::Length(1), // Stats
+                    Constraint::Length(1), // Playback options
                     Constraint::Min(1),    // Description
                 ])
                 .split(inner);
@@ -328,6 +371,83 @@ impl VideoDetailPage {
             ]));
             frame.render_widget(stats, chunks[2]);
 
+            // Playback options
+            let quality_label = PlaybackOptions::quality_label(self.playback.quality);
+            let hdr_label = if self.playback.prefer_hdr { "开" } else { "关" };
+            let hires_label = if self.playback.prefer_hires { "开" } else { "关" };
+            let hdr_sup = match self.hdr_supported {
+                Some(true) => Some("HDR✓"),
+                _ => None,
+            };
+            let hires_sup = match self.hires_supported {
+                Some(true) => Some("Hi-Res✓"),
+                _ => None,
+            };
+            let probing = if self.streams_probing { "检测中..." } else { "" };
+            let mut support_spans: Vec<Span> = Vec::new();
+            if let Some(h) = hdr_sup {
+                support_spans.push(Span::styled(
+                    h,
+                    Style::default()
+                        .fg(theme.fg_secondary)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                support_spans.push(Span::styled(" ", Style::default().fg(theme.fg_secondary)));
+            }
+            if let Some(h) = hires_sup {
+                support_spans.push(Span::styled(
+                    h,
+                    Style::default()
+                        .fg(theme.fg_secondary)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                support_spans.push(Span::styled(" ", Style::default().fg(theme.fg_secondary)));
+            }
+            let mut options = vec![
+                Span::styled("画质:", Style::default().fg(theme.fg_primary)),
+                Span::styled(
+                    format!(" {quality_label} "),
+                    Style::default()
+                        .fg(theme.bilibili_pink)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("[m] ", Style::default().fg(theme.fg_secondary)),
+            ];
+            // Hide a toggle when the probe says the video has no such stream.
+            // While probing or when the probe failed (None), keep it visible
+            // to avoid hiding it by mistake.
+            let show_hdr = self.hdr_supported != Some(false);
+            let show_hires = self.hires_supported != Some(false);
+            if show_hdr {
+                options.push(Span::styled("HDR:", Style::default().fg(theme.fg_primary)));
+                options.push(Span::styled(
+                    format!(" {hdr_label} "),
+                    Style::default()
+                        .fg(theme.bilibili_pink)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                options.push(Span::styled("[d] ", Style::default().fg(theme.fg_secondary)));
+            }
+            if show_hires {
+                options.push(Span::styled("Hi-Res:", Style::default().fg(theme.fg_primary)));
+                options.push(Span::styled(
+                    format!(" {hires_label} "),
+                    Style::default()
+                        .fg(theme.bilibili_pink)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                options.push(Span::styled("[f]", Style::default().fg(theme.fg_secondary)));
+            }
+            if !support_spans.is_empty() {
+                options.push(Span::styled(" 支持: ", Style::default().fg(theme.fg_primary)));
+                options.extend(support_spans);
+            }
+            if !probing.is_empty() {
+                options.push(Span::styled(probing, Style::default().fg(theme.warning)));
+            }
+            let options = Paragraph::new(Line::from(options));
+            frame.render_widget(options, chunks[3]);
+
             // Description
             if let Some(desc) = &info.desc {
                 let char_count = desc.chars().count();
@@ -339,7 +459,7 @@ impl VideoDetailPage {
                 let description = Paragraph::new(desc_text)
                     .style(Style::default().fg(theme.fg_secondary))
                     .wrap(Wrap { trim: true });
-                frame.render_widget(description, chunks[3]);
+                frame.render_widget(description, chunks[4]);
             }
         } else {
             let loading = Paragraph::new("加载中...")
@@ -796,6 +916,19 @@ impl Component for VideoDetailPage {
         {
             return Some(AppAction::OpenUpPage(info.owner.mid));
         }
+        // Playback quality / HDR / Hi-Res toggles
+        if key == KeyCode::Char('m') {
+            self.playback.cycle_quality();
+            return Some(AppAction::None);
+        }
+        if key == KeyCode::Char('d') {
+            self.playback.prefer_hdr = !self.playback.prefer_hdr;
+            return Some(AppAction::None);
+        }
+        if key == KeyCode::Char('f') {
+            self.playback.prefer_hires = !self.playback.prefer_hires;
+            return Some(AppAction::None);
+        }
         if keys.matches_play(key) {
             return Some(self.play_action());
         }
@@ -913,6 +1046,7 @@ impl Component for VideoDetailPage {
                             aid: self.aid,
                             pages,
                             current_index: self.episode_scroll,
+                            playback: self.playback,
                         });
                     }
                 }

@@ -86,6 +86,47 @@ impl App {
                     _ => {}
                 }
             }
+            network::NetworkEvent::SearchUsersLoaded {
+                req_id,
+                keyword,
+                page,
+                results,
+                total,
+            } => {
+                if !self.is_latest_request("search", req_id) {
+                    return;
+                }
+                match &mut self.current_page {
+                    Page::Home(home_page) => {
+                        let search_page = home_page.search_mut();
+                        if search_page.query != keyword {
+                            return;
+                        }
+                        if page <= 1 {
+                            search_page.user_page = 1;
+                            search_page.set_user_results(results, total);
+                        } else {
+                            search_page.user_page = page;
+                            search_page.user_total = total;
+                            search_page.append_user_results(results);
+                        }
+                    }
+                    Page::Search(search_page) => {
+                        if search_page.query != keyword {
+                            return;
+                        }
+                        if page <= 1 {
+                            search_page.user_page = 1;
+                            search_page.set_user_results(results, total);
+                        } else {
+                            search_page.user_page = page;
+                            search_page.user_total = total;
+                            search_page.append_user_results(results);
+                        }
+                    }
+                    _ => {}
+                }
+            }
             network::NetworkEvent::DynamicLoaded {
                 req_id,
                 append,
@@ -161,6 +202,8 @@ impl App {
                 comments,
                 has_more_comments,
                 related_videos,
+                hdr_supported,
+                hires_supported,
             } => {
                 if !self.is_latest_request("video_detail", req_id) {
                     return;
@@ -190,6 +233,27 @@ impl App {
                     }
                     page.loading = false;
                     page.error_message = None;
+                    page.hdr_supported = hdr_supported;
+                    page.hires_supported = hires_supported;
+                    page.streams_probing = false;
+                }
+            }
+            network::NetworkEvent::VideoStreamSupportLoaded {
+                req_id,
+                bvid,
+                hdr_supported,
+                hires_supported,
+            } => {
+                if !self.is_latest_request("video_detail", req_id) {
+                    return;
+                }
+                if let Page::VideoDetail(page) = &mut self.current_page {
+                    if page.bvid != bvid {
+                        return;
+                    }
+                    page.hdr_supported = hdr_supported;
+                    page.hires_supported = hires_supported;
+                    page.streams_probing = false;
                 }
             }
             network::NetworkEvent::UpPageLoaded {
@@ -250,6 +314,39 @@ impl App {
                         || page.active_folder == Some(media_id))
                 {
                     page.apply_favorite_resources(media_id, loaded_page, resources);
+                }
+            }
+            network::NetworkEvent::SeriesListLoaded {
+                req_id,
+                mid,
+                page: _loaded_page,
+                data,
+            } => {
+                if !self.is_latest_request("series_list", req_id) {
+                    return;
+                }
+                if let Page::Up(page) = &mut self.current_page
+                    && page.mid == mid
+                {
+                    page.apply_series_list(data);
+                }
+            }
+            network::NetworkEvent::SeriesArchivesLoaded {
+                req_id,
+                mid,
+                series_id,
+                page: loaded_page,
+                data,
+            } => {
+                if !self.is_latest_request("series_archives", req_id) {
+                    return;
+                }
+                if let Page::Up(page) = &mut self.current_page
+                    && page.mid == mid
+                    && (page.pending_series == Some(series_id)
+                        || page.active_series == Some(series_id))
+                {
+                    page.apply_series_archives(series_id, loaded_page, data);
                 }
             }
             network::NetworkEvent::PlaylistLoaded {

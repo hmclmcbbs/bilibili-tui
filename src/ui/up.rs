@@ -1,7 +1,10 @@
 use super::{Component, Theme, VideoCard, VideoCardGrid};
 use crate::api::{
     favorite::{FavoriteFolder, FavoriteOrder, FavoriteResourceData},
-    space::{RelationStat, SpaceInfo, SpaceVideoData, SpaceVideoOrder},
+    space::{
+        RelationStat, SeriesArchivesData, SeriesInfo, SpaceInfo, SpaceVideoData, SpaceVideoOrder,
+        parse_length_to_seconds,
+    },
 };
 use crate::application::AppAction;
 use crate::domain::playback::PlayOrder;
@@ -19,6 +22,7 @@ use ratatui::{
 pub enum UpTab {
     Videos,
     Favorites,
+    Collections,
 }
 
 pub struct UpPage {
@@ -39,6 +43,16 @@ pub struct UpPage {
     pub favorite_page: i32,
     pub favorite_order: FavoriteOrder,
     pub favorite_has_more: bool,
+    // ── 合集状态 ──
+    pub series_list: Vec<SeriesInfo>,
+    pub series_cards: VideoCardGrid,
+    pub series_selected: usize,
+    pub series_list_loaded: bool,
+    pub pending_series: Option<i64>,
+    pub active_series: Option<i64>,
+    pub series_videos: VideoCardGrid,
+    pub series_page: i32,
+    pub series_has_more: bool,
     pub loading: bool,
     pub loading_more: bool,
     pub error: Option<String>,
@@ -64,6 +78,15 @@ impl UpPage {
             favorite_page: 1,
             favorite_order: FavoriteOrder::RecentlyFavorited,
             favorite_has_more: false,
+            series_list: Vec::new(),
+            series_cards: VideoCardGrid::new(),
+            series_selected: 0,
+            series_list_loaded: false,
+            pending_series: None,
+            active_series: None,
+            series_videos: VideoCardGrid::new(),
+            series_page: 1,
+            series_has_more: false,
             loading: true,
             loading_more: false,
             error: None,
@@ -103,7 +126,13 @@ impl UpPage {
 
     fn append_space_videos(&mut self, videos: SpaceVideoData) {
         for video in videos.list.vlist {
-            let duration = format_duration(video.duration.unwrap_or_default());
+            let duration = video
+                .length
+                .as_deref()
+                .and_then(parse_length_to_seconds)
+                .or(video.duration)
+                .map(format_duration)
+                .unwrap_or_else(|| "--:--".to_string());
             let views = format_count(video.play.unwrap_or_default());
             let card = VideoCard::new(
                 Some(video.bvid),
@@ -166,18 +195,97 @@ impl UpPage {
         self.error = None;
     }
 
+    pub fn apply_series_list(&mut self, data: crate::api::space::SeriesListData) {
+        let mut all: Vec<SeriesInfo> = Vec::new();
+        if let Some(lists) = data.items_lists {
+            all.extend(lists.series_list);
+            all.extend(lists.seasons_list);
+        }
+        self.series_cards.clear();
+        for series in &all {
+            let name = series
+                .meta
+                .as_ref()
+                .and_then(|m| m.name.as_deref().or(m.title.as_deref()))
+                .unwrap_or("未命名合集");
+            let count = series
+                .meta
+                .as_ref()
+                .and_then(|m| m.total)
+                .unwrap_or(0);
+            let pic = series.meta.as_ref().and_then(|m| m.cover.clone());
+            let card = VideoCard::new(
+                None,
+                None,
+                name.to_string(),
+                format!("{}个视频", count),
+                String::new(),
+                String::new(),
+                pic,
+            );
+            self.series_cards.add_card(card);
+        }
+        self.series_list = all;
+        self.series_list_loaded = true;
+        self.loading = false;
+        self.error = None;
+    }
+
+    pub fn apply_series_archives(&mut self, series_id: i64, page: i32, data: SeriesArchivesData) {
+        if page == 1 || self.active_series != Some(series_id) {
+            self.series_videos.clear();
+        }
+        self.active_series = Some(series_id);
+        self.pending_series = None;
+        self.series_page = page;
+        let total: i64 = data
+            .meta
+            .as_ref()
+            .and_then(|m| m.total)
+            .or_else(|| data.page.as_ref().and_then(|p| p.total).map(|t| t as i64))
+            .unwrap_or(0);
+        self.series_has_more = self.series_videos.cards.len() < total as usize;
+        if let Some(archives) = data.archives {
+            for item in archives {
+                let views = item
+                    .stat
+                    .as_ref()
+                    .and_then(|s| s.view)
+                    .map(format_count)
+                    .unwrap_or_else(|| "-".to_string());
+                let card = VideoCard::new(
+                    Some(item.bvid),
+                    Some(item.aid),
+                    item.title,
+                    item.author
+                        .or_else(|| self.profile.as_ref().map(|p| p.name.clone()))
+                        .unwrap_or_else(|| "未知UP".to_string()),
+                    views,
+                    format_duration(item.duration.unwrap_or_default()),
+                    item.cover,
+                )
+                .with_uploader_mid(item.mid.or(Some(self.mid)));
+                self.series_videos.add_card(card);
+            }
+        }
+        self.loading = false;
+        self.loading_more = false;
+        self.error = None;
+    }
+
     pub fn set_error(&mut self, error: String) {
         self.loading = false;
         self.loading_more = false;
         self.pending_folder = None;
+        self.pending_series = None;
         self.error = Some(error);
     }
 
     fn selected_grid(&mut self) -> &mut VideoCardGrid {
-        if self.tab == UpTab::Videos {
-            &mut self.videos
-        } else {
-            &mut self.favorite_videos
+        match self.tab {
+            UpTab::Videos => &mut self.videos,
+            UpTab::Favorites => &mut self.favorite_videos,
+            UpTab::Collections => &mut self.series_videos,
         }
     }
 
@@ -244,15 +352,19 @@ impl Component for UpPage {
             PlayOrder::Reverse => "倒序播放",
             PlayOrder::Shuffle => "随机播放",
         };
-        let tabs = Tabs::new(vec!["1 投稿", "2 收藏夹"])
-            .select(if self.tab == UpTab::Videos { 0 } else { 1 })
+        let tabs = Tabs::new(vec!["1 投稿", "2 收藏夹", "3 合集"])
+            .select(match self.tab {
+                UpTab::Videos => 0,
+                UpTab::Favorites => 1,
+                UpTab::Collections => 2,
+            })
             .highlight_style(Style::default().fg(theme.bilibili_pink))
             .block(Block::default().borders(Borders::ALL).title(format!(
                 " {} · {play_order} ",
-                if self.tab == UpTab::Videos {
-                    sort
-                } else {
-                    favorite_sort
+                match self.tab {
+                    UpTab::Videos => sort,
+                    UpTab::Favorites => favorite_sort,
+                    UpTab::Collections => "合集",
                 }
             )));
         frame.render_widget(tabs, chunks[1]);
@@ -266,9 +378,12 @@ impl Component for UpPage {
             );
         } else if self.tab == UpTab::Videos {
             self.videos.render(frame, chunks[2], theme);
-        } else if self.active_folder.is_some() {
+        } else if self.tab == UpTab::Favorites && self.active_folder.is_some() {
             self.favorite_videos.render(frame, chunks[2], theme);
-        } else {
+        } else if self.tab == UpTab::Collections && self.active_series.is_some() {
+            self.series_videos.render(frame, chunks[2], theme);
+        } else if self.tab == UpTab::Favorites {
+            // 收藏夹列表
             let items: Vec<ListItem> = self
                 .folders
                 .iter()
@@ -288,11 +403,18 @@ impl Component for UpPage {
                 chunks[2],
                 &mut state,
             );
+        } else if self.tab == UpTab::Collections {
+            // 合集列表（带封面）
+            if self.series_list.is_empty() && self.series_list_loaded {
+                frame.render_widget(Paragraph::new("该UP主没有创建合集"), chunks[2]);
+            } else {
+                self.series_cards.render(frame, chunks[2], theme);
+            }
         }
 
         frame.render_widget(
             Paragraph::new(format!(
-                "[1/2] 投稿/收藏夹  [{}/{}] 翻页  [o] 最新/热门  [s] 顺序/倒序/随机  [{}] 连播  [Enter] 打开  [{}] 返回",
+                "[1/2/3] 投稿/收藏夹/合集  [{}/{}] 翻页  [o] 最新/热门  [s] 顺序/倒序/随机  [{}] 连播  [Enter] 打开  [{}] 返回",
                 keys.page_up,
                 keys.page_down,
                 keys.play,
@@ -304,12 +426,29 @@ impl Component for UpPage {
 
     fn handle_input(&mut self, key: KeyCode, keys: &Keybindings) -> Option<AppAction> {
         if keys.matches_back(key) || keys.matches_quit(key) {
-            if self.tab == UpTab::Favorites && self.pending_folder.take().is_some() {
+            // 收藏夹内 → 回收藏夹列表；合集内 → 回合集列表
+            if self.tab == UpTab::Favorites
+                && self.pending_folder.take().is_some()
+            {
                 self.loading = false;
                 return Some(AppAction::None);
             }
-            if self.tab == UpTab::Favorites && self.active_folder.take().is_some() {
+            if self.tab == UpTab::Favorites
+                && self.active_folder.take().is_some()
+            {
                 self.favorite_videos.clear();
+                return Some(AppAction::None);
+            }
+            if self.tab == UpTab::Collections
+                && self.pending_series.take().is_some()
+            {
+                self.loading = false;
+                return Some(AppAction::None);
+            }
+            if self.tab == UpTab::Collections
+                && self.active_series.take().is_some()
+            {
+                self.series_videos.clear();
                 return Some(AppAction::None);
             }
             return Some(AppAction::BackToList);
@@ -321,6 +460,14 @@ impl Component for UpPage {
             }
             KeyCode::Char('2') => {
                 self.tab = UpTab::Favorites;
+                return Some(AppAction::None);
+            }
+            KeyCode::Char('3') => {
+                self.tab = UpTab::Collections;
+                if !self.series_list_loaded {
+                    self.loading = true;
+                    return Some(AppAction::OpenSeriesFolder(0));
+                }
                 return Some(AppAction::None);
             }
             KeyCode::Char('o') if self.tab == UpTab::Videos => {
@@ -350,6 +497,7 @@ impl Component for UpPage {
             _ => {}
         }
 
+        // ── 收藏夹列表选择 ──
         if self.tab == UpTab::Favorites && self.active_folder.is_none() {
             if keys.matches_down(key) && self.folder_selected + 1 < self.folders.len() {
                 self.folder_selected += 1;
@@ -365,10 +513,35 @@ impl Component for UpPage {
             return Some(AppAction::None);
         }
 
+        // ── 合集列表选择 ──
+        if self.tab == UpTab::Collections && self.active_series.is_none() {
+            if keys.matches_down(key) {
+                self.series_cards.move_down();
+            } else if keys.matches_up(key) {
+                self.series_cards.move_up();
+            } else if keys.matches_right(key) {
+                self.series_cards.move_right();
+            } else if keys.matches_left(key) {
+                self.series_cards.move_left();
+            } else if keys.matches_confirm(key)
+                && self.series_cards.selected_index < self.series_list.len()
+            {
+                if let Some(series) = self.series_list.get(self.series_cards.selected_index) {
+                    if let Some(id) = series.meta.as_ref().and_then(|m| m.season_id) {
+                        self.loading = true;
+                        self.pending_series = Some(id);
+                        return Some(AppAction::OpenSeriesFolder(id));
+                    }
+                }
+            }
+            return Some(AppAction::None);
+        }
+
         let tab = self.tab;
         let loading_more = self.loading_more;
         let video_total = self.video_total;
         let favorite_has_more = self.favorite_has_more;
+        let series_has_more = self.series_has_more;
         let grid = self.selected_grid();
         if keys.matches_play(key) {
             if tab == UpTab::Videos {
@@ -382,7 +555,7 @@ impl Component for UpPage {
                     video_order: self.video_order,
                     play_order: self.play_order,
                 });
-            } else {
+            } else if tab == UpTab::Favorites {
                 let media_id = self.active_folder.unwrap_or_default();
                 let title = self
                     .folders
@@ -397,6 +570,7 @@ impl Component for UpPage {
                     play_order: self.play_order,
                 });
             }
+            return Some(AppAction::None);
         }
         if keys.matches_page_down(key) {
             grid.move_page_down();
@@ -406,6 +580,9 @@ impl Component for UpPage {
                 }
                 if tab == UpTab::Favorites && favorite_has_more {
                     return Some(AppAction::LoadMoreFavoriteResources);
+                }
+                if tab == UpTab::Collections && series_has_more {
+                    return Some(AppAction::LoadMoreSeriesVideos);
                 }
             }
             return Some(AppAction::None);
@@ -422,6 +599,9 @@ impl Component for UpPage {
                 }
                 if tab == UpTab::Favorites && favorite_has_more {
                     return Some(AppAction::LoadMoreFavoriteResources);
+                }
+                if tab == UpTab::Collections && series_has_more {
+                    return Some(AppAction::LoadMoreSeriesVideos);
                 }
             }
         } else if keys.matches_up(key) {

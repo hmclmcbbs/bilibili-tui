@@ -29,6 +29,16 @@ impl App {
                 self.draw(frame);
             })?;
 
+            if self.playback.is_active() {
+                // While mpv is playing it owns the terminal input (it inherits
+                // our stdin). Do not poll/read keys so `q`, `Space` etc. reach
+                // mpv only. Background tasks (heartbeat, danmaku, playback
+                // events) still run below in tick().
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                self.tick().await;
+                continue;
+            }
+
             if event::poll(std::time::Duration::from_millis(100))? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -338,6 +348,10 @@ impl App {
                 page.videos.start_cover_downloads();
                 page.favorite_videos.poll_cover_results();
                 page.favorite_videos.start_cover_downloads();
+                page.series_videos.poll_cover_results();
+                page.series_videos.start_cover_downloads();
+                page.series_cards.poll_cover_results();
+                page.series_cards.start_cover_downloads();
             }
             _ => {}
         }

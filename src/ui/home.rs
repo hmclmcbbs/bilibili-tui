@@ -536,6 +536,16 @@ impl Component for HomePage {
             return Some(AppAction::None);
         }
 
+        // 搜索模式下，所有按键先交给搜索页处理（包括 h/l 方向键）
+        // 但按 h 且搜索页已处于最左边缘时，回到侧边栏
+        if self.selected_source == 0 {
+            if keys.matches_left(key) && self.search.wants_left_to_sidebar() {
+                self.focus_sources = true;
+                return Some(AppAction::None);
+            }
+            return self.search.handle_input(key, keys);
+        }
+
         if keys.matches_left(key) {
             self.focus_sources = true;
             if self.selected_source == 0 || self.loading || self.loading_more {
@@ -544,9 +554,6 @@ impl Component for HomePage {
                 return Some(AppAction::CancelPendingLoads);
             }
             return Some(AppAction::None);
-        }
-        if self.selected_source == 0 {
-            return self.search.handle_input(key, keys);
         }
         if self.loading {
             return Some(AppAction::None);

@@ -27,6 +27,13 @@ pub struct VideoCard {
     pub duration: String,
     pub pic_url: Option<String>,
     pub cover: Option<StatefulProtocol>,
+    /// User card mode: show avatar + profile info instead of video info
+    pub user_card: bool,
+    /// Avatar URL for user cards
+    pub face_url: Option<String>,
+    pub fans: String,
+    pub video_count: String,
+    pub sign: String,
 }
 
 impl VideoCard {
@@ -49,12 +56,44 @@ impl VideoCard {
             duration,
             pic_url,
             cover: None,
+            user_card: false,
+            face_url: None,
+            fans: String::new(),
+            video_count: String::new(),
+            sign: String::new(),
         }
     }
 
     pub fn with_uploader_mid(mut self, uploader_mid: Option<i64>) -> Self {
         self.uploader_mid = uploader_mid;
         self
+    }
+
+    /// Create a user card (UP主 search result)
+    pub fn user(
+        mid: Option<i64>,
+        name: String,
+        fans: String,
+        video_count: String,
+        sign: String,
+        face_url: Option<String>,
+    ) -> Self {
+        Self {
+            bvid: None,
+            aid: None,
+            uploader_mid: mid,
+            title: name.clone(),
+            author: name,
+            views: fans.clone(),
+            duration: video_count.clone(),
+            pic_url: None,
+            cover: None,
+            user_card: true,
+            face_url,
+            fans,
+            video_count,
+            sign,
+        }
     }
 
     /// Render a single video card
@@ -94,6 +133,10 @@ impl VideoCard {
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
+
+        if self.user_card {
+            return self.render_user_grid(frame, inner, is_selected, theme);
+        }
 
         let card_chunks = Layout::default()
             .direction(Direction::Vertical)
@@ -167,6 +210,74 @@ impl VideoCard {
         frame.render_widget(info, info_area);
     }
 
+    /// Render a user card in grid layout: big avatar on top, name/fans/sign below
+    fn render_user_grid(
+        &mut self,
+        frame: &mut Frame,
+        inner: Rect,
+        is_selected: bool,
+        theme: &Theme,
+    ) {
+        let text_h = 4u16.min(inner.height.saturating_sub(4));
+        let avatar_h = inner.height.saturating_sub(text_h);
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(avatar_h), Constraint::Length(text_h)])
+            .split(inner);
+
+        // Avatar - centered square, fills the upper area
+        if let Some(cover) = self.cover.as_mut() {
+            frame.render_stateful_widget(StatefulImage::new(), chunks[0], cover);
+        } else {
+            frame.render_widget(
+                Paragraph::new("👤")
+                    .style(Style::default().fg(theme.fg_muted))
+                    .alignment(Alignment::Center),
+                chunks[0],
+            );
+        }
+
+        let name_style = if is_selected {
+            Style::default()
+                .fg(theme.bilibili_pink)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg_primary)
+        };
+
+        let max_w = chunks[1].width.saturating_sub(2) as usize;
+        let truncate = |s: &str| -> String {
+            if s.chars().count() > max_w {
+                s.chars().take(max_w.saturating_sub(1)).collect::<String>() + "…"
+            } else {
+                s.to_string()
+            }
+        };
+
+        let sign = if self.sign.is_empty() {
+            "无签名".to_string()
+        } else {
+            self.sign.clone()
+        };
+
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(truncate(&self.title), name_style)),
+                Line::from(Span::styled(
+                    format!("粉丝 {} · 视频 {}", self.fans, self.video_count),
+                    Style::default().fg(theme.bilibili_cyan),
+                )),
+                Line::from(Span::styled(
+                    truncate(&sign),
+                    Style::default().fg(theme.fg_muted),
+                )),
+            ])
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+            chunks[1],
+        );
+    }
+
     fn render_list(&mut self, frame: &mut Frame, area: Rect, is_selected: bool, theme: &Theme) {
         let block = Block::default()
             .borders(Borders::ALL)
@@ -178,6 +289,11 @@ impl VideoCard {
             }));
         let inner = block.inner(area);
         frame.render_widget(block, area);
+
+        if self.user_card {
+            return self.render_user_list(frame, inner, is_selected, theme);
+        }
+
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Length(24), Constraint::Min(24)])
@@ -210,6 +326,77 @@ impl VideoCard {
             chunks[1],
         );
     }
+
+    /// Render a user card in list layout: square avatar + name/fans/videos/sign
+    fn render_user_list(
+        &mut self,
+        frame: &mut Frame,
+        inner: Rect,
+        is_selected: bool,
+        theme: &Theme,
+    ) {
+        let avatar_w = inner.height.min(18).max(10);
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(avatar_w), Constraint::Min(10)])
+            .split(inner);
+
+        // Avatar area - render centered square
+        if let Some(cover) = self.cover.as_mut() {
+            frame.render_stateful_widget(StatefulImage::new(), chunks[0], cover);
+        } else {
+            frame.render_widget(
+                Paragraph::new("👤")
+                    .style(Style::default().fg(theme.fg_muted))
+                    .alignment(Alignment::Center),
+                chunks[0],
+            );
+        }
+
+        let name_style = if is_selected {
+            Style::default()
+                .fg(theme.bilibili_pink)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg_primary)
+        };
+
+        let max_w = chunks[1].width.saturating_sub(1) as usize;
+        let truncate = |s: &str| -> String {
+            if s.chars().count() > max_w {
+                s.chars().take(max_w.saturating_sub(1)).collect::<String>() + "…"
+            } else {
+                s.to_string()
+            }
+        };
+
+        let meta = format!(
+            "粉丝 {} · 视频 {} · {}",
+            self.fans,
+            self.video_count,
+            self.sign_text()
+        );
+
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(truncate(&self.title), name_style)),
+                Line::from(Span::styled(
+                    truncate(&meta),
+                    Style::default().fg(theme.fg_muted),
+                )),
+            ])
+            .wrap(Wrap { trim: true }),
+            chunks[1],
+        );
+    }
+
+    fn sign_text(&self) -> String {
+        if self.sign.is_empty() {
+            "无签名".to_string()
+        } else {
+            self.sign.clone()
+        }
+    }
 }
 
 /// Video card grid manager for async cover loading
@@ -237,7 +424,7 @@ impl VideoCardGrid {
             selected_index: 0,
             scroll_row: 0,
             columns: 3,
-            card_height: 12,
+            card_height: 16,
             picker,
             cover_tx,
             cover_rx,
@@ -384,13 +571,28 @@ impl VideoCardGrid {
                 continue;
             }
 
-            if let Some(pic_url) = self.cards[idx].pic_url.clone() {
+            let is_user = self.cards[idx].user_card;
+            let url = if is_user {
+                self.cards[idx].face_url.clone()
+            } else {
+                self.cards[idx].pic_url.clone()
+            };
+
+            if let Some(pic_url) = url {
                 self.pending_downloads.insert(idx);
                 let tx = self.cover_tx.clone();
                 let picker = Arc::clone(&self.picker);
 
                 tokio::spawn(async move {
-                    if let Some(img) = download_image(&pic_url).await {
+                    if let Some(mut img) = download_image(&pic_url).await {
+                        if is_user {
+                            // Crop avatar to a centered square
+                            let side = img.width().min(img.height());
+                            let x = (img.width() - side) / 2;
+                            let y = (img.height() - side) / 2;
+                            img = img.crop_imm(x, y, side, side);
+                            img = img.resize(384, 384, image::imageops::FilterType::Triangle);
+                        }
                         let protocol = picker.new_resize_protocol(img);
                         let _ = tx
                             .send(CoverResult {

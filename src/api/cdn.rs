@@ -552,25 +552,75 @@ fn speed_score(ratio: f64) -> f64 {
     }
 }
 
-pub async fn rank_streams(data: &PlayUrlData) -> Result<RankedStreams> {
-    let video = data
-        .dash
-        .video
+/// Stream id families used by Bilibili DASH responses.
+const HDR_STREAM_MIN_ID: i64 = 125; // 125 = HDR, 126 = Dolby Vision, 127 = 8K
+const HIRES_AUDIO_ID: i64 = 30252; // Hi-Res lossless
+
+/// Pick the best video stream for the given playback options.
+fn pick_video<'a>(
+    streams: &'a [DashStream],
+    options: crate::domain::playback::PlaybackOptions,
+) -> Option<&'a DashStream> {
+    let mut candidates: Vec<&DashStream> = streams
+        .iter()
+        .filter(|stream| {
+            if options.prefer_hdr {
+                // Prefer HDR family streams when enabled; ordinary streams are
+                // still allowed as a fallback for videos without HDR.
+                true
+            } else {
+                // Skip HDR / Dolby Vision / 8K when HDR is disabled.
+                stream.id < HDR_STREAM_MIN_ID
+            }
+        })
+        .collect();
+    if options.quality > 0 {
+        candidates.retain(|stream| stream.id <= options.quality);
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    let best = candidates
         .iter()
         .max_by_key(|stream| (stream.id, stream.bandwidth))
-        .ok_or_else(|| anyhow!("播放地址没有视频流"))?;
-    let mut audio = data.dash.audio.iter().collect::<Vec<_>>();
-    if let Some(dolby) = &data.dash.dolby {
+        .copied()?;
+    if options.prefer_hdr && best.id < HDR_STREAM_MIN_ID {
+        // No HDR stream available; fall back to the best ordinary stream.
+        return Some(best);
+    }
+    Some(best)
+}
+
+/// Pick the best audio stream for the given playback options.
+fn pick_audio<'a>(
+    data: &'a Dash,
+    options: crate::domain::playback::PlaybackOptions,
+) -> Option<&'a DashStream> {
+    if options.prefer_hires {
+        if let Some(flac) = &data.flac
+            && let Some(stream) = &flac.audio
+        {
+            return Some(stream);
+        }
+    }
+    let mut audio = data.audio.iter().collect::<Vec<_>>();
+    if let Some(dolby) = &data.dolby {
         audio.extend(dolby.audio.iter().flatten());
     }
-    if let Some(flac) = &data.dash.flac
-        && let Some(stream) = &flac.audio
-    {
-        audio.push(stream);
+    if !options.prefer_hires {
+        // Keep Hi-Res out of the automatic pick so the toggle is meaningful.
+        audio.retain(|stream| stream.id != HIRES_AUDIO_ID);
     }
-    let audio = audio
-        .into_iter()
-        .max_by_key(|stream| stream.bandwidth)
+    audio.into_iter().max_by_key(|stream| stream.bandwidth)
+}
+
+pub async fn rank_streams(
+    data: &PlayUrlData,
+    options: crate::domain::playback::PlaybackOptions,
+) -> Result<RankedStreams> {
+    let video = pick_video(&data.dash.video, options)
+        .ok_or_else(|| anyhow!("播放地址没有视频流"))?;
+    let audio = pick_audio(&data.dash, options)
         .ok_or_else(|| anyhow!("播放地址没有音频流"))?;
     let region_client = reqwest::Client::builder()
         .connect_timeout(Duration::from_millis(800))
@@ -647,6 +697,111 @@ mod tests {
         assert_eq!(value.probe_samples, 0);
         assert!(value.video_score.is_none());
         assert_eq!(value.catalog_reachable, None);
+    }
+
+    #[test]
+    fn pick_video_prefers_hdr_when_enabled() {
+        use crate::domain::playback::PlaybackOptions;
+        let streams = vec![
+            DashStream {
+                id: 120,
+                bandwidth: 10_000_000,
+                codecid: 12,
+                base_url: Some("https://a/4k".into()),
+                base_url_camel: None,
+                backup_url: None,
+                backup_url_camel: None,
+            },
+            DashStream {
+                id: 125,
+                bandwidth: 9_000_000,
+                codecid: 12,
+                base_url: Some("https://a/hdr".into()),
+                base_url_camel: None,
+                backup_url: None,
+                backup_url_camel: None,
+            },
+        ];
+        let auto = PlaybackOptions {
+            prefer_hdr: false,
+            ..Default::default()
+        };
+        assert_eq!(pick_video(&streams, auto).unwrap().id, 120);
+        let hdr = PlaybackOptions {
+            prefer_hdr: true,
+            ..Default::default()
+        };
+        assert_eq!(pick_video(&streams, hdr).unwrap().id, 125);
+    }
+
+    #[test]
+    fn pick_video_respects_quality_cap() {
+        use crate::domain::playback::PlaybackOptions;
+        let streams = vec![
+            DashStream {
+                id: 80,
+                bandwidth: 3_000_000,
+                codecid: 12,
+                base_url: Some("https://a/1080p".into()),
+                base_url_camel: None,
+                backup_url: None,
+                backup_url_camel: None,
+            },
+            DashStream {
+                id: 120,
+                bandwidth: 10_000_000,
+                codecid: 12,
+                base_url: Some("https://a/4k".into()),
+                base_url_camel: None,
+                backup_url: None,
+                backup_url_camel: None,
+            },
+        ];
+        let options = PlaybackOptions {
+            quality: 80,
+            ..Default::default()
+        };
+        assert_eq!(pick_video(&streams, options).unwrap().id, 80);
+    }
+
+    #[test]
+    fn pick_audio_respects_hires_flag() {
+        use crate::domain::playback::PlaybackOptions;
+        let flac = Flac {
+            audio: Some(DashStream {
+                id: 30252,
+                bandwidth: 2_000_000,
+                codecid: 0,
+                base_url: Some("https://a/hires".into()),
+                base_url_camel: None,
+                backup_url: None,
+                backup_url_camel: None,
+            }),
+        };
+        let data = Dash {
+            video: vec![],
+            audio: vec![DashStream {
+                id: 30216,
+                bandwidth: 320_000,
+                codecid: 0,
+                base_url: Some("https://a/192k".into()),
+                base_url_camel: None,
+                backup_url: None,
+                backup_url_camel: None,
+            }],
+            dolby: None,
+            flac: Some(flac),
+        };
+        let off = PlaybackOptions {
+            prefer_hires: false,
+            ..Default::default()
+        };
+        assert_eq!(pick_audio(&data, off).unwrap().id, 30216);
+        let on = PlaybackOptions {
+            prefer_hires: true,
+            ..Default::default()
+        };
+        assert_eq!(pick_audio(&data, on).unwrap().id, 30252);
     }
 
     #[test]

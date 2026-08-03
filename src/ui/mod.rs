@@ -26,7 +26,7 @@ pub use home::HomePage;
 pub use live::LivePage;
 pub use live_detail::LiveDetailPage;
 pub use login::LoginPage;
-pub use search::SearchPage;
+pub use search::{SearchMode, SearchPage};
 pub use settings::SettingsPage;
 pub use sidebar::{NavItem, Sidebar};
 pub use theme::{DEFAULT_THEME_ID, Theme, ThemeChoice};

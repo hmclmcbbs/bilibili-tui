@@ -188,6 +188,9 @@ pub struct BangumiEpisode {
     #[serde(default)]
     pub badge: String,
     pub cid: i64,
+    /// Episode duration in milliseconds (0 when the API omits it).
+    #[serde(default)]
+    pub duration: i64,
     #[serde(default)]
     pub cover: String,
     #[serde(default)]

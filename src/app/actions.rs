@@ -103,6 +103,7 @@ impl App {
                 aid,
                 cid,
                 duration,
+                playback,
             } => {
                 let session_id = self.allocate_playback_session();
                 self.playback.session_id = None;
@@ -115,6 +116,7 @@ impl App {
                     cid,
                     duration,
                     None,
+                    playback,
                     self.credentials.as_ref(),
                     self.config.danmaku.clone(),
                     self.playback_event_tx.clone(),
@@ -130,12 +132,29 @@ impl App {
                         self.playback.last_error = Some(format!("启动播放器失败: {error:#}"));
                     }
                 }
+                // Refresh stream support info on the detail page after playback.
+                let mut probe = false;
+                if let Page::VideoDetail(detail_page) = &mut self.current_page
+                    && detail_page.bvid == bvid
+                {
+                    detail_page.streams_probing = true;
+                    probe = true;
+                }
+                if probe {
+                    let req_id = self.next_request_id("video_detail");
+                    self.send_network_command(network::NetworkCommand::ProbeVideoStreams {
+                        req_id,
+                        bvid: bvid.clone(),
+                        cid,
+                    });
+                }
             }
             AppAction::PlayVideoWithPages {
                 bvid,
                 aid,
                 pages,
                 current_index,
+                playback,
             } => {
                 // Play only the selected episode
                 if current_index < pages.len() {
@@ -151,6 +170,7 @@ impl App {
                         page.cid,
                         page.duration,
                         Some(page.page),
+                        playback,
                         self.credentials.as_ref(),
                         self.config.danmaku.clone(),
                         self.playback_event_tx.clone(),
@@ -167,10 +187,21 @@ impl App {
                         }
                     }
                     // Update current page index in video detail page
+                    let mut probe = None;
                     if let Page::VideoDetail(detail_page) = &mut self.current_page
                         && detail_page.bvid == bvid
                     {
                         detail_page.current_page_index = current_index;
+                        detail_page.streams_probing = true;
+                        probe = Some(pages[current_index].cid);
+                    }
+                    if let Some(cid) = probe {
+                        let req_id = self.next_request_id("video_detail");
+                        self.send_network_command(network::NetworkCommand::ProbeVideoStreams {
+                            req_id,
+                            bvid: bvid.clone(),
+                            cid,
+                        });
                     }
                 }
             }
@@ -239,6 +270,7 @@ impl App {
                         page.page = 1;
                         page.loading = true;
                         page.show_hot_list = false;
+                        page.mode = crate::ui::SearchMode::Video;
                         start_search = true;
                     }
                     Page::Search(page) => {
@@ -246,6 +278,7 @@ impl App {
                         page.page = 1;
                         page.loading = true;
                         page.show_hot_list = false;
+                        page.mode = crate::ui::SearchMode::Video;
                         start_search = true;
                     }
                     _ => {}
@@ -253,6 +286,37 @@ impl App {
                 if start_search {
                     let req_id = self.next_request_id("search");
                     self.send_network_command(network::NetworkCommand::Search {
+                        req_id,
+                        keyword,
+                        page: 1,
+                    });
+                }
+            }
+            AppAction::SearchUsers(keyword) => {
+                let mut start_search = false;
+                match &mut self.current_page {
+                    Page::Home(home) => {
+                        let page = home.search_mut();
+                        page.query = keyword.clone();
+                        page.user_page = 1;
+                        page.user_loading = true;
+                        page.show_hot_list = false;
+                        page.mode = crate::ui::SearchMode::User;
+                        start_search = true;
+                    }
+                    Page::Search(page) => {
+                        page.query = keyword.clone();
+                        page.user_page = 1;
+                        page.user_loading = true;
+                        page.show_hot_list = false;
+                        page.mode = crate::ui::SearchMode::User;
+                        start_search = true;
+                    }
+                    _ => {}
+                }
+                if start_search {
+                    let req_id = self.next_request_id("search");
+                    self.send_network_command(network::NetworkCommand::SearchUsers {
                         req_id,
                         keyword,
                         page: 1,
@@ -409,6 +473,50 @@ impl App {
                             _ => crate::api::favorite::FavoriteOrder::RecentlyFavorited,
                         },
                     });
+                }
+            }
+            AppAction::OpenSeriesFolder(series_id) => {
+                if let Page::Up(page) = &mut self.current_page {
+                    if series_id == 0 {
+                        // 首次进入合集 tab，加载合集列表
+                        let mid = page.mid;
+                        let req_id = self.next_request_id("series_list");
+                        self.send_network_command(network::NetworkCommand::LoadSeriesList {
+                            req_id,
+                            mid,
+                            page: 1,
+                        });
+                    } else {
+                        // 打开具体合集
+                        let mid = page.mid;
+                        let req_id = self.next_request_id("series_archives");
+                        self.send_network_command(
+                            network::NetworkCommand::LoadSeriesArchives {
+                                req_id,
+                                mid,
+                                series_id,
+                                page: 1,
+                            },
+                        );
+                    }
+                }
+            }
+            AppAction::LoadMoreSeriesVideos => {
+                if let Page::Up(page) = &mut self.current_page
+                    && let Some(series_id) = page.active_series
+                {
+                    let next_page = page.series_page + 1;
+                    page.loading_more = true;
+                    let mid = page.mid;
+                    let req_id = self.next_request_id("series_archives");
+                    self.send_network_command(
+                        network::NetworkCommand::LoadSeriesArchives {
+                            req_id,
+                            mid,
+                            series_id,
+                            page: next_page,
+                        },
+                    );
                 }
             }
             AppAction::SelectFavoriteSource(source) => {
@@ -571,6 +679,41 @@ impl App {
                 if let Some((keyword, next_page)) = command {
                     let req_id = self.next_request_id("search");
                     self.send_network_command(network::NetworkCommand::Search {
+                        req_id,
+                        keyword,
+                        page: next_page,
+                    });
+                }
+            }
+            AppAction::LoadMoreSearchUsers => {
+                let mut command = None;
+                match &mut self.current_page {
+                    Page::Home(home) => {
+                        let page = home.search_mut();
+                        if page.user_loading_more || page.query.is_empty() || page.show_hot_list {
+                            return;
+                        }
+                        if page.user_grid.cards.len() >= page.user_total as usize {
+                            return;
+                        }
+                        page.user_loading_more = true;
+                        command = Some((page.query.clone(), page.user_page + 1));
+                    }
+                    Page::Search(page) => {
+                        if page.user_loading_more || page.query.is_empty() || page.show_hot_list {
+                            return;
+                        }
+                        if page.user_grid.cards.len() >= page.user_total as usize {
+                            return;
+                        }
+                        page.user_loading_more = true;
+                        command = Some((page.query.clone(), page.user_page + 1));
+                    }
+                    _ => {}
+                }
+                if let Some((keyword, next_page)) = command {
+                    let req_id = self.next_request_id("search");
+                    self.send_network_command(network::NetworkCommand::SearchUsers {
                         req_id,
                         keyword,
                         page: next_page,
@@ -834,49 +977,59 @@ impl App {
                 }
             }
             AppAction::PlayLive { room_id, title: _ } => {
-                let existing_hub = self
-                    .live_danmaku_hub
-                    .as_ref()
-                    .filter(|hub| hub.room_id() == room_id)
-                    .cloned();
-                let danmaku_hub = if existing_hub.is_some() {
-                    existing_hub
-                } else {
-                    let uid = self
-                        .credentials
-                        .as_ref()
-                        .and_then(|credentials| credentials.dede_user_id.parse::<i64>().ok())
-                        .unwrap_or(0);
-                    match crate::api::LiveDanmakuHub::connect(&self.api_client, room_id, uid).await
-                    {
-                        Ok(hub) => {
-                            self.live_danmaku_hub = Some(Arc::clone(&hub));
-                            Some(hub)
-                        }
-                        Err(error) => {
-                            if let Page::LiveDetail(page) = &mut self.current_page {
-                                page.set_ws_error(format!("WS连接失败: {error}"));
+                let start_result = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    async {
+                        let existing_hub = self
+                            .live_danmaku_hub
+                            .as_ref()
+                            .filter(|hub| hub.room_id() == room_id)
+                            .cloned();
+                        let danmaku_hub = if existing_hub.is_some() {
+                            existing_hub
+                        } else {
+                            let uid = self
+                                .credentials
+                                .as_ref()
+                                .and_then(|credentials| credentials.dede_user_id.parse::<i64>().ok())
+                                .unwrap_or(0);
+                            match crate::api::LiveDanmakuHub::connect(&self.api_client, room_id, uid).await
+                            {
+                                Ok(hub) => {
+                                    self.live_danmaku_hub = Some(Arc::clone(&hub));
+                                    Some(hub)
+                                }
+                                Err(error) => {
+                                    if let Page::LiveDetail(page) = &mut self.current_page {
+                                        page.set_ws_error(format!("WS连接失败: {error}"));
+                                    }
+                                    None
+                                }
                             }
-                            None
+                        };
+                        match media::play_live(
+                            self.api_client.clone(),
+                            room_id,
+                            danmaku_hub,
+                            self.danmaku_config_tx.subscribe(),
+                        )
+                        .await
+                        {
+                            Ok(()) => {
+                                self.playback.status = crate::domain::playback::PlaybackStatus::Playing;
+                                self.playback.last_error = None;
+                            }
+                            Err(error) => {
+                                self.playback.status = crate::domain::playback::PlaybackStatus::Failed;
+                                self.playback.last_error = Some(format!("启动直播失败: {error:#}"));
+                            }
                         }
-                    }
-                };
-                match media::play_live(
-                    self.api_client.clone(),
-                    room_id,
-                    danmaku_hub,
-                    self.danmaku_config_tx.subscribe(),
+                    },
                 )
-                .await
-                {
-                    Ok(()) => {
-                        self.playback.status = crate::domain::playback::PlaybackStatus::Playing;
-                        self.playback.last_error = None;
-                    }
-                    Err(error) => {
-                        self.playback.status = crate::domain::playback::PlaybackStatus::Failed;
-                        self.playback.last_error = Some(format!("启动直播失败: {error:#}"));
-                    }
+                .await;
+                if start_result.is_err() {
+                    self.playback.status = crate::domain::playback::PlaybackStatus::Failed;
+                    self.playback.last_error = Some("直播启动超时".to_string());
                 }
             }
             AppAction::SwitchToBangumi => {
@@ -921,7 +1074,13 @@ impl App {
                 season_id: _,
                 title: _,
             } => {
-                let _ = media::play_bangumi_episode(ep_id, self.credentials.as_ref()).await;
+                let _ = media::play_bangumi_episode(
+                    self.api_client.clone(),
+                    ep_id,
+                    self.credentials.as_ref(),
+                    self.danmaku_config_tx.borrow().clone(),
+                )
+                .await;
             }
             AppAction::None => {}
         }

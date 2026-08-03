@@ -3,6 +3,7 @@ use crate::api::danmaku::VideoDanmaku;
 use crate::api::live_danmaku_hub::LiveDanmakuHub;
 use crate::api::live_ws::LiveMessage;
 use crate::domain::playback::{PlayOrder, PlaybackEvent, PlaylistItem};
+use crate::domain::playback::PlaybackOptions;
 use crate::storage::{Credentials, DanmakuConfig};
 use anyhow::Result;
 use std::collections::VecDeque;
@@ -28,6 +29,99 @@ static LIVE_SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static MPV_IPC_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const LIVE_DANMAKU_SCRIPT: &str = include_str!("live_danmaku.lua");
 
+/// Apply the configured mpv video output.
+///
+/// Only an explicitly configured `mpv_vo` (e.g. "kitty") is honored. We no
+/// longer auto-detect the terminal: mpv is spawned as a child of this TUI with
+/// stdout nulled, so a terminal VO like kitty has no way to write frames back
+/// into the terminal and would silently render nothing. Auto-detection caused
+/// exactly that bug (no window, no terminal output). External window mode
+/// (the default, `--force-window=immediate`) stays intact unless the user
+/// explicitly opts into a terminal VO via config.
+fn apply_mpv_vo(cmd: &mut Command) {
+    let vo = crate::storage::load_config()
+        .ok()
+        .and_then(|config| config.mpv_vo)
+        .filter(|value| !value.trim().is_empty());
+    let Some(vo) = vo else {
+        return;
+    };
+    cmd.arg(format!("--vo={vo}"));
+    // A terminal VO draws inside the terminal; an external window would cover
+    // the TUI and steal focus.
+    cmd.arg("--force-window=no");
+    cmd.arg("--terminal=yes");
+}
+
+/// Pick mpv's hardware decoding mode.
+///
+/// An explicitly configured `mpv_hwdec` (e.g. "nvdec", "vaapi", "no") wins.
+/// Otherwise auto-detect: NVIDIA GPUs get "nvdec" so the discrete card does
+/// the decode instead of falling back to CPU (which is what `auto-safe`
+/// frequently does on hybrid systems); everything else keeps "auto-safe".
+fn apply_mpv_hwdec(cmd: &mut Command) {
+    let configured = crate::storage::load_config()
+        .ok()
+        .and_then(|config| config.mpv_hwdec)
+        .filter(|value| !value.trim().is_empty());
+    let mode = match configured {
+        Some(mode) => mode,
+        None => {
+            if has_nvidia_gpu() {
+                "nvdec".to_string()
+            } else {
+                "auto-safe".to_string()
+            }
+        }
+    };
+    cmd.arg(format!("--hwdec={mode}"));
+}
+
+/// Detect an NVIDIA GPU through the kernel DRM devices. This covers both
+/// nouveau and the proprietary nvidia-drm driver (which exposes the same
+/// vendor id, 0x10de).
+fn has_nvidia_gpu() -> bool {
+    let Ok(entries) = std::fs::read_dir("/sys/class/drm") else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let device = entry.path().join("device");
+        let vendor = device.join("vendor");
+        std::fs::read_to_string(vendor)
+            .map(|value| value.trim() == "0x10de")
+            .unwrap_or(false)
+    })
+}
+
+/// Pick mpv's stdout based on the configured video output.
+///
+/// A terminal VO (e.g. `--vo=kitty`) renders frames by writing the Kitty
+/// Graphics Protocol to the controlling terminal. The default null stdout
+/// would silently swallow those frames, so when the user opts into a
+/// terminal VO we point mpv's stdout at /dev/tty instead. stderr is left
+/// untouched by the caller so existing piped diagnostics keep working.
+fn mpv_stdout() -> Stdio {
+    let terminal_vo = crate::storage::load_config()
+        .ok()
+        .and_then(|config| config.mpv_vo)
+        .filter(|value| !value.trim().is_empty())
+        .is_some();
+    if !terminal_vo {
+        return Stdio::null();
+    }
+    #[cfg(unix)]
+    if let Ok(tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+        return Stdio::from(tty);
+    }
+    #[cfg(not(unix))]
+    {
+        return Stdio::inherit();
+    }
+    // Unix fallback: inherit our stdio (bilibili-tui itself is attached to
+    // the terminal when run interactively).
+    Stdio::inherit()
+}
+
 /// Play a video using mpv with yt-dlp and report watch progress
 /// This function spawns mpv in a background task to avoid blocking the TUI
 #[allow(clippy::too_many_arguments)]
@@ -38,6 +132,7 @@ pub async fn play_video(
     cid: i64,
     duration: i64,
     page_num: Option<i32>,
+    playback: PlaybackOptions,
     credentials: Option<&Credentials>,
     danmaku_config: DanmakuConfig,
     playback_event_tx: Sender<PlaybackEvent>,
@@ -48,27 +143,41 @@ pub async fn play_video(
         _ => format!("https://www.bilibili.com/video/{}", bvid),
     };
 
-    // Report watch start
-    let _ = crate::api::heartbeat::report_watch_start(&api_client, aid, cid, bvid, duration).await;
+    // Report watch start in the background: it is a fire-and-forget
+    // network call and must not delay mpv startup.
+    let watch_bvid = bvid.to_string();
+    let watch_api = api_client.clone();
+    tokio::spawn(async move {
+        let _ =
+            crate::api::heartbeat::report_watch_start(&watch_api, aid, cid, &watch_bvid, duration)
+                .await;
+    });
 
     let start_ts = chrono::Utc::now().timestamp();
 
-    let mut media_proxy = match api_client.get_play_url(bvid, cid).await {
-        Ok(play_url) => match crate::api::cdn::rank_streams(&play_url).await {
-            Ok(streams) => proxy::MediaProxy::start(streams).await.ok(),
-            Err(_) => None,
+    // Fetch the play URL and the danmaku list concurrently. mpv only needs
+    // the media stream to start; danmaku is streamed to the Lua script over
+    // IPC after playback begins, so waiting for the full history here would
+    // only add latency.
+    let (mut media_proxy, danmaku) = tokio::join!(
+        async {
+            match api_client.get_play_url(bvid, cid, playback).await {
+                Ok(play_url) => match crate::api::cdn::rank_streams(&play_url, playback).await {
+                    Ok(streams) => proxy::MediaProxy::start(streams).await.ok(),
+                    Err(_) => None,
+                },
+                Err(_) => None,
+            }
         },
-        Err(_) => None,
-    };
-
-    let danmaku = api_client.get_video_danmaku(cid).await.unwrap_or_default();
+        async { api_client.get_video_danmaku(cid, duration).await.unwrap_or_default() },
+    );
     let ipc_path = mpv_ipc_path("bilibili-tui-mpv", &cid.to_string());
     remove_stale_mpv_ipc(&ipc_path);
     let danmaku_script_path = create_live_danmaku_script()?;
 
     let mut cmd = Command::new("mpv");
 
-    cmd.stdout(Stdio::null());
+    cmd.stdout(mpv_stdout());
     cmd.stderr(Stdio::piped());
 
     let cookie_path_to_clean = if let Some(creds) = credentials {
@@ -85,9 +194,8 @@ pub async fn play_video(
     cmd.arg("--force-window=immediate");
     // Use MPV's low-latency profile for Bilibili VOD playback.
     cmd.arg("--profile=low-latency");
-    // The TUI owns VOD danmaku rendering through the same OSD script used by
-    // live playback. Do not pass CID to global MPV scripts, which would add a
-    // second ASS subtitle track.
+    // Enable hardware decoding with automatic fallback to software.
+    apply_mpv_hwdec(&mut cmd);
     cmd.arg(format!("--referrer={webpage_url}"));
     cmd.arg(format!("--http-header-fields=Referer: {webpage_url}"));
     cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
@@ -102,6 +210,7 @@ pub async fn play_video(
         cmd.arg("--ytdl-format=bestvideo+bestaudio/best");
         cmd.arg(&webpage_url);
     }
+    apply_mpv_vo(&mut cmd);
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -142,7 +251,7 @@ pub async fn play_video(
         let mut current_cdn_corrupted = false;
         let mut next_danmaku = 0usize;
         let mut last_danmaku_position = 0.0;
-        let mut danmaku_interval = tokio::time::interval(Duration::from_millis(20));
+        let mut danmaku_interval = tokio::time::interval(Duration::from_millis(50));
         let mut danmaku_ready = false;
 
         loop {
@@ -308,8 +417,21 @@ async fn send_video_danmaku_batch(
             .iter()
             .map(|message| {
                 serde_json::json!({
+                    "time": message.time,
                     "text": message.text,
                     "color": message.color,
+                    "mode": message.mode,
+                    "x": message.x,
+                    "y": message.y,
+                    "x2": message.x2,
+                    "y2": message.y2,
+                    "rotation": message.rotation,
+                    "size": message.size,
+                    "duration": message.duration_ms,
+                    "font": message.font_family,
+                    "alpha": message.alpha,
+                    "alpha_to": message.alpha_to,
+                    "border": message.border,
                 })
             })
             .collect::<Vec<_>>(),
@@ -643,16 +765,18 @@ pub async fn play_playlist(
     log_skipped_playlist_items(&skipped);
 
     let mut cmd = Command::new("mpv");
-    cmd.stdout(Stdio::null());
+    cmd.stdout(mpv_stdout());
     cmd.stderr(Stdio::piped());
     cmd.arg("--idle=yes");
     cmd.arg("--force-window=immediate");
+    apply_mpv_hwdec(&mut cmd);
     cmd.arg("--msg-level=ffmpeg=error,vd=warn");
     cmd.arg("--ytdl=no");
     cmd.arg("--script-opts-append=double_video_fps=yes");
     let ipc_path = mpv_ipc_path("bilibili-tui-playlist", &session_id.to_string());
     remove_stale_mpv_ipc(&ipc_path);
     cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
+    apply_mpv_vo(&mut cmd);
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -716,8 +840,10 @@ async fn prepare_playlist_item(
             )
         }
     };
-    let play_url = api_client.get_play_url(&item.bvid, cid).await?;
-    let streams = crate::api::cdn::rank_streams(&play_url).await?;
+    let play_url = api_client
+        .get_play_url(&item.bvid, cid, PlaybackOptions::default())
+        .await?;
+    let streams = crate::api::cdn::rank_streams(&play_url, PlaybackOptions::default()).await?;
     let proxy = proxy::MediaProxy::start(streams).await?;
     Ok(PreparedPlaylistItem {
         cid,
@@ -1067,13 +1193,38 @@ fn ordered_playlist(
     Ok((items, start_index))
 }
 
-/// Play a bangumi episode using mpv with yt-dlp
-/// This function spawns mpv in a background task to avoid blocking the TUI
-pub async fn play_bangumi_episode(ep_id: i64, credentials: Option<&Credentials>) -> Result<()> {
+/// Play a bangumi episode using mpv with yt-dlp, with full danmaku support.
+/// This function spawns mpv in a background task to avoid blocking the TUI.
+pub async fn play_bangumi_episode(
+    api_client: Arc<ApiClient>,
+    ep_id: i64,
+    credentials: Option<&Credentials>,
+    danmaku_config: DanmakuConfig,
+) -> Result<()> {
+    // Resolve the episode first: we need its cid to fetch danmaku.
+    let episode = api_client.get_bangumi_episode_info(ep_id).await?;
+    let cid = episode.cid;
+    let duration_secs = if episode.duration > 0 {
+        episode.duration / 1000
+    } else {
+        3600
+    };
+
     let video_url = format!("https://www.bilibili.com/bangumi/play/ep{}", ep_id);
 
+    // Fetch the danmaku history before spawning mpv; the Lua script renders
+    // it incrementally over IPC once playback starts.
+    let danmaku = api_client
+        .get_video_danmaku(cid, duration_secs)
+        .await
+        .unwrap_or_default();
+
+    let ipc_path = mpv_ipc_path("bilibili-tui-bangumi", &ep_id.to_string());
+    remove_stale_mpv_ipc(&ipc_path);
+    let danmaku_script_path = create_live_danmaku_script()?;
+
     let mut cmd = Command::new("mpv");
-    cmd.stdout(Stdio::null());
+    cmd.stdout(mpv_stdout());
     cmd.stderr(Stdio::null());
 
     let cookie_path_to_clean = if let Some(creds) = credentials {
@@ -1087,10 +1238,14 @@ pub async fn play_bangumi_episode(ep_id: i64, credentials: Option<&Credentials>)
         None
     };
 
-    cmd.arg("--ytdl-format=bestvideo+bestaudio/best");
     cmd.arg("--force-window=immediate");
-    cmd.arg("--script-opts-append=double_video_fps=yes");
+    apply_mpv_hwdec(&mut cmd);
+    cmd.arg("--script-opts-append=double_video_fps=no");
+    cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
+    cmd.arg(format!("--script={}", danmaku_script_path.display()));
+    cmd.arg("--ytdl-format=bestvideo+bestaudio/best");
     cmd.arg(&video_url);
+    apply_mpv_vo(&mut cmd);
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -1098,17 +1253,66 @@ pub async fn play_bangumi_episode(ep_id: i64, credentials: Option<&Credentials>)
             if let Some(path) = &cookie_path_to_clean {
                 let _ = crate::storage::remove_cookie_export(path);
             }
+            let _ = std::fs::remove_file(&danmaku_script_path);
             return Err(error.into());
         }
     };
 
     tokio::spawn(async move {
-        let _ = child.wait().await;
+        // Stream danmaku to the Lua script as playback advances. The loop is
+        // deliberately simpler than play_video's: no heartbeat, no CDN
+        // failover, just time-gated delivery over the mpv IPC socket.
+        let mut next_danmaku = 0usize;
+        let mut last_danmaku_position = 0.0;
+        let mut danmaku_interval = tokio::time::interval(Duration::from_millis(50));
+        let mut danmaku_ready = false;
+
+        loop {
+            tokio::select! {
+                _ = danmaku_interval.tick(), if next_danmaku < danmaku.len() => {
+                    if let Some(position) = mpv_time_pos(&ipc_path).await {
+                        if !danmaku_ready {
+                            danmaku_ready = send_live_danmaku_config(
+                                &ipc_path,
+                                &danmaku_script_path,
+                                &danmaku_config,
+                            ).await.is_ok();
+                            if !danmaku_ready {
+                                continue;
+                            }
+                        }
+                        if position + 0.25 < last_danmaku_position {
+                            next_danmaku = danmaku.partition_point(|message| message.time < position);
+                        }
+                        last_danmaku_position = position;
+                        let mut due_messages = Vec::new();
+                        while let Some(message) = danmaku.get(next_danmaku)
+                            && message.time <= position + 0.02
+                        {
+                            due_messages.push(message.clone());
+                            next_danmaku += 1;
+                        }
+                        let _ = send_video_danmaku_batch(
+                            &ipc_path,
+                            &danmaku_script_path,
+                            &due_messages,
+                        )
+                        .await;
+                    }
+                }
+                result = child.wait() => {
+                    let _ = result;
+                    break;
+                }
+            }
+        }
 
         // Cleanup cookie file
         if let Some(path) = cookie_path_to_clean {
             let _ = crate::storage::remove_cookie_export(&path);
         }
+        let _ = tokio::fs::remove_file(&ipc_path).await;
+        let _ = tokio::fs::remove_file(&danmaku_script_path).await;
     });
 
     Ok(())
@@ -1137,45 +1341,54 @@ pub async fn play_live(
             return Err(error);
         }
     };
-    if let Err(error) = wait_for_ipc(&ipc_path, &mut child).await {
-        shutdown_live_child(&ipc_path, &mut child, Duration::from_secs(1)).await;
-        let _ = tokio::fs::remove_file(&ipc_path).await;
-        let _ = tokio::fs::remove_file(&danmaku_script_path).await;
-        return Err(error);
-    }
     let initial_danmaku_config = danmaku_config_rx.borrow_and_update().clone();
-    if let Err(error) =
-        send_live_danmaku_config(&ipc_path, &danmaku_script_path, &initial_danmaku_config).await
-    {
-        write_live_diagnostic(room_id, &format!("live danmaku config IPC error: {error}"));
-    }
+    let first_url = first_url.clone();
 
-    let (end_tx, mut end_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let observer_path = ipc_path.clone();
-    let observer = tokio::spawn(async move {
-        let _ = observe_end_files(&observer_path, end_tx, ready_tx).await;
-    });
-    if !matches!(timeout(Duration::from_secs(2), ready_rx).await, Ok(Ok(()))) {
-        observer.abort();
-        shutdown_live_child(&ipc_path, &mut child, Duration::from_secs(1)).await;
-        let _ = tokio::fs::remove_file(&ipc_path).await;
-        let _ = tokio::fs::remove_file(&danmaku_script_path).await;
-        anyhow::bail!("直播 MPV 事件监听启动超时");
-    }
-    if let Err(error) = load_live_and_wait(&ipc_path, first_url).await {
-        observer.abort();
-        shutdown_live_child(&ipc_path, &mut child, Duration::from_secs(1)).await;
-        let _ = tokio::fs::remove_file(&ipc_path).await;
-        let _ = tokio::fs::remove_file(&danmaku_script_path).await;
-        return Err(error);
-    }
-
-    let mut danmaku_rx = danmaku_hub.as_ref().map(|hub| hub.subscribe());
+    // The rest of live startup (waiting for the IPC socket, loading the
+    // stream, wiring the observer) happens in a background task. Keeping it
+    // out of the caller's await chain prevents the TUI from freezing when
+    // mpv is slow to come up or the IPC socket never appears.
     tokio::spawn(async move {
         // Keep the shared connection alive even if the application switches to
         // another room while this MPV instance is still playing.
         let _danmaku_hub = danmaku_hub;
+        if let Err(error) = wait_for_ipc(&ipc_path, &mut child).await {
+            shutdown_live_child(&ipc_path, &mut child, Duration::from_secs(1)).await;
+            let _ = tokio::fs::remove_file(&ipc_path).await;
+            let _ = tokio::fs::remove_file(&danmaku_script_path).await;
+            write_live_diagnostic(room_id, &format!("MPV IPC not ready: {error}"));
+            return;
+        }
+        if let Err(error) =
+            send_live_danmaku_config(&ipc_path, &danmaku_script_path, &initial_danmaku_config).await
+        {
+            write_live_diagnostic(room_id, &format!("live danmaku config IPC error: {error}"));
+        }
+
+        let (end_tx, mut end_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let observer_path = ipc_path.clone();
+        let observer = tokio::spawn(async move {
+            let _ = observe_end_files(&observer_path, end_tx, ready_tx).await;
+        });
+        if !matches!(timeout(Duration::from_secs(2), ready_rx).await, Ok(Ok(()))) {
+            observer.abort();
+            shutdown_live_child(&ipc_path, &mut child, Duration::from_secs(1)).await;
+            let _ = tokio::fs::remove_file(&ipc_path).await;
+            let _ = tokio::fs::remove_file(&danmaku_script_path).await;
+            write_live_diagnostic(room_id, "MPV event observer startup timed out");
+            return;
+        }
+        if let Err(error) = load_live_and_wait(&ipc_path, &first_url).await {
+            observer.abort();
+            shutdown_live_child(&ipc_path, &mut child, Duration::from_secs(1)).await;
+            let _ = tokio::fs::remove_file(&ipc_path).await;
+            let _ = tokio::fs::remove_file(&danmaku_script_path).await;
+            write_live_diagnostic(room_id, &format!("failed to load live stream: {error}"));
+            return;
+        }
+
+        let mut danmaku_rx = _danmaku_hub.as_ref().map(|hub| hub.subscribe());
         let mut next_url = 1usize;
         let mut consecutive_failures = 0usize;
         let mut loaded_at = Instant::now();
@@ -1341,7 +1554,7 @@ fn spawn_live_mpv(
     danmaku_script_path: &std::path::Path,
 ) -> Result<tokio::process::Child> {
     let mut cmd = Command::new("mpv");
-    cmd.stdout(Stdio::null());
+    cmd.stdout(mpv_stdout());
     cmd.stderr(Stdio::null());
     configure_live_mpv(&mut cmd, ipc_path);
     cmd.arg(format!("--script={}", danmaku_script_path.display()));
@@ -1370,7 +1583,8 @@ fn configure_live_mpv(cmd: &mut Command, ipc_path: &std::path::Path) {
     cmd.arg("--demuxer-readahead-secs=3600");
     cmd.arg("--network-timeout=10");
     cmd.arg("--stream-lavf-o=reconnect=1,reconnect_streamed=1,reconnect_delay_max=5");
-    cmd.arg("--hwdec=auto-safe");
+    apply_mpv_hwdec(cmd);
+    apply_mpv_vo(cmd);
     #[cfg(target_os = "macos")]
     if let Some(font_dir) = macos_live_font_dir() {
         // Load the selected public Chinese font asset directly and disable
@@ -1591,7 +1805,7 @@ mod playlist_tests {
         assert!(LIVE_DANMAKU_SCRIPT.contains("create_osd_overlay"));
         assert!(LIVE_DANMAKU_SCRIPT.contains("\\pos("));
         assert!(LIVE_DANMAKU_SCRIPT.contains("observe_property(\"display-fps\""));
-        assert!(LIVE_DANMAKU_SCRIPT.contains("add_periodic_timer(1 / fps"));
+        assert!(LIVE_DANMAKU_SCRIPT.contains("add_periodic_timer(1 / rate"));
         assert!(LIVE_DANMAKU_SCRIPT.contains("get_property_number(\"display-fps\""));
         assert!(LIVE_DANMAKU_SCRIPT.contains("video-reconfig"));
         assert!(!LIVE_DANMAKU_SCRIPT.contains("sub-reload"));
@@ -1679,8 +1893,11 @@ mod playlist_tests {
         let client = ApiClient::new();
         let bvid = "BV1cP7j64E37";
         let info = client.get_video_info(bvid).await.expect("video info");
-        let play_url = client.get_play_url(bvid, info.cid).await.expect("playurl");
-        let streams = crate::api::cdn::rank_streams(&play_url)
+        let play_url = client
+            .get_play_url(bvid, info.cid, PlaybackOptions::default())
+            .await
+            .expect("playurl");
+        let streams = crate::api::cdn::rank_streams(&play_url, PlaybackOptions::default())
             .await
             .expect("rank CDN streams");
         assert!(streams.video.len() > 1, "test needs a backup video CDN");

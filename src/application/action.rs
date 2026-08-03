@@ -3,6 +3,7 @@ use crate::api::recommend::HomeFeed;
 use crate::api::space::SpaceVideoOrder;
 use crate::api::video::VideoPage;
 use crate::domain::playback::{PlayOrder, PlaylistItem, PlaylistSource};
+use crate::domain::playback::PlaybackOptions;
 use crate::infrastructure::persistence::{Credentials, DanmakuConfig, Keybindings};
 use crate::presentation::tui::DynamicTab;
 
@@ -30,6 +31,7 @@ pub enum AppAction {
         aid: i64,
         cid: i64,
         duration: i64,
+        playback: PlaybackOptions,
     },
     /// Play a video with page info for auto-play next episode
     PlayVideoWithPages {
@@ -37,6 +39,7 @@ pub enum AppAction {
         aid: i64,
         pages: Vec<VideoPage>,
         current_index: usize,
+        playback: PlaybackOptions,
     },
     PlayPlaylist {
         items: Vec<PlaylistItem>,
@@ -63,6 +66,8 @@ pub enum AppAction {
     CancelPendingLoads,
     /// Search for videos
     Search(String),
+    /// Search for users (UP主)
+    SearchUsers(String),
     /// Refresh dynamic feed
     RefreshDynamic,
     /// Open video detail page (bvid, aid)
@@ -75,6 +80,8 @@ pub enum AppAction {
     OpenFavoriteFolder(i64),
     SwitchFavoriteOrder(FavoriteOrder),
     LoadMoreFavoriteResources,
+    OpenSeriesFolder(i64),
+    LoadMoreSeriesVideos,
     SelectFavoriteSource(FavoriteSource),
     LoadMoreFavorites,
     /// Open dynamic detail page for image/text dynamics (dynamic_id)
@@ -85,6 +92,8 @@ pub enum AppAction {
     LoadMoreRecommendations,
     /// Load more search results
     LoadMoreSearch,
+    /// Load more user search results
+    LoadMoreSearchUsers,
     /// Load more dynamic items
     LoadMoreDynamic,
     /// Load more history items
