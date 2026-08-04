@@ -232,6 +232,11 @@ pub enum NetworkEvent {
         related_videos: Vec<RelatedVideoItem>,
         hdr_supported: Option<bool>,
         hires_supported: Option<bool>,
+        liked: bool,
+        coined: i32,
+        favorited: bool,
+        default_media_id: Option<i64>,
+        interaction_error: Option<String>,
     },
     VideoStreamSupportLoaded {
         req_id: u64,
@@ -927,7 +932,14 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 .and_then(|pages| pages.first())
                 .map(|page| page.cid)
                 .unwrap_or(video_info.cid);
-            let ((comments, has_more_comments), related_videos, (hdr_supported, hires_supported)) =
+            let (
+                (comments, has_more_comments),
+                related_videos,
+                (hdr_supported, hires_supported),
+                like_result,
+                coin_result,
+                fav_result,
+            ) =
                 tokio::join!(
                     async {
                         match api_client.get_comments(aid, 1).await {
@@ -944,7 +956,40 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                     },
                     async { api_client.get_related_videos(&bvid).await.unwrap_or_default() },
                     async { probe_stream_support(&api_client, &bvid, cid).await },
+                    async {
+                        match api_client.get_video_like_status(&bvid).await {
+                            Ok(v) => Ok(v),
+                            Err(_) => Err("点赞状态: 需要登录"),
+                        }
+                    },
+                    async {
+                        match api_client.get_video_coin_status(&bvid).await {
+                            Ok(v) => Ok(v),
+                            Err(_) => Err("投币状态: 需要登录"),
+                        }
+                    },
+                    async {
+                        match api_client.get_default_favorite_folder(aid).await {
+                            Ok((mid, fav)) => Ok((mid, fav)),
+                            Err(_) => Err("收藏状态: 需要登录"),
+                        }
+                    },
                 );
+            let liked = like_result.unwrap_or(false);
+            let coined = coin_result.unwrap_or(0);
+            let (default_media_id, favorited) = match fav_result {
+                Ok((mid, fav)) => (Some(mid), fav),
+                Err(_) => (None, false),
+            };
+            let mut interaction_errors = Vec::new();
+            if let Err(e) = &like_result { interaction_errors.push(*e); }
+            if let Err(e) = &coin_result { interaction_errors.push(*e); }
+            if let Err(e) = &fav_result { interaction_errors.push(*e); }
+            let interaction_error = if interaction_errors.is_empty() {
+                None
+            } else {
+                Some(interaction_errors.join(", "))
+            };
             NetworkEvent::VideoDetailLoaded {
                 req_id,
                 bvid,
@@ -954,6 +999,11 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 related_videos,
                 hdr_supported,
                 hires_supported,
+                liked,
+                coined,
+                favorited,
+                default_media_id,
+                interaction_error,
             }
         }
         NetworkCommand::ProbeVideoStreams { req_id, bvid, cid } => {

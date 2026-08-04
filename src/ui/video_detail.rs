@@ -59,6 +59,16 @@ pub struct VideoDetailPage {
     pub hires_supported: Option<bool>,
     /// True while a stream support probe is in flight.
     pub streams_probing: bool,
+    /// Whether the current user has liked this video.
+    pub liked: bool,
+    /// How many coins the current user has given this video (0/1/2).
+    pub coined: i32,
+    /// Whether the current user has favorited this video.
+    pub favorited: bool,
+    /// Default favorite folder media_id of the uploader (for favorite toggle).
+    pub default_media_id: Option<i64>,
+    /// One-line feedback message for the last interaction (三连).
+    pub interaction_msg: Option<String>,
 }
 
 impl VideoDetailPage {
@@ -97,6 +107,11 @@ impl VideoDetailPage {
             hdr_supported: None,
             hires_supported: None,
             streams_probing: false,
+            liked: false,
+            coined: 0,
+            favorited: false,
+            default_media_id: None,
+            interaction_msg: None,
         }
     }
 
@@ -171,6 +186,32 @@ impl VideoDetailPage {
             }
             Err(e) => {
                 self.error_message = Some(format!("加载视频信息失败: {}", e));
+            }
+        }
+
+        // Load interaction status (like / coin / favorite).
+        // Errors are visible so the user knows if login is needed.
+        if let Some(_info) = &self.video_info {
+            let aid = self.aid;
+            let bvid = self.bvid.clone();
+            let mut errors = Vec::new();
+            match api_client.get_video_like_status(&bvid).await {
+                Ok(v) => self.liked = v,
+                Err(e) => errors.push(format!("点赞状态: {e}")),
+            }
+            match api_client.get_video_coin_status(&bvid).await {
+                Ok(v) => self.coined = v,
+                Err(e) => errors.push(format!("投币状态: {e}")),
+            }
+            match api_client.get_default_favorite_folder(aid).await {
+                Ok((media_id, fav)) => {
+                    self.default_media_id = Some(media_id);
+                    self.favorited = fav;
+                }
+                Err(e) => errors.push(format!("收藏状态: {e}")),
+            }
+            if !errors.is_empty() && self.interaction_msg.is_none() {
+                self.interaction_msg = Some(errors.join(", "));
             }
         }
 
@@ -324,6 +365,7 @@ impl VideoDetailPage {
                     Constraint::Length(1), // Author
                     Constraint::Length(1), // Stats
                     Constraint::Length(1), // Playback options
+                    Constraint::Length(1), // Interaction (三连)
                     Constraint::Min(1),    // Description
                 ])
                 .split(inner);
@@ -448,6 +490,38 @@ impl VideoDetailPage {
             let options = Paragraph::new(Line::from(options));
             frame.render_widget(options, chunks[3]);
 
+            // Interaction status (三连)
+            let like_mark = if self.liked { "✓" } else { "✗" };
+            let fav_mark = if self.favorited { "✓" } else { "✗" };
+            let mut interaction_spans = vec![
+                Span::styled(
+                    format!("[a]赞 {like_mark} "),
+                    Style::default().fg(theme.fg_secondary),
+                ),
+                Span::styled(
+                    format!("[b]币 {}/2 ", self.coined),
+                    Style::default().fg(theme.fg_secondary),
+                ),
+                Span::styled(
+                    format!("[v]藏 {fav_mark}"),
+                    Style::default().fg(theme.fg_secondary),
+                ),
+            ];
+            if let Some(msg) = &self.interaction_msg {
+                interaction_spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(theme.fg_secondary),
+                ));
+                interaction_spans.push(Span::styled(
+                    msg.clone(),
+                    Style::default()
+                        .fg(theme.bilibili_pink)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
+            let interaction = Paragraph::new(Line::from(interaction_spans));
+            frame.render_widget(interaction, chunks[4]);
+
             // Description
             if let Some(desc) = &info.desc {
                 let char_count = desc.chars().count();
@@ -459,7 +533,7 @@ impl VideoDetailPage {
                 let description = Paragraph::new(desc_text)
                     .style(Style::default().fg(theme.fg_secondary))
                     .wrap(Wrap { trim: true });
-                frame.render_widget(description, chunks[4]);
+                frame.render_widget(description, chunks[5]);
             }
         } else {
             let loading = Paragraph::new("加载中...")
@@ -869,6 +943,7 @@ impl Component for VideoDetailPage {
                     (keys.confirm.clone(), "点赞/选择".into(), theme.success),
                     (keys.comment.clone(), "评论".into(), theme.info),
                     (keys.toggle_replies.clone(), "回复".into(), theme.info),
+                    ("a/b/v".to_string(), "赞/币/藏".into(), theme.info),
                     (keys.play.clone(), "播放".into(), theme.success),
                     (keys.back.clone(), "返回".into(), theme.info),
                 ],
@@ -937,6 +1012,25 @@ impl Component for VideoDetailPage {
         if key == KeyCode::Char('f') {
             self.playback.prefer_hires = !self.playback.prefer_hires;
             return Some(AppAction::None);
+        }
+        // 三连：点赞 / 投币 / 收藏
+        if key == KeyCode::Char('a') {
+            return Some(AppAction::LikeVideo {
+                bvid: self.bvid.clone(),
+                aid: self.aid,
+            });
+        }
+        if key == KeyCode::Char('b') {
+            return Some(AppAction::CoinVideo {
+                bvid: self.bvid.clone(),
+                aid: self.aid,
+            });
+        }
+        if key == KeyCode::Char('v') {
+            return Some(AppAction::FavoriteVideo {
+                bvid: self.bvid.clone(),
+                aid: self.aid,
+            });
         }
         if keys.matches_play(key) {
             return Some(self.play_action());

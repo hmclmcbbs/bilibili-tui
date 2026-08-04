@@ -132,6 +132,21 @@ pub enum AppAction {
         rpid: i64,
         comment_type: i32,
     },
+    /// Like or unlike the current video (bvid, aid)
+    LikeVideo {
+        bvid: String,
+        aid: i64,
+    },
+    /// Give one coin to the current video (bvid, aid)
+    CoinVideo {
+        bvid: String,
+        aid: i64,
+    },
+    /// Add or remove the current video from the default favorite folder (bvid, aid)
+    FavoriteVideo {
+        bvid: String,
+        aid: i64,
+    },
     /// Add a comment (oid, comment_type, message, optional root rpid for replies)
     AddComment {
         oid: i64,

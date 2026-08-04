@@ -231,6 +231,11 @@ impl App {
                 related_videos,
                 hdr_supported,
                 hires_supported,
+                liked,
+                coined,
+                favorited,
+                default_media_id,
+                interaction_error,
             } => {
                 if !self.is_latest_request("video_detail", req_id) {
                     return;
@@ -263,6 +268,13 @@ impl App {
                     page.hdr_supported = hdr_supported;
                     page.hires_supported = hires_supported;
                     page.streams_probing = false;
+                    page.liked = liked;
+                    page.coined = coined;
+                    page.favorited = favorited;
+                    page.default_media_id = default_media_id;
+                    if page.interaction_msg.is_none() {
+                        page.interaction_msg = interaction_error;
+                    }
                 }
             }
             network::NetworkEvent::VideoStreamSupportLoaded {

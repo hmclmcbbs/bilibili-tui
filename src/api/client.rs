@@ -5,7 +5,7 @@ use crate::storage::{Credentials, VideoQuality};
 use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
 use reqwest::Client;
-use reqwest::header::{COOKIE, HeaderMap, HeaderValue, REFERER, USER_AGENT};
+use reqwest::header::{COOKIE, HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT};
 use serde::Deserialize;
 use std::fs::{self, OpenOptions};
 use std::io::Read;
@@ -234,6 +234,20 @@ impl ApiClient {
         url: &str,
         form_data: Vec<(&str, String)>,
     ) -> Result<ApiResponse<T>> {
+        let owned: Vec<(String, String)> = form_data
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect();
+        self.post_with_owned(url, owned).await
+    }
+
+    /// Internal POST that accepts owned key-value pairs (avoids lifetime
+    /// issues when callers need to add dynamically computed params).
+    async fn post_with_owned<T: for<'de> Deserialize<'de>>(
+        &self,
+        url: &str,
+        form_data: Vec<(String, String)>,
+    ) -> Result<ApiResponse<T>> {
         let mut req = self.client.post(url);
 
         // 使用块作用域确保锁在 await 之前释放
@@ -248,10 +262,7 @@ impl ApiClient {
                 .map(|c| c.contains("bili_jct"))
                 .unwrap_or(false);
 
-            let mut params: Vec<(String, String)> = form_data
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect();
+            let mut params = form_data;
 
             if has_csrf
                 && !params.iter().any(|(k, _)| k == "csrf")
@@ -268,6 +279,10 @@ impl ApiClient {
             params
         }; // 锁在此处释放
 
+        // B站 interaction endpoints require Referer/Origin headers.
+        req = req
+            .header(REFERER, "https://www.bilibili.com")
+            .header(ORIGIN, "https://www.bilibili.com");
         req = req.form(&params);
         let resp = req.send().await?.error_for_status()?;
         let api_resp: ApiResponse<T> = resp.json().await?;
@@ -300,6 +315,78 @@ impl ApiClient {
         let url = format!("{}?{}", base_url, query);
 
         self.get(&url).await
+    }
+
+    /// Make a WBI-signed POST request with form data (csrf is appended
+    /// automatically like `post`). Bilibili requires WBI signatures on
+    /// interaction endpoints (like / coin / favorite) since 2024.
+    ///
+    /// For POST requests the WBI params (`wts` + `w_rid`) must be in the
+    /// POST body, NOT in the URL query string.
+    pub async fn post_with_wbi<T: for<'de> Deserialize<'de>>(
+        &self,
+        base_url: &str,
+        form_data: Vec<(&str, String)>,
+    ) -> Result<ApiResponse<T>> {
+        // Ensure we have WBI keys
+        self.ensure_wbi_keys().await?;
+
+        let signed_data = {
+            let keys = self.wbi_keys.read().expect("wbi_keys lock poisoned");
+            let keys = keys
+                .as_ref()
+                .expect("WBI keys should be set after ensure_wbi_keys");
+            let mixin_key = wbi::get_mixin_key(&keys.img_key, &keys.sub_key);
+
+            // Add wts (timestamp)
+            let cur_time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_secs();
+            let mut params: Vec<(String, String)> = form_data
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect();
+            params.push(("wts".to_string(), cur_time.to_string()));
+
+            // Sort by key, build query string for w_rid computation
+            params.sort_by(|a, b| a.0.cmp(&b.0));
+            let query: String = params
+                .iter()
+                .map(|(k, v)| {
+                    format!(
+                        "{}={}",
+                        k.chars()
+                            .map(|c| {
+                                if c.is_ascii_alphanumeric() || "-_.~".contains(c) {
+                                    c.to_string()
+                                } else {
+                                    format!("%{:02X}", c as u8)
+                                }
+                            })
+                            .collect::<String>(),
+                        v.chars()
+                            .map(|c| {
+                                if c.is_ascii_alphanumeric() || "-_.~".contains(c) {
+                                    c.to_string()
+                                } else {
+                                    format!("%{:02X}", c as u8)
+                                }
+                            })
+                            .collect::<String>()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("&");
+
+            // Calculate w_rid (MD5 of sorted query + mixin_key)
+            let w_rid = format!("{:?}", md5::compute(query + &mixin_key));
+            params.push(("w_rid".to_string(), w_rid));
+
+            params
+        };
+
+        self.post_with_owned(base_url, signed_data).await
     }
 
     /// Fetch WBI keys from nav API
@@ -1442,6 +1529,139 @@ impl ApiClient {
             ));
         }
 
+        Ok(())
+    }
+
+    // ========== Video interaction APIs (三连：点赞/投币/收藏) ==========
+
+    /// Query whether the current user has liked a video (data: 0/1).
+    pub async fn get_video_like_status(&self, bvid: &str) -> Result<bool> {
+        let url = self.build_url(
+            BilibiliApiDomain::Main,
+            "/x/web-interface/archive/has/like",
+        );
+        let resp: ApiResponse<i32> = self
+            .get_with_wbi(&url, vec![("bvid", bvid.to_string())])
+            .await?;
+        Ok(resp.data.unwrap_or(0) == 1)
+    }
+
+    /// Query how many coins the current user has given a video (0/1/2).
+    pub async fn get_video_coin_status(&self, bvid: &str) -> Result<i32> {
+        #[derive(Deserialize)]
+        struct CoinsResp {
+            multiply: Option<i32>,
+        }
+        let url = self.build_url(
+            BilibiliApiDomain::Main,
+            "/x/web-interface/archive/coins",
+        );
+        let resp: ApiResponse<CoinsResp> = self
+            .get_with_wbi(&url, vec![("bvid", bvid.to_string())])
+            .await?;
+        Ok(resp.data.and_then(|d| d.multiply).unwrap_or(0))
+    }
+
+    /// Find the default favorite folder of the current logged-in user and
+    /// whether the video is already in it. Returns `(media_id, favorited)`.
+    pub async fn get_default_favorite_folder(&self, aid: i64) -> Result<(i64, bool)> {
+        #[derive(Deserialize)]
+        struct FolderListResp {
+            list: Vec<FolderItem>,
+        }
+        #[derive(Deserialize)]
+        struct FolderItem {
+            id: i64,
+            fav_state: Option<i32>,
+            title: Option<String>,
+        }
+        // The `up_mid` of this endpoint must be the current logged-in user's
+        // own mid (we query "my created folders"), not the video uploader's.
+        let cookie_str = self
+            .cookies
+            .read()
+            .expect("cookies lock poisoned")
+            .clone()
+            .ok_or_else(|| anyhow!("not logged in (no cookies)"))?;
+        let up_mid: i64 = cookie_str
+            .split(';')
+            .filter_map(|part| {
+                let mut it = part.trim().splitn(2, '=');
+                match (it.next(), it.next()) {
+                    (Some("DedeUserID"), Some(v)) => v.trim().parse::<i64>().ok(),
+                    _ => None,
+                }
+            })
+            .next()
+            .ok_or_else(|| anyhow!("not logged in (no DedeUserID)"))?;
+        let url = self.build_url(
+            BilibiliApiDomain::Main,
+            "/x/v3/fav/folder/created/list-all",
+        );
+        let resp: ApiResponse<FolderListResp> = self
+            .get_with_wbi(
+                &url,
+                vec![
+                    ("up_mid", up_mid.to_string()),
+                    ("rid", aid.to_string()),
+                    ("type", "2".to_string()),
+                ],
+            )
+            .await?;
+        let data = resp.data.ok_or_else(|| anyhow!("no favorite folder data"))?;
+        let folder = data
+            .list
+            .iter()
+            .find(|f| {
+                f.title
+                    .as_deref()
+                    .map(|t| t.contains("默认") || t.contains("Default"))
+                    .unwrap_or(false)
+            })
+            .or_else(|| data.list.first())
+            .ok_or_else(|| anyhow!("no favorite folder"))?;
+        Ok((folder.id, folder.fav_state.unwrap_or(0) == 1))
+    }
+
+    /// Like (`like = true`) or unlike (`like = false`) a video.
+    pub async fn like_video(&self, aid: i64, like: bool) -> Result<()> {
+        let url =
+            self.build_url(BilibiliApiDomain::Main, "/x/web-interface/archive/like");
+        let form_data = vec![
+            ("aid", aid.to_string()),
+            ("like", if like { "1" } else { "2" }.to_string()),
+        ];
+        let _: ApiResponse<serde_json::Value> = self.post_with_wbi(&url, form_data).await?;
+        Ok(())
+    }
+
+    /// Give coins to a video. `multiply` is 1 or 2 coins per request;
+    /// `select_like` also likes the video at the same time (Bilibili default).
+    pub async fn coin_video(&self, aid: i64, multiply: i32, select_like: bool) -> Result<()> {
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/web-interface/coin/add");
+        let form_data = vec![
+            ("aid", aid.to_string()),
+            ("multiply", multiply.to_string()),
+            ("select_like", if select_like { "1" } else { "0" }.to_string()),
+        ];
+        let _: ApiResponse<serde_json::Value> = self.post_with_wbi(&url, form_data).await?;
+        Ok(())
+    }
+
+    /// Add (`add = true`) or remove (`add = false`) a video from a favorite
+    /// folder identified by `media_id`.
+    pub async fn favorite_video(&self, aid: i64, media_id: i64, add: bool) -> Result<()> {
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/v3/fav/resource/deal");
+        let mut form_data = vec![
+            ("rid", aid.to_string()),
+            ("type", "2".to_string()),
+        ];
+        if add {
+            form_data.push(("add_media_ids", media_id.to_string()));
+        } else {
+            form_data.push(("del_media_ids", media_id.to_string()));
+        }
+        let _: ApiResponse<serde_json::Value> = self.post_with_wbi(&url, form_data).await?;
         Ok(())
     }
 

@@ -565,9 +565,10 @@ mod tests {
 
     #[test]
     fn parses_real_positioned_danmaku_from_disk() {
-        // Real data dumped from comment.bilibili.com (raw deflate decoded).
-        let xml = std::fs::read_to_string("/tmp/cherry_decomp.xml")
-            .expect("need /tmp/cherry_decomp.xml");
+        // Real data dumped from comment.bilibili.com (raw deflate decoded),
+        // committed as a fixture so the test does not depend on /tmp.
+        let xml = std::fs::read_to_string("tests/fixtures/cherry.xml")
+            .expect("need tests/fixtures/cherry.xml");
         let parsed = parse_xml(&xml).unwrap();
         let mode7: Vec<_> = parsed.iter().filter(|m| m.mode == 7).collect();
         eprintln!("mode7 count: {}", mode7.len());
@@ -585,7 +586,7 @@ mod tests {
             }
         }
         eprintln!("mode7 total={} failed={}", mode7.len(), failed);
-        assert_eq!(mode7.len(), 121, "cherry pop XML should have 121 mode7");
+        assert_eq!(mode7.len(), 3, "fixture should have 3 mode7 danmaku");
         assert_eq!(failed, 0, "every mode7 must resolve to coordinates");
     }
 

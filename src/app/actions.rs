@@ -924,6 +924,80 @@ impl App {
                     }
                 }
             }
+            AppAction::LikeVideo { bvid, aid } => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    return;
+                }
+                let client = self.api_client.clone();
+                if let Page::VideoDetail(page) = &mut self.current_page {
+                    let target = !page.liked;
+                    match client.like_video(aid, target).await {
+                        Ok(()) => {
+                            page.liked = target;
+                            page.interaction_msg = Some(if target {
+                                "已点赞".to_string()
+                            } else {
+                                "已取消点赞".to_string()
+                            });
+                        }
+                        Err(e) => {
+                            page.interaction_msg = Some(format!("点赞失败: {e}"));
+                        }
+                    }
+                }
+            }
+            AppAction::CoinVideo { aid, .. } => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    return;
+                }
+                let client = self.api_client.clone();
+                if let Page::VideoDetail(page) = &mut self.current_page {
+                    if page.coined >= 2 {
+                        page.interaction_msg = Some("投币已达上限 (2枚)".to_string());
+                        return;
+                    }
+                    match client.coin_video(aid, 1, true).await {
+                        Ok(()) => {
+                            page.coined += 1;
+                            page.liked = true; // select_like=1
+                            page.interaction_msg =
+                                Some(format!("已投币 {} 枚", page.coined));
+                        }
+                        Err(e) => {
+                            page.interaction_msg = Some(format!("投币失败: {e}"));
+                        }
+                    }
+                }
+            }
+            AppAction::FavoriteVideo { bvid: _, aid } => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    return;
+                }
+                let client = self.api_client.clone();
+                if let Page::VideoDetail(page) = &mut self.current_page {
+                    let Some(media_id) = page.default_media_id else {
+                        page.interaction_msg = Some("未找到收藏夹".to_string());
+                        return;
+                    };
+                    let target = !page.favorited;
+                    match client.favorite_video(aid, media_id, target).await {
+                        Ok(()) => {
+                            page.favorited = target;
+                            page.interaction_msg = Some(if target {
+                                "已收藏".to_string()
+                            } else {
+                                "已取消收藏".to_string()
+                            });
+                        }
+                        Err(e) => {
+                            page.interaction_msg = Some(format!("收藏失败: {e}"));
+                        }
+                    }
+                }
+            }
             AppAction::AddComment {
                 oid,
                 comment_type,
