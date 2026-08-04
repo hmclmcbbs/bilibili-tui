@@ -1211,6 +1211,105 @@ impl App {
                     }
                 }
             }
+            AppAction::CreateFavoriteFolder { title, intro, privacy } => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    return;
+                }
+                let client = self.api_client.clone();
+                match client.create_favorite_folder(&title, &intro, privacy).await {
+                    Ok(id) => {
+                        if let Page::Favorites(page) = &mut self.current_page {
+                            page.message = Some(format!("已创建: {title}"));
+                            // Reload folder list
+                            page.loading = true;
+                            let mid = page.mid;
+                            let req_id = self.next_request_id("fav_init");
+                            self.send_network_command(
+                                network::NetworkCommand::LoadFavoritesInit {
+                                    req_id,
+                                    mid,
+                                },
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if let Page::Favorites(page) = &mut self.current_page {
+                            page.message = Some(format!("创建失败: {e}"));
+                        }
+                    }
+                }
+            }
+            AppAction::DeleteFavoriteFolder(media_id) => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    return;
+                }
+                let client = self.api_client.clone();
+                match client.delete_favorite_folder(media_id).await {
+                    Ok(()) => {
+                        if let Page::Favorites(page) = &mut self.current_page {
+                            page.message = Some("已删除收藏夹".to_string());
+                            page.loading = true;
+                            let mid = page.mid;
+                            let req_id = self.next_request_id("fav_init");
+                            self.send_network_command(
+                                network::NetworkCommand::LoadFavoritesInit {
+                                    req_id,
+                                    mid,
+                                },
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if let Page::Favorites(page) = &mut self.current_page {
+                            page.message = Some(format!("删除失败: {e}"));
+                        }
+                    }
+                }
+            }
+            AppAction::FavoriteVideoInFolder { aid, media_id, add } => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    return;
+                }
+                let client = self.api_client.clone();
+                match client.favorite_video(aid, media_id, add).await {
+                    Ok(()) => {
+                        if let Page::VideoDetail(page) = &mut self.current_page {
+                            page.interaction_msg = Some(if add {
+                                "已收藏".to_string()
+                            } else {
+                                "已取消收藏".to_string()
+                            });
+                        } else if let Page::Favorites(page) = &mut self.current_page {
+                            page.message = Some(if add {
+                                "已收藏到指定收藏夹".to_string()
+                            } else {
+                                "已从收藏夹移除".to_string()
+                            });
+                            // Reload the current folder
+                            let source = page.active_source.clone();
+                            let next_page = page.page;
+                            let req_id = self.next_request_id("favorites_content");
+                            self.send_network_command(
+                                network::NetworkCommand::LoadFavoritesContent {
+                                    req_id,
+                                    source,
+                                    page: next_page,
+                                },
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if let Page::VideoDetail(page) = &mut self.current_page {
+                            page.interaction_msg = Some(format!("收藏失败: {e}"));
+                        } else if let Page::Favorites(page) = &mut self.current_page {
+                            page.message = Some(format!("操作失败: {e}"));
+                        }
+                    }
+                }
+            }
             AppAction::None => {}
         }
     }

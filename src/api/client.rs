@@ -1908,6 +1908,57 @@ impl ApiClient {
 
         api_resp.data.ok_or_else(|| anyhow::anyhow!("响应无数据"))
     }
+
+    // ========== Favorite Management APIs ==========
+
+    /// Create a new favorite folder. Returns the new folder's `id`.
+    pub async fn create_favorite_folder(
+        &self,
+        title: &str,
+        intro: &str,
+        privacy: i32,
+    ) -> Result<i64> {
+        let url =
+            self.build_url(BilibiliApiDomain::Main, "/x/v3/fav/folder/add");
+        let form_data = vec![
+            ("title", title.to_string()),
+            ("intro", intro.to_string()),
+            ("privacy", privacy.to_string()),
+        ];
+        let resp: ApiResponse<serde_json::Value> =
+            self.post_with_wbi(&url, form_data).await?;
+        if resp.code != 0 {
+            return Err(anyhow!(
+                "创建收藏夹失败 {}: {}",
+                resp.code,
+                resp.message
+            ));
+        }
+        let id = resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("id"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        Ok(id)
+    }
+
+    /// Delete a favorite folder by its `media_id`.
+    pub async fn delete_favorite_folder(&self, media_id: i64) -> Result<()> {
+        let url =
+            self.build_url(BilibiliApiDomain::Main, "/x/v3/fav/folder/del");
+        let form_data = vec![("media_id", media_id.to_string())];
+        let resp: ApiResponse<serde_json::Value> =
+            self.post_with_wbi(&url, form_data).await?;
+        if resp.code != 0 {
+            return Err(anyhow!(
+                "删除收藏夹失败 {}: {}",
+                resp.code,
+                resp.message
+            ));
+        }
+        Ok(())
+    }
 }
 fn parse_home_videos(items: Vec<serde_json::Value>) -> Vec<super::recommend::VideoItem> {
     items
@@ -2024,3 +2075,4 @@ mod live_contract_tests {
         }
     }
 }
+

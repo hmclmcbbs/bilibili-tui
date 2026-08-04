@@ -27,8 +27,15 @@ pub struct FavoritesPage {
     pub loading: bool,
     pub loading_more: bool,
     pub error: Option<String>,
+    pub message: Option<String>,
+    pub input_mode: Option<InputMode>,
+    pub input_text: String,
     last_click_time: Option<Instant>,
     last_click_index: Option<usize>,
+}
+
+pub enum InputMode {
+    CreateFolder,
 }
 
 impl FavoritesPage {
@@ -46,6 +53,9 @@ impl FavoritesPage {
             loading: true,
             loading_more: false,
             error: None,
+            message: None,
+            input_mode: None,
+            input_text: String::new(),
             last_click_time: None,
             last_click_index: None,
         }
@@ -296,14 +306,28 @@ impl Component for FavoritesPage {
                 Constraint::Length(2),
             ])
             .split(chunks[1]);
-        frame.render_widget(
-            Paragraph::new(format!(
+        let header_title = if self.input_mode.is_some() {
+            format!("输入收藏夹名称: {}_", self.input_text)
+        } else if let Some(ref msg) = self.message {
+            msg.clone()
+        } else {
+            format!(
                 "{}  ·  {}/{}",
                 Self::source_label(&self.active_source),
                 self.videos.cards.len(),
                 self.total
-            ))
-            .block(Block::default().borders(Borders::ALL)),
+            )
+        };
+        let header_style = if self.input_mode.is_some() {
+            Style::default().fg(theme.warning)
+        } else if self.message.is_some() {
+            Style::default().fg(theme.success)
+        } else {
+            Style::default()
+        };
+        frame.render_widget(
+            Paragraph::new(header_title).style(header_style)
+                .block(Block::default().borders(Borders::ALL)),
             right[0],
         );
         if self.loading {
@@ -328,6 +352,9 @@ impl Component for FavoritesPage {
                     ),
                     ("←/→".into(), "收藏/视频".into(), theme.fg_accent),
                     (keys.confirm.clone(), "打开".into(), theme.success),
+                    ("n".into(), "新建收藏夹".into(), theme.info),
+                    ("x".into(), "删除收藏夹".into(), theme.error),
+                    ("Del".into(), "移除视频".into(), theme.warning),
                     (keys.nav_next_page.clone(), "下一页面".into(), theme.info),
                     (keys.nav_prev_page.clone(), "上一页面".into(), theme.info),
                 ],
@@ -339,6 +366,40 @@ impl Component for FavoritesPage {
     }
 
     fn handle_input(&mut self, key: KeyCode, keys: &Keybindings) -> Option<AppAction> {
+        // Text input mode for creating folder name
+        if self.input_mode.is_some() {
+            match key {
+                KeyCode::Esc => {
+                    self.input_mode = None;
+                    self.input_text.clear();
+                    return Some(AppAction::None);
+                }
+                KeyCode::Enter => {
+                    if let Some(InputMode::CreateFolder) = &self.input_mode {
+                        let title = self.input_text.trim().to_string();
+                        self.input_mode = None;
+                        self.input_text.clear();
+                        if !title.is_empty() {
+                            return Some(AppAction::CreateFavoriteFolder {
+                                title,
+                                intro: String::new(),
+                                privacy: 0,
+                            });
+                        }
+                    }
+                    return Some(AppAction::None);
+                }
+                KeyCode::Char(c) => {
+                    self.input_text.push(c);
+                    return Some(AppAction::None);
+                }
+                KeyCode::Backspace => {
+                    self.input_text.pop();
+                    return Some(AppAction::None);
+                }
+                _ => return Some(AppAction::None),
+            }
+        }
         if keys.matches_quit(key) {
             return Some(AppAction::Quit);
         }
@@ -375,7 +436,22 @@ impl Component for FavoritesPage {
                 self.selected_source += 1;
             } else if keys.matches_up(key) && self.selected_source > 0 {
                 self.selected_source -= 1;
-            } else if keys.matches_confirm(key)
+            } else if key == KeyCode::Char('n') {
+                self.input_mode = Some(InputMode::CreateFolder);
+                self.input_text.clear();
+                return Some(AppAction::None);
+        } else if key == KeyCode::Char('x') {
+            // Delete the selected created folder
+            if let Some(source) = sources.get(self.selected_source) {
+                if let FavoriteSource::Created { media_id, title } = source {
+                    let title = title.clone();
+                    let mid = self.mid;
+                    self.message = Some(format!("已删除收藏夹: {title}"));
+                    return Some(AppAction::DeleteFavoriteFolder(*media_id));
+                }
+            }
+            return Some(AppAction::None);
+        } else if keys.matches_confirm(key)
                 && let Some(source) = sources.get(self.selected_source)
                 && *source != self.active_source
             {
@@ -411,6 +487,19 @@ impl Component for FavoritesPage {
             }
         } else if keys.matches_up(key) {
             self.videos.move_up();
+        } else if key == KeyCode::Delete {
+            // Remove selected video from current folder
+            if let Some(card) = self.videos.selected_card()
+                && let Some(aid) = card.aid
+                && let FavoriteSource::Created { media_id, .. } = &self.active_source
+            {
+                let media_id = *media_id;
+                return Some(AppAction::FavoriteVideoInFolder {
+                    aid,
+                    media_id,
+                    add: false,
+                });
+            }
         } else if keys.matches_confirm(key)
             && let Some(card) = self.videos.selected_card()
             && let (Some(bvid), Some(aid)) = (&card.bvid, card.aid)

@@ -183,6 +183,20 @@ pub enum AppAction {
         season_id: i64,
         title: String,
     },
+    /// Create a new favorite folder (title, intro, privacy)
+    CreateFavoriteFolder {
+        title: String,
+        intro: String,
+        privacy: i32,
+    },
+    /// Delete a favorite folder by media_id
+    DeleteFavoriteFolder(i64),
+    /// Add or remove a video from a specific favorite folder (aid, media_id, add)
+    FavoriteVideoInFolder {
+        aid: i64,
+        media_id: i64,
+        add: bool,
+    },
     /// No action
     None,
 }
