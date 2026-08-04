@@ -69,6 +69,8 @@ pub struct VideoDetailPage {
     pub coined: i32,
     /// Whether the current user has favorited this video.
     pub favorited: bool,
+    /// Whether the current video is in the user's watch-later list.
+    pub in_watch_later: bool,
     /// Default favorite folder media_id of the uploader (for favorite toggle).
     pub default_media_id: Option<i64>,
     /// One-line feedback message for the last interaction (三连).
@@ -118,6 +120,7 @@ impl VideoDetailPage {
             liked: false,
             coined: 0,
             favorited: false,
+            in_watch_later: false,
             default_media_id: None,
             interaction_msg: None,
             interaction_msg_set_at: None,
@@ -518,6 +521,7 @@ impl VideoDetailPage {
             // Interaction status (三连)
             let like_mark = if self.liked { "✓" } else { "✗" };
             let fav_mark = if self.favorited { "✓" } else { "✗" };
+            let wl_mark = if self.in_watch_later { "✓" } else { "✗" };
             let mut interaction_spans = vec![
                 Span::styled(
                     format!("[a]赞 {like_mark} "),
@@ -529,6 +533,10 @@ impl VideoDetailPage {
                 ),
                 Span::styled(
                     format!("[v]藏 {fav_mark}"),
+                    Style::default().fg(theme.fg_secondary),
+                ),
+                Span::styled(
+                    format!(" [w]稍后 {wl_mark}"),
                     Style::default().fg(theme.fg_secondary),
                 ),
             ];
@@ -1119,6 +1127,9 @@ impl Component for VideoDetailPage {
                 return Some(AppAction::None);
             }
             return Some(AppAction::LoadUserFavoriteFolders);
+        }
+        if key == KeyCode::Char('w') {
+            return Some(AppAction::ToggleWatchLater { aid: self.aid });
         }
         if keys.matches_play(key) {
             return Some(self.play_action());

@@ -155,6 +155,10 @@ pub enum AppAction {
     },
     /// Load the user's favorite folders list (for the folder picker in video detail).
     LoadUserFavoriteFolders,
+    /// Toggle the current video in the user's watch-later list (aid)
+    ToggleWatchLater { aid: i64 },
+    /// Remove a video from the watch-later list (used from the favorites page)
+    RemoveFromWatchLater { aid: i64 },
     /// Add a comment (oid, comment_type, message, optional root rpid for replies)
     AddComment {
         oid: i64,

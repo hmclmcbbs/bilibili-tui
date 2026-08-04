@@ -246,6 +246,7 @@ impl App {
                 liked,
                 coined,
                 favorited,
+                in_watch_later,
                 default_media_id,
                 interaction_error,
             } => {
@@ -283,6 +284,7 @@ impl App {
                     page.liked = liked;
                     page.coined = coined;
                     page.favorited = favorited;
+                    page.in_watch_later = in_watch_later;
                     page.default_media_id = default_media_id;
                     if page.interaction_msg.is_none() {
                         if let Some(err) = interaction_error {

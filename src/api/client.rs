@@ -970,6 +970,42 @@ impl ApiClient {
             .ok_or_else(|| anyhow!("watch later response has no data"))
     }
 
+    /// Add a video (by aid) to the user's watch-later list.
+    pub async fn add_to_watch_later(&self, aid: i64) -> Result<()> {
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/v2/history/toview/add");
+        let _: ApiResponse<serde_json::Value> = self
+            .post(&url, vec![("aid", aid.to_string())])
+            .await?;
+        Ok(())
+    }
+
+    /// Remove a video (by aid) from the user's watch-later list.
+    pub async fn remove_from_watch_later(&self, aid: i64) -> Result<()> {
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/v2/history/toview/del");
+        let _: ApiResponse<serde_json::Value> = self
+            .post(&url, vec![("aid", aid.to_string())])
+            .await?;
+        Ok(())
+    }
+
+    /// Check whether a video (by aid) is in the user's watch-later list.
+    /// Uses the first page of the toview list; good enough for detail-page status.
+    pub async fn get_watch_later_status(&self, aid: i64) -> Result<bool> {
+        let data = self.get_watch_later(1, 50).await?;
+        Ok(data.list.iter().any(|item| item.aid == aid))
+    }
+
+    /// Look up the last watch progress (seconds) for a video by bvid from the
+    /// most recent history page. Returns None when there is no record.
+    pub async fn get_video_history_progress(&self, bvid: &str) -> Result<Option<i64>> {
+        let data = self.get_history(None, None, Some("archive")).await?;
+        Ok(data
+            .list
+            .iter()
+            .find(|item| item.get_bvid() == Some(bvid))
+            .map(|item| item.progress))
+    }
+
     pub async fn get_collected_folders(
         &self,
         mid: i64,

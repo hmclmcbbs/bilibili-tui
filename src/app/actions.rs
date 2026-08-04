@@ -1,4 +1,5 @@
 use crate::app::{App, PreviousPage};
+use crate::api::favorite::FavoriteSource;
 use crate::application::{AppAction, network};
 use crate::infrastructure::{media, persistence};
 use crate::presentation::tui::{
@@ -152,12 +153,19 @@ impl App {
                 self.playback.session_id = None;
                 self.playback.status = crate::domain::playback::PlaybackStatus::Starting;
                 let api_client = self.api_client.clone();
+                let start_position = api_client
+                    .get_video_history_progress(&bvid)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|p| p as f64);
                 match media::play_video(
                     api_client,
                     &bvid,
                     aid,
                     cid,
                     duration,
+                    start_position,
                     None,
                     playback,
                     self.credentials.as_ref(),
@@ -207,12 +215,19 @@ impl App {
                     self.playback.status = crate::domain::playback::PlaybackStatus::Starting;
                     let page = &pages[current_index];
                     let api_client = self.api_client.clone();
+                    let start_position = api_client
+                        .get_video_history_progress(&bvid)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|p| p as f64);
                     match media::play_video(
                         api_client,
                         &bvid,
                         aid,
                         page.cid,
                         page.duration,
+                        start_position,
                         Some(page.page),
                         playback,
                         self.credentials.as_ref(),
@@ -1087,12 +1102,66 @@ impl App {
                     }
                 }
             }
+            AppAction::ToggleWatchLater { aid } => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    return;
+                }
+                let client = self.api_client.clone();
+                if let Page::VideoDetail(page) = &mut self.current_page {
+                    let target = !page.in_watch_later;
+                    let result = if target {
+                        client.add_to_watch_later(aid).await
+                    } else {
+                        client.remove_from_watch_later(aid).await
+                    };
+                    match result {
+                        Ok(()) => {
+                            page.in_watch_later = target;
+                            page.set_interaction_msg(if target {
+                                "已加入稍后再看".to_string()
+                            } else {
+                                "已移出稍后再看".to_string()
+                            });
+                        }
+                        Err(e) => {
+                            page.set_interaction_msg(format!("稍后再看操作失败: {e}"));
+                        }
+                    }
+                }
+            }
+            AppAction::RemoveFromWatchLater { aid } => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    return;
+                }
+                let client = self.api_client.clone();
+                match client.remove_from_watch_later(aid).await {
+                    Ok(()) => {
+                        if let Page::Favorites(page) = &mut self.current_page {
+                            page.set_message("已移出稍后再看".to_string());
+                            let req_id = self.next_request_id("favorites_content");
+                            self.send_network_command(
+                                network::NetworkCommand::LoadFavoritesContent {
+                                    req_id,
+                                    source: FavoriteSource::WatchLater,
+                                    page: 1,
+                                },
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if let Page::Favorites(page) = &mut self.current_page {
+                            page.set_message(format!("移除失败: {e}"));
+                        }
+                    }
+                }
+            }
             AppAction::AddComment {
                 oid,
                 comment_type,
                 message,
-                root,
-            } => {
+                root,            } => {
                 if self.credentials.is_none() {
                     self.apply_login_required_hint();
                     return;

@@ -558,17 +558,24 @@ impl Component for FavoritesPage {
         } else if keys.matches_up(key) {
             self.videos.move_up();
         } else if key == KeyCode::Delete {
-            // Remove selected video from current folder
+            // Remove selected video from current folder / watch-later
             if let Some(card) = self.videos.selected_card()
                 && let Some(aid) = card.aid
-                && let FavoriteSource::Created { media_id, .. } = &self.active_source
             {
-                let media_id = *media_id;
-                return Some(AppAction::FavoriteVideoInFolder {
-                    aid,
-                    media_id,
-                    add: false,
-                });
+                match &self.active_source {
+                    FavoriteSource::Created { media_id, .. } => {
+                        let media_id = *media_id;
+                        return Some(AppAction::FavoriteVideoInFolder {
+                            aid,
+                            media_id,
+                            add: false,
+                        });
+                    }
+                    FavoriteSource::WatchLater => {
+                        return Some(AppAction::RemoveFromWatchLater { aid });
+                    }
+                    _ => {}
+                }
             }
         } else if keys.matches_confirm(key)
             && let Some(card) = self.videos.selected_card()

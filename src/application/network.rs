@@ -252,6 +252,7 @@ pub enum NetworkEvent {
         liked: bool,
         coined: i32,
         favorited: bool,
+        in_watch_later: bool,
         default_media_id: Option<i64>,
         interaction_error: Option<String>,
     },
@@ -995,6 +996,7 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 like_result,
                 coin_result,
                 fav_result,
+                watch_later_result,
             ) =
                 tokio::join!(
                     async {
@@ -1030,9 +1032,16 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                             Err(_) => Err("收藏状态: 需要登录"),
                         }
                     },
+                    async {
+                        match api_client.get_watch_later_status(aid).await {
+                            Ok(v) => Ok(v),
+                            Err(_) => Err("稍后再看状态: 需要登录"),
+                        }
+                    },
                 );
             let liked = like_result.unwrap_or(false);
             let coined = coin_result.unwrap_or(0);
+            let in_watch_later = watch_later_result.unwrap_or(false);
             let (default_media_id, favorited) = match fav_result {
                 Ok((mid, fav)) => (Some(mid), fav),
                 Err(_) => (None, false),
@@ -1041,6 +1050,7 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
             if let Err(e) = &like_result { interaction_errors.push(*e); }
             if let Err(e) = &coin_result { interaction_errors.push(*e); }
             if let Err(e) = &fav_result { interaction_errors.push(*e); }
+            if let Err(e) = &watch_later_result { interaction_errors.push(*e); }
             let interaction_error = if interaction_errors.is_empty() {
                 None
             } else {
@@ -1058,6 +1068,7 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 liked,
                 coined,
                 favorited,
+                in_watch_later,
                 default_media_id,
                 interaction_error,
             }

@@ -113,6 +113,7 @@ pub async fn play_video(
     aid: i64,
     cid: i64,
     duration: i64,
+    start_position: Option<f64>,
     page_num: Option<i32>,
     playback: PlaybackOptions,
     credentials: Option<&Credentials>,
@@ -177,6 +178,14 @@ pub async fn play_video(
     cmd.arg("--force-window=immediate");
     // Use MPV's low-latency profile for Bilibili VOD playback.
     cmd.arg("--profile=low-latency");
+    // Resume from the last watch position when the user has a saved progress.
+    // Only resume when the video is mostly unwatched (progress < 95%).
+    if let Some(start) = start_position
+        && start > 5.0
+        && (duration <= 0 || start < duration as f64 * 0.95)
+    {
+        cmd.arg(format!("--start={start}"));
+    }
     // Enable hardware decoding with automatic fallback to software.
     apply_mpv_hwdec(&mut cmd);
     cmd.arg(format!("--referrer={webpage_url}"));
