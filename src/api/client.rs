@@ -248,6 +248,10 @@ impl ApiClient {
         url: &str,
         form_data: Vec<(String, String)>,
     ) -> Result<ApiResponse<T>> {
+        // Interaction endpoints (like/coin/fav/relation) are risk-controlled:
+        // without the buvid3/buvid4 fingerprint cookies Bilibili answers 412.
+        self.ensure_buvid_cookies().await?;
+
         let mut req = self.client.post(url);
 
         // 使用块作用域确保锁在 await 之前释放
@@ -1924,6 +1928,42 @@ impl ApiClient {
             .and_then(|value| value.as_str())
             .map(ToOwned::to_owned)
             .ok_or_else(|| anyhow!("buvid3 响应为空"))
+    }
+
+    /// Ensure the cookie string carries buvid3/buvid4 fingerprint cookies.
+    /// Bilibili's risk control answers 412 on interaction POSTs (relation,
+    /// like, coin, fav) when these are missing. Fetch once from the spi
+    /// endpoint and append them; subsequent requests take the fast path.
+    pub async fn ensure_buvid_cookies(&self) -> Result<()> {
+        {
+            let cookies = self.cookies.read().expect("cookies lock poisoned");
+            if let Some(c) = cookies.as_ref() {
+                if c.contains("buvid3=") && c.contains("buvid4=") {
+                    return Ok(());
+                }
+            }
+        }
+
+        let url = "https://api.bilibili.com/x/frontend/finger/spi";
+        let response: ApiResponse<serde_json::Value> = self.get(url).await?;
+        let data = response.data.as_ref();
+        let (Some(b3), Some(b4)) = (
+            data.and_then(|d| d.get("b_3")).and_then(|v| v.as_str()),
+            data.and_then(|d| d.get("b_4")).and_then(|v| v.as_str()),
+        ) else {
+            return Ok(());
+        };
+
+        let mut cookies = self.cookies.write().expect("cookies lock poisoned");
+        if let Some(c) = cookies.as_mut() {
+            if !c.contains("buvid3=") {
+                c.push_str(&format!("; buvid3={b3}"));
+            }
+            if !c.contains("buvid4=") {
+                c.push_str(&format!("; buvid4={b4}"));
+            }
+        }
+        Ok(())
     }
 
     /// Get live room history danmaku
