@@ -267,7 +267,15 @@ impl Component for SectionPage {
         // Video grid focus
         match key {
             KeyCode::Left | KeyCode::Char('h') => {
+                if self.videos.move_left() {
+                    return Some(AppAction::None);
+                }
+                // At left edge: go back to section list
                 self.focus_sections = true;
+                return Some(AppAction::None);
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                self.videos.move_right();
                 return Some(AppAction::None);
             }
             _ => {}
