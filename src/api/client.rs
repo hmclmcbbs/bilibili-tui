@@ -2048,10 +2048,17 @@ impl ApiClient {
 
     /// Follow a user (关注).
     pub async fn follow_user(&self, mid: i64) -> Result<()> {
-        let url = self.build_url(BilibiliApiDomain::Main, "/x/relation/follow");
-        let form_data = vec![("fid", mid.to_string())];
-        let resp: ApiResponse<serde_json::Value> =
-            self.post_with_wbi(&url, form_data).await?;
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/relation/modify");
+        // relation endpoints use plain csrf POST (no WBI). `act=1` means
+        // follow, `re_src=11` is the space-page source the web client sends.
+        // NOTE: `/x/relation/follow` was retired upstream (returns 404);
+        // the web client now uses `/x/relation/modify`.
+        let form_data = vec![
+            ("fid", mid.to_string()),
+            ("act", "1".to_string()),
+            ("re_src", "11".to_string()),
+        ];
+        let resp: ApiResponse<serde_json::Value> = self.post(&url, form_data).await?;
         if resp.code != 0 {
             return Err(anyhow!(
                 "关注失败 ({}): {}",
@@ -2064,10 +2071,13 @@ impl ApiClient {
 
     /// Unfollow a user (取关).
     pub async fn unfollow_user(&self, mid: i64) -> Result<()> {
-        let url = self.build_url(BilibiliApiDomain::Main, "/x/relation/unfollow");
-        let form_data = vec![("fid", mid.to_string())];
-        let resp: ApiResponse<serde_json::Value> =
-            self.post_with_wbi(&url, form_data).await?;
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/relation/modify");
+        let form_data = vec![
+            ("fid", mid.to_string()),
+            ("act", "2".to_string()),
+            ("re_src", "11".to_string()),
+        ];
+        let resp: ApiResponse<serde_json::Value> = self.post(&url, form_data).await?;
         if resp.code != 0 {
             return Err(anyhow!(
                 "取关失败 ({}): {}",
@@ -2077,13 +2087,14 @@ impl ApiClient {
         }
         Ok(())
     }
+    /// Check whether the current user follows the given uploader.
 
     /// Check whether the current user follows the given uploader.
     /// Returns `true` if followed (attribute & 1 != 0).
     pub async fn get_follow_status(&self, mid: i64) -> Result<bool> {
         let url = self.build_url(
             BilibiliApiDomain::Main,
-            &format!("/x/relation/stat?vmid={}", mid),
+            &format!("/x/relation?fid={}", mid),
         );
         let resp: ApiResponse<serde_json::Value> = self.get(&url).await?;
         if resp.code != 0 {
@@ -2099,7 +2110,9 @@ impl ApiClient {
             .and_then(|data| data.get("attribute"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        Ok(attribute & 1 != 0)
+        // attribute: 0 = not followed, 1 = followed, 2 = mutual follow.
+        // Any non-zero value means the current user follows this uploader.
+        Ok(attribute != 0)
     }
 
     // ========== Ranking API ==========

@@ -233,6 +233,13 @@ impl Component for SectionPage {
     }
 
     fn handle_input(&mut self, key: KeyCode, keys: &Keybindings) -> Option<AppAction> {
+        // Tab navigation always wins, including while either pane is loading.
+        if keys.matches_nav_next(key) {
+            return Some(AppAction::NavNext);
+        }
+        if keys.matches_nav_prev(key) {
+            return Some(AppAction::NavPrev);
+        }
         if self.focus_sections {
             match key {
                 KeyCode::Up | KeyCode::Char('k') => {

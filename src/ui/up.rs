@@ -112,11 +112,13 @@ impl UpPage {
         &mut self,
         profile: SpaceInfo,
         relation: Option<RelationStat>,
+        is_followed: Option<bool>,
         videos: SpaceVideoData,
         folders: Vec<FavoriteFolder>,
     ) {
         self.profile = Some(profile);
         self.relation = relation;
+        self.is_followed = is_followed;
         self.folders = folders;
         self.videos.clear();
         self.video_page = 1;

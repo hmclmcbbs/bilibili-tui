@@ -267,6 +267,7 @@ pub enum NetworkEvent {
         order: SpaceVideoOrder,
         profile: SpaceInfo,
         relation: Option<RelationStat>,
+        is_followed: Option<bool>,
         videos: SpaceVideoData,
         folders: Vec<FavoriteFolder>,
     },
@@ -570,6 +571,7 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
             match api_client.get_space_info(mid).await {
                 Ok(profile) => {
                     let relation = api_client.get_relation_stat(mid).await.ok();
+                    let is_followed = api_client.get_follow_status(mid).await.ok();
                     let folders = api_client
                         .get_favorite_folders(mid)
                         .await
@@ -581,6 +583,7 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                             order,
                             profile,
                             relation,
+                            is_followed,
                             videos,
                             folders,
                         },

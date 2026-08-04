@@ -315,6 +315,7 @@ impl App {
                 order,
                 profile,
                 relation,
+                is_followed,
                 videos,
                 folders,
             } => {
@@ -325,7 +326,7 @@ impl App {
                     && page.mid == mid
                     && page.video_order == order
                 {
-                    page.apply_initial(profile, relation, videos, folders);
+                    page.apply_initial(profile, relation, is_followed, videos, folders);
                 }
             }
             network::NetworkEvent::UpVideosLoaded {
