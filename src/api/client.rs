@@ -778,6 +778,59 @@ impl ApiClient {
         Ok(all)
     }
 
+    /// Fetch the AI subtitle track list for a video. Returns an empty list
+    /// when the video has no AI subtitles (or the player API hides them).
+    pub async fn get_video_subtitles(
+        &self,
+        bvid: &str,
+        cid: i64,
+    ) -> Result<Vec<super::subtitle::SubtitleInfo>> {
+        #[derive(serde::Deserialize)]
+        struct PlayerV2Data {
+            subtitle: PlayerSubtitle,
+        }
+        #[derive(serde::Deserialize)]
+        struct PlayerSubtitle {
+            #[serde(default)]
+            subtitles: Vec<super::subtitle::SubtitleInfo>,
+        }
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/player/wbi/v2");
+        let resp: ApiResponse<PlayerV2Data> = self
+            .get_with_wbi(
+                &url,
+                vec![("bvid", bvid.to_string()), ("cid", cid.to_string())],
+            )
+            .await?;
+        if resp.code != 0 {
+            return Err(anyhow!("player v2 API error {}: {}", resp.code, resp.message));
+        }
+        Ok(resp
+            .data
+            .map(|data| data.subtitle.subtitles)
+            .unwrap_or_default())
+    }
+
+    /// Fetch the cue list of one subtitle track by its (usually relative)
+    /// subtitle URL. Empty body means no cues (bad track).
+    pub async fn fetch_subtitle_cues(
+        &self,
+        subtitle_url: &str,
+    ) -> Result<Vec<super::subtitle::SubtitleCue>> {
+        let url = if subtitle_url.starts_with("//") {
+            format!("https:{subtitle_url}")
+        } else if subtitle_url.starts_with("http") {
+            subtitle_url.to_string()
+        } else {
+            format!("https://{subtitle_url}")
+        };
+        let response = self.client.get(&url).send().await?;
+        if !response.status().is_success() {
+            return Ok(Vec::new());
+        }
+        let text = response.text().await?;
+        super::subtitle::parse_subtitle_body(&text).map_err(anyhow::Error::from)
+    }
+
     /// Load the public profile shown at space.bilibili.com/{mid}.
     pub async fn get_space_info(&self, mid: i64) -> Result<super::space::SpaceInfo> {
         let url = self.build_url(BilibiliApiDomain::Main, "/x/space/wbi/acc/info");

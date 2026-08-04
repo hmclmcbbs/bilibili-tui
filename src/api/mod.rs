@@ -16,6 +16,7 @@ pub mod live_ws;
 pub mod recommend;
 pub mod search;
 pub mod space;
+pub mod subtitle;
 pub mod video;
 pub mod wbi;
 

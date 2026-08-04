@@ -19,6 +19,17 @@ const SCORE_TTL: Duration = Duration::from_secs(15 * 60);
 #[derive(Debug, Clone, Deserialize)]
 pub struct PlayUrlData {
     pub dash: Dash,
+    /// AI subtitle tracks returned by the player API. Bangumi playurls
+    /// carry them under `result.subtitle.subtitles`, regular videos under
+    /// `data.subtitle.subtitles`; both are deserialized into this field.
+    #[serde(default)]
+    pub subtitle: Option<SubtitleBlock>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SubtitleBlock {
+    #[serde(default)]
+    pub subtitles: Vec<crate::api::subtitle::SubtitleInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

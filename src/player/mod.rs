@@ -143,7 +143,7 @@ pub async fn play_video(
     // the media stream to start; danmaku is streamed to the Lua script over
     // IPC after playback begins, so waiting for the full history here would
     // only add latency.
-    let (mut media_proxy, danmaku) = tokio::join!(
+    let (mut media_proxy, danmaku, subtitle_paths) = tokio::join!(
         async {
             match api_client.get_play_url(bvid, cid, playback).await {
                 Ok(play_url) => match crate::api::cdn::rank_streams(&play_url, playback).await {
@@ -154,6 +154,35 @@ pub async fn play_video(
             }
         },
         async { api_client.get_video_danmaku(cid, duration).await.unwrap_or_default() },
+        async {
+            // Fetch AI subtitles concurrently and render them to SRT files.
+            // Chinese tracks are sorted first so mpv picks them as the
+            // default subtitle track; the rest stay selectable with `j`.
+            match api_client.get_video_subtitles(bvid, cid).await {
+                Ok(tracks) => {
+                    let mut entries: Vec<(bool, std::path::PathBuf)> = Vec::new();
+                    for (index, track) in tracks.iter().take(8).enumerate() {
+                        if let Ok(cues) =
+                            api_client.fetch_subtitle_cues(&track.subtitle_url).await
+                            && !cues.is_empty()
+                        {
+                            let srt = crate::api::subtitle::render_srt(&cues);
+                            let path = std::env::temp_dir()
+                                .join(format!("bilibili-tui-sub-{cid}-{index}.srt"));
+                            if tokio::fs::write(&path, srt).await.is_ok() {
+                                entries.push((
+                                    track.lan.to_lowercase().contains("zh"),
+                                    path,
+                                ));
+                            }
+                        }
+                    }
+                    entries.sort_by(|left, right| right.0.cmp(&left.0));
+                    entries.into_iter().map(|(_, path)| path).collect()
+                }
+                Err(_) => Vec::new(),
+            }
+        },
     );
     let ipc_path = mpv_ipc_path("bilibili-tui-mpv", &cid.to_string());
     remove_stale_mpv_ipc(&ipc_path);
@@ -191,6 +220,9 @@ pub async fn play_video(
     cmd.arg(format!("--referrer={webpage_url}"));
     cmd.arg(format!("--http-header-fields=Referer: {webpage_url}"));
     cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
+    for path in &subtitle_paths {
+        cmd.arg(format!("--sub-file={}", path.display()));
+    }
     cmd.arg(format!("--script={}", danmaku_script_path.display()));
     cmd.arg("--script-opts-append=double_video_fps=no");
     cmd.arg("--msg-level=ffmpeg=error,vd=warn");
@@ -211,6 +243,9 @@ pub async fn play_video(
                 let _ = crate::storage::remove_cookie_export(path);
             }
             let _ = std::fs::remove_file(&danmaku_script_path);
+            for path in &subtitle_paths {
+                let _ = std::fs::remove_file(path);
+            }
             return Err(error.into());
         }
     };
@@ -383,6 +418,9 @@ pub async fn play_video(
         }
         let _ = tokio::fs::remove_file(&ipc_path).await;
         let _ = tokio::fs::remove_file(&danmaku_script_path).await;
+        for path in &subtitle_paths {
+            let _ = tokio::fs::remove_file(path).await;
+        }
         let event = match exit_error {
             Some(error) => PlaybackEvent::Failed { session_id, error },
             None => PlaybackEvent::Finished {
@@ -1220,17 +1258,50 @@ pub async fn play_bangumi_episode(
     };
 
     let video_url = format!("https://www.bilibili.com/bangumi/play/ep{}", ep_id);
-    let media_proxy = match api_client.get_bangumi_play_url(ep_id, video_quality).await {
-        Ok(play_url) => match crate::api::cdn::rank_streams(
-            &play_url,
-            playback_options_from_quality(video_quality),
-        )
-        .await {
-            Ok(streams) => proxy::MediaProxy::start(streams).await.ok(),
-            Err(_) => None,
-        },
-        Err(_) => None,
-    };
+    let (media_proxy, subtitle_paths) =
+        match api_client.get_bangumi_play_url(ep_id, video_quality).await {
+            Ok(play_url) => {
+                let proxy = match crate::api::cdn::rank_streams(
+                    &play_url,
+                    playback_options_from_quality(video_quality),
+                )
+                .await
+                {
+                    Ok(streams) => proxy::MediaProxy::start(streams).await.ok(),
+                    Err(_) => None,
+                };
+                // Bangumi AI subtitles ride along in the playurl response
+                // (`result.subtitle.subtitles`). Render them to SRT files
+                // exactly like play_video does for regular videos.
+                let paths = match play_url.subtitle {
+                    Some(block) => {
+                        let mut entries: Vec<(bool, std::path::PathBuf)> = Vec::new();
+                        for (index, track) in block.subtitles.iter().take(8).enumerate() {
+                            if let Ok(cues) =
+                                api_client.fetch_subtitle_cues(&track.subtitle_url).await
+                                && !cues.is_empty()
+                            {
+                                let srt = crate::api::subtitle::render_srt(&cues);
+                                let path = std::env::temp_dir().join(format!(
+                                    "bilibili-tui-bangumi-sub-{ep_id}-{index}.srt"
+                                ));
+                                if tokio::fs::write(&path, srt).await.is_ok() {
+                                    entries.push((
+                                        track.lan.to_lowercase().contains("zh"),
+                                        path,
+                                    ));
+                                }
+                            }
+                        }
+                        entries.sort_by(|left, right| right.0.cmp(&left.0));
+                        entries.into_iter().map(|(_, path)| path).collect()
+                    }
+                    None => Vec::new(),
+                };
+                (proxy, paths)
+            }
+            Err(_) => (None, Vec::new()),
+        };
 
     // Fetch the danmaku history before spawning mpv; the Lua script renders
     // it incrementally over IPC once playback starts.
@@ -1265,6 +1336,9 @@ pub async fn play_bangumi_episode(
     cmd.arg(format!("--script={}", danmaku_script_path.display()));
     cmd.arg(format!("--referrer={video_url}"));
     cmd.arg(format!("--http-header-fields=Referer: {video_url}"));
+    for path in &subtitle_paths {
+        cmd.arg(format!("--sub-file={}", path.display()));
+    }
     if let Some(proxy) = &media_proxy {
         cmd.arg("--ytdl=no");
         cmd.arg(format!("--audio-file={}", proxy.audio_url));
@@ -1282,6 +1356,9 @@ pub async fn play_bangumi_episode(
                 let _ = crate::storage::remove_cookie_export(path);
             }
             let _ = std::fs::remove_file(&danmaku_script_path);
+            for path in &subtitle_paths {
+                let _ = std::fs::remove_file(path);
+            }
             return Err(error.into());
         }
     };
@@ -1342,6 +1419,9 @@ pub async fn play_bangumi_episode(
         }
         let _ = tokio::fs::remove_file(&ipc_path).await;
         let _ = tokio::fs::remove_file(&danmaku_script_path).await;
+        for path in &subtitle_paths {
+            let _ = tokio::fs::remove_file(path).await;
+        }
         drop(media_proxy);
         let event = match exit_status {
             Some(status) if status.success() => PlaybackEvent::Finished {
