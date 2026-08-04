@@ -10,6 +10,7 @@ mod live;
 mod live_detail;
 mod login;
 mod search;
+mod sections;
 mod settings;
 mod sidebar;
 pub mod theme;
@@ -29,6 +30,7 @@ pub use live::LivePage;
 pub use live_detail::LiveDetailPage;
 pub use login::LoginPage;
 pub use search::{SearchMode, SearchPage};
+pub use sections::SectionPage;
 pub use settings::SettingsPage;
 pub use sidebar::{NavItem, Sidebar};
 pub use theme::{DEFAULT_THEME_ID, Theme, ThemeChoice};
@@ -95,6 +97,7 @@ pub enum Page {
     Login(LoginPage),
     Home(HomePage),
     Search(SearchPage),
+    Sections(SectionPage),
     Dynamic(DynamicPage),
     DynamicDetail(Box<DynamicDetailPage>),
     ArticleDetail(Box<ArticleDetailPage>),

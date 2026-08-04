@@ -35,6 +35,18 @@ impl App {
                     page.apply_load_more(feed, videos);
                 }
             }
+            network::NetworkEvent::SectionRankingLoaded {
+                req_id,
+                rid,
+                videos,
+            } => {
+                if !self.is_latest_request("sections", req_id) {
+                    return;
+                }
+                if let Page::Sections(page) = &mut self.current_page {
+                    page.apply_videos(rid, videos);
+                }
+            }
             network::NetworkEvent::HotwordsLoaded { req_id, hotwords } => {
                 if !self.is_latest_request("hotwords", req_id) {
                     return;
@@ -273,7 +285,9 @@ impl App {
                     page.favorited = favorited;
                     page.default_media_id = default_media_id;
                     if page.interaction_msg.is_none() {
-                        page.interaction_msg = interaction_error;
+                        if let Some(err) = interaction_error {
+                            page.set_interaction_msg(err);
+                        }
                     }
                 }
             }
@@ -415,6 +429,33 @@ impl App {
                     page.apply_initial(watch_later, created, collected);
                 }
             }
+            network::NetworkEvent::FavoriteFoldersRefreshed {
+                req_id,
+                created,
+                collected,
+            } => {
+                if !self.is_latest_request("favorites_refresh", req_id) {
+                    return;
+                }
+                if let Page::Favorites(page) = &mut self.current_page {
+                    if let Some(media_id) =
+                        page.apply_folder_list_refresh(created, collected)
+                    {
+                        // Auto-navigate to the newly created folder
+                        let req_id = self.next_request_id("favorites_content");
+                        self.send_network_command(
+                            network::NetworkCommand::LoadFavoritesContent {
+                                req_id,
+                                source: crate::api::favorite::FavoriteSource::Created {
+                                    media_id,
+                                    title: String::new(),
+                                },
+                                page: 1,
+                            },
+                        );
+                    }
+                }
+            }
             network::NetworkEvent::FavoritesWatchLaterLoaded { req_id, page, data } => {
                 if !self.is_latest_request("favorites_content", req_id) {
                     return;
@@ -542,6 +583,9 @@ impl App {
                     }
                     (Page::Search(page), "search") => {
                         page.set_error(format!("搜索失败: {}", error))
+                    }
+                    (Page::Sections(page), "sections") => {
+                        page.apply_error(format!("加载分区失败: {}", error))
                     }
                     (Page::Dynamic(page), "dynamic_init")
                     | (Page::Dynamic(page), "dynamic_refresh")

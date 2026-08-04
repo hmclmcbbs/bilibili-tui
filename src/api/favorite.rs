@@ -73,9 +73,18 @@ pub struct FavoriteFolder {
 #[derive(Debug, Clone, Deserialize)]
 pub struct FavoriteResourceData {
     pub info: Option<FavoriteInfo>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_vec_from_nullable")]
     pub medias: Vec<FavoriteMedia>,
     pub has_more: Option<bool>,
+}
+
+fn deserialize_vec_from_nullable<'de, T, D>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Option::<Vec<T>>::deserialize(deserializer).map(|opt| opt.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Deserialize)]

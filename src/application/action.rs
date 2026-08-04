@@ -18,6 +18,12 @@ pub enum AppAction {
     /// Refresh home page recommendations (force reload)
     RefreshHome,
     SwitchHomeFeed(HomeFeed),
+    /// Switch the ranking section (rid) for the ranking feed.
+    SwitchRankingRid(i64),
+    /// Switch to the standalone sections (分区) page.
+    SwitchToSections,
+    /// Load videos for a section (rid) in the sections page.
+    SelectSection(i64),
     /// Switch to login page
     SwitchToLogin,
     /// Switch to settings page
@@ -147,6 +153,8 @@ pub enum AppAction {
         bvid: String,
         aid: i64,
     },
+    /// Load the user's favorite folders list (for the folder picker in video detail).
+    LoadUserFavoriteFolders,
     /// Add a comment (oid, comment_type, message, optional root rpid for replies)
     AddComment {
         oid: i64,
@@ -154,6 +162,8 @@ pub enum AppAction {
         message: String,
         root: Option<i64>,
     },
+    /// Toggle follow/unfollow an uploader (mid)
+    ToggleFollow { mid: i64 },
     /// Switch to live page
     SwitchToLive,
     /// Open live room detail

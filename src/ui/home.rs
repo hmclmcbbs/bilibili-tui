@@ -54,7 +54,25 @@ pub struct HomePage {
     pub search: SearchPage,
     pub focus_sources: bool,
     pub selected_source: usize,
+    /// Current ranking section (rid). 0 = 全站.
+    ranking_rid: i64,
 }
+
+/// Common Bilibili ranking sections: (rid, label).
+pub const RANKING_SECTIONS: &[(i64, &str)] = &[
+    (0, "全站"),
+    (1, "动画"),
+    (3, "音乐"),
+    (4, "游戏"),
+    (5, "娱乐"),
+    (36, "知识"),
+    (160, "生活"),
+    (119, "鬼畜"),
+    (155, "时尚"),
+    (181, "影视"),
+    (188, "科技"),
+    (234, "舞蹈"),
+];
 
 impl HomePage {
     fn draw_sources(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
@@ -103,6 +121,14 @@ impl HomePage {
                     .fg(theme.bilibili_pink)
                     .add_modifier(Modifier::BOLD),
             ),
+            if self.feed == HomeFeed::Ranking {
+                Span::styled(
+                    format!("  [{}] ", self.ranking_label()),
+                    Style::default().fg(theme.info),
+                )
+            } else {
+                Span::raw("")
+            },
             if self.loading_more {
                 Span::styled("  加载中…", Style::default().fg(theme.warning))
             } else {
@@ -207,7 +233,27 @@ impl HomePage {
             search: SearchPage::new(),
             focus_sources: true,
             selected_source: 1,
+            ranking_rid: 0,
         }
+    }
+
+    /// Current ranking section rid.
+    pub fn ranking_rid(&self) -> i64 {
+        self.ranking_rid
+    }
+
+    /// Set the ranking section rid.
+    pub fn set_ranking_rid(&mut self, rid: i64) {
+        self.ranking_rid = rid;
+    }
+
+    /// Label of the current ranking section.
+    fn ranking_label(&self) -> &'static str {
+        RANKING_SECTIONS
+            .iter()
+            .find(|(id, _)| *id == self.ranking_rid)
+            .map(|(_, label)| *label)
+            .unwrap_or("全站")
     }
 
     pub async fn load_recommendations(&mut self, api_client: &ApiClient) {
@@ -621,6 +667,31 @@ impl Component for HomePage {
             self.videos.clear();
             self.pending_downloads.clear();
             return Some(AppAction::RefreshHome);
+        }
+        // Ranking section switch: [ / ] cycles sections when in Ranking feed.
+        if self.feed == HomeFeed::Ranking {
+            if keys.matches_section_prev(key) || keys.matches_up_prev(key) {
+                let current = RANKING_SECTIONS
+                    .iter()
+                    .position(|(id, _)| *id == self.ranking_rid)
+                    .unwrap_or(0);
+                let next = if current == 0 {
+                    RANKING_SECTIONS.len() - 1
+                } else {
+                    current - 1
+                };
+                self.loading = true;
+                return Some(AppAction::SwitchRankingRid(RANKING_SECTIONS[next].0));
+            }
+            if keys.matches_section_next(key) || keys.matches_up_next(key) {
+                let current = RANKING_SECTIONS
+                    .iter()
+                    .position(|(id, _)| *id == self.ranking_rid)
+                    .unwrap_or(0);
+                let next = (current + 1) % RANKING_SECTIONS.len();
+                self.loading = true;
+                return Some(AppAction::SwitchRankingRid(RANKING_SECTIONS[next].0));
+            }
         }
         if keys.matches_next_theme(key) {
             return Some(AppAction::NextTheme);

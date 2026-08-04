@@ -534,6 +534,7 @@ impl ApiClient {
         feed: super::recommend::HomeFeed,
         page: i32,
         page_size: i32,
+        rid: i64,
     ) -> Result<Vec<super::recommend::VideoItem>> {
         use super::recommend::HomeFeed;
         let path = match feed {
@@ -585,7 +586,9 @@ impl ApiClient {
                     .unwrap_or_default();
                 return Ok(parse_home_videos(list));
             }
-            HomeFeed::Ranking => "/x/web-interface/ranking/v2?rid=0&type=all".to_string(),
+            HomeFeed::Ranking => {
+                format!("/x/web-interface/ranking/v2?rid={rid}&type=all")
+            }
             HomeFeed::MustWatch => "/x/web-interface/popular/precious".to_string(),
         };
         let url = format!("{}{}", BilibiliApiDomain::Main.as_str(), path);
@@ -1623,6 +1626,49 @@ impl ApiClient {
         Ok((folder.id, folder.fav_state.unwrap_or(0) == 1))
     }
 
+    /// Get all user-created favorite folders with favorite status for the
+    /// given video (for the folder picker in video detail).
+    pub async fn get_default_favorite_folder_list(
+        &self,
+        aid: i64,
+    ) -> Result<Vec<super::favorite::FavoriteFolder>> {
+        let cookie_str = self
+            .cookies
+            .read()
+            .expect("cookies lock poisoned")
+            .clone()
+            .ok_or_else(|| anyhow!("not logged in (no cookies)"))?;
+        let up_mid: i64 = cookie_str
+            .split(';')
+            .filter_map(|part| {
+                let mut it = part.trim().splitn(2, '=');
+                match (it.next(), it.next()) {
+                    (Some("DedeUserID"), Some(v)) => v.trim().parse::<i64>().ok(),
+                    _ => None,
+                }
+            })
+            .next()
+            .ok_or_else(|| anyhow!("not logged in (no DedeUserID)"))?;
+        let url = self.build_url(
+            BilibiliApiDomain::Main,
+            "/x/v3/fav/folder/created/list-all",
+        );
+        let resp: ApiResponse<super::favorite::FavoriteFolderData> = self
+            .get_with_wbi(
+                &url,
+                vec![
+                    ("up_mid", up_mid.to_string()),
+                    ("rid", aid.to_string()),
+                    ("type", "2".to_string()),
+                ],
+            )
+            .await?;
+        let data = resp
+            .data
+            .ok_or_else(|| anyhow!("no favorite folder data"))?;
+        Ok(data.list)
+    }
+
     /// Like (`like = true`) or unlike (`like = false`) a video.
     pub async fn like_video(&self, aid: i64, like: bool) -> Result<()> {
         let url =
@@ -1945,11 +1991,10 @@ impl ApiClient {
 
     /// Delete a favorite folder by its `media_id`.
     pub async fn delete_favorite_folder(&self, media_id: i64) -> Result<()> {
-        let url =
-            self.build_url(BilibiliApiDomain::Main, "/x/v3/fav/folder/del");
-        let form_data = vec![("media_id", media_id.to_string())];
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/v3/fav/folder/del");
+        let form_data = vec![("media_ids".to_string(), media_id.to_string())];
         let resp: ApiResponse<serde_json::Value> =
-            self.post_with_wbi(&url, form_data).await?;
+            self.post_with_owned(&url, form_data).await?;
         if resp.code != 0 {
             return Err(anyhow!(
                 "删除收藏夹失败 {}: {}",
@@ -1958,6 +2003,137 @@ impl ApiClient {
             ));
         }
         Ok(())
+    }
+
+    // ========== Danmaku Send API ==========
+
+    /// Send a danmaku (弹幕) to a video.
+    /// - `bvid`: Video BV ID
+    /// - `cid`: Video CID (page cid)
+    /// - `msg`: Danmaku text content
+    pub async fn send_danmaku(
+        &self,
+        bvid: &str,
+        cid: i64,
+        msg: &str,
+    ) -> Result<()> {
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/v2/dm/post");
+        let rnd = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_secs();
+        let form_data = vec![
+            ("type", "1".to_string()),
+            ("oid", cid.to_string()),
+            ("msg", msg.to_string()),
+            ("bvid", bvid.to_string()),
+            ("color", "16777215".to_string()),
+            ("fontsize", "25".to_string()),
+            ("mode", "1".to_string()),
+            ("rnd", rnd.to_string()),
+        ];
+        let resp: ApiResponse<serde_json::Value> =
+            self.post_with_wbi(&url, form_data).await?;
+        if resp.code != 0 {
+            return Err(anyhow!(
+                "发送弹幕失败 ({}): {}",
+                resp.code,
+                resp.message
+            ));
+        }
+        Ok(())
+    }
+
+    // ========== Relation APIs (关注/取关) ==========
+
+    /// Follow a user (关注).
+    pub async fn follow_user(&self, mid: i64) -> Result<()> {
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/relation/follow");
+        let form_data = vec![("fid", mid.to_string())];
+        let resp: ApiResponse<serde_json::Value> =
+            self.post_with_wbi(&url, form_data).await?;
+        if resp.code != 0 {
+            return Err(anyhow!(
+                "关注失败 ({}): {}",
+                resp.code,
+                resp.message
+            ));
+        }
+        Ok(())
+    }
+
+    /// Unfollow a user (取关).
+    pub async fn unfollow_user(&self, mid: i64) -> Result<()> {
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/relation/unfollow");
+        let form_data = vec![("fid", mid.to_string())];
+        let resp: ApiResponse<serde_json::Value> =
+            self.post_with_wbi(&url, form_data).await?;
+        if resp.code != 0 {
+            return Err(anyhow!(
+                "取关失败 ({}): {}",
+                resp.code,
+                resp.message
+            ));
+        }
+        Ok(())
+    }
+
+    /// Check whether the current user follows the given uploader.
+    /// Returns `true` if followed (attribute & 1 != 0).
+    pub async fn get_follow_status(&self, mid: i64) -> Result<bool> {
+        let url = self.build_url(
+            BilibiliApiDomain::Main,
+            &format!("/x/relation/stat?vmid={}", mid),
+        );
+        let resp: ApiResponse<serde_json::Value> = self.get(&url).await?;
+        if resp.code != 0 {
+            return Err(anyhow!(
+                "查询关注状态失败 ({}): {}",
+                resp.code,
+                resp.message
+            ));
+        }
+        let attribute = resp
+            .data
+            .as_ref()
+            .and_then(|data| data.get("attribute"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        Ok(attribute & 1 != 0)
+    }
+
+    // ========== Ranking API ==========
+
+    /// Get ranking videos for a specific section (分区排行榜).
+    /// `rid`: Section ID (0 = all, 1 = anime, 3 = music, etc.)
+    pub async fn get_ranking(
+        &self,
+        rid: i64,
+    ) -> Result<Vec<super::recommend::VideoItem>> {
+        let url = format!(
+            "{}/x/web-interface/ranking/v2?rid={}&type=all",
+            BilibiliApiDomain::Main.as_str(),
+            rid,
+        );
+        let value = self.get_json(&url).await?;
+        let code = value
+            .get("code")
+            .and_then(|v| v.as_i64())
+            .unwrap_or_default();
+        if code != 0 {
+            let message = value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown error");
+            return Err(anyhow!("Ranking API error {}: {}", code, message));
+        }
+        let list = value
+            .get("data")
+            .and_then(|d| d.get("list"))
+            .and_then(|l| l.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(parse_home_videos(list))
     }
 }
 fn parse_home_videos(items: Vec<serde_json::Value>) -> Vec<super::recommend::VideoItem> {

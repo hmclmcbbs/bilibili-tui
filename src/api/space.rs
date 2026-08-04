@@ -16,6 +16,9 @@ pub struct RelationStat {
     pub mid: i64,
     pub following: Option<i64>,
     pub follower: Option<i64>,
+    /// Whether the current user follows this UP (B站 field name: attation)
+    #[serde(default)]
+    pub attation: Option<i32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

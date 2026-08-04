@@ -8,6 +8,7 @@ use ratatui::{prelude::*, widgets::*};
 pub enum NavItem {
     Home,
     Search,
+    Sections,
     Dynamic,
     History,
     Favorites,
@@ -21,6 +22,7 @@ impl NavItem {
         match self {
             NavItem::Home => "🏠 首页",
             NavItem::Search => "🔍 搜索",
+            NavItem::Sections => "📊 分区",
             NavItem::Dynamic => "📺 动态",
             NavItem::History => "📜 历史",
             NavItem::Favorites => "⭐ 收藏夹",
@@ -33,6 +35,7 @@ impl NavItem {
     pub fn all() -> &'static [NavItem] {
         &[
             NavItem::Home,
+            NavItem::Sections,
             NavItem::Dynamic,
             NavItem::History,
             NavItem::Favorites,

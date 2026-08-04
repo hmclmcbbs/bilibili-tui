@@ -5,6 +5,7 @@ use super::{Component, Theme, shortcut_footer};
 use crate::api::client::ApiClient;
 use crate::api::comment::CommentItem;
 use crate::api::video::{RelatedVideoItem, VideoInfo};
+use crate::api::favorite::FavoriteFolder;
 use crate::application::AppAction;
 use crate::domain::playback::PlaybackOptions;
 use crate::storage::Keybindings;
@@ -46,6 +47,9 @@ pub struct VideoDetailPage {
     pub input_buffer: String,
     last_click_time: Option<Instant>,
     last_click_index: Option<usize>,
+    /// Whether the folder picker is active (after pressing `v`).
+    pub folder_picker_mode: bool,
+    pub folder_list: Vec<FavoriteFolder>,
     /// Current episode index for multi-part videos (0-based)
     pub current_page_index: usize,
     /// Scroll position in episode list
@@ -69,6 +73,8 @@ pub struct VideoDetailPage {
     pub default_media_id: Option<i64>,
     /// One-line feedback message for the last interaction (三连).
     pub interaction_msg: Option<String>,
+    /// When the feedback message was set, for auto-clear.
+    pub interaction_msg_set_at: Option<Instant>,
 }
 
 impl VideoDetailPage {
@@ -100,6 +106,8 @@ impl VideoDetailPage {
             input_buffer: String::new(),
             last_click_time: None,
             last_click_index: None,
+            folder_picker_mode: false,
+            folder_list: Vec::new(),
             current_page_index: 0,
             episode_scroll: 0,
             auto_play_pending: true,
@@ -112,6 +120,23 @@ impl VideoDetailPage {
             favorited: false,
             default_media_id: None,
             interaction_msg: None,
+            interaction_msg_set_at: None,
+        }
+    }
+
+    /// Set a one-line feedback message that auto-clears after 3 seconds.
+    pub fn set_interaction_msg(&mut self, msg: String) {
+        self.interaction_msg = Some(msg);
+        self.interaction_msg_set_at = Some(Instant::now());
+    }
+
+    /// Auto-clear the feedback message after 3 seconds.
+    pub fn tick(&mut self) {
+        if let Some(set_at) = self.interaction_msg_set_at {
+            if set_at.elapsed().as_secs() >= 3 {
+                self.interaction_msg = None;
+                self.interaction_msg_set_at = None;
+            }
         }
     }
 
@@ -211,7 +236,7 @@ impl VideoDetailPage {
                 Err(e) => errors.push(format!("收藏状态: {e}")),
             }
             if !errors.is_empty() && self.interaction_msg.is_none() {
-                self.interaction_msg = Some(errors.join(", "));
+                self.set_interaction_msg(errors.join(", "));
             }
         }
 
@@ -823,13 +848,14 @@ impl VideoDetailPage {
 impl Component for VideoDetailPage {
     fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &Theme, keys: &Keybindings) {
         // Adjust layout based on input mode
-        let chunks = if self.input_mode {
+        let show_extra_pane = self.input_mode || self.folder_picker_mode;
+        let chunks = if show_extra_pane {
             Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(6), // Video info
                     Constraint::Min(8),    // Comments + Related
-                    Constraint::Length(3), // Input box
+                    Constraint::Length(6), // Input box / Folder picker
                     Constraint::Length(2), // Help
                 ])
                 .split(area)
@@ -898,12 +924,13 @@ impl Component for VideoDetailPage {
 
         // Input box (only in input mode)
         if self.input_mode {
+            let input_title = " ✏️ 发表评论 ";
             let input_block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.bilibili_pink))
                 .title(Span::styled(
-                    " ✏️ 发表评论 ",
+                    input_title,
                     Style::default()
                         .fg(theme.bilibili_pink)
                         .add_modifier(Modifier::BOLD),
@@ -914,10 +941,38 @@ impl Component for VideoDetailPage {
                 .style(Style::default().fg(theme.fg_primary))
                 .block(input_block);
             frame.render_widget(input, chunks[2]);
+        } else if self.folder_picker_mode {
+            let picker_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.info))
+                .title(Span::styled(
+                    " 收藏到文件夹 [1-9] 选择, v/Esc 取消 ",
+                    Style::default()
+                        .fg(theme.info)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            let items: Vec<ListItem> = self
+                .folder_list
+                .iter()
+                .enumerate()
+                .map(|(i, folder)| {
+                    ListItem::new(format!(
+                        "  {} {} ({})",
+                        i + 1,
+                        folder.title,
+                        folder.media_count.unwrap_or_default()
+                    ))
+                })
+                .collect();
+            let list = List::new(items)
+                .block(picker_block)
+                .highlight_style(Style::default().fg(theme.bilibili_pink));
+            frame.render_widget(list, chunks[2]);
         }
 
         // Help
-        let help_chunk = if self.input_mode {
+        let help_chunk = if show_extra_pane {
             chunks[3]
         } else {
             chunks[2]
@@ -928,6 +983,14 @@ impl Component for VideoDetailPage {
                 [
                     (keys.confirm.clone(), "发送评论".into(), theme.success),
                     (keys.back.clone(), "取消".into(), theme.info),
+                ],
+            )
+        } else if self.folder_picker_mode {
+            shortcut_footer(
+                theme,
+                [
+                    ("1-9".into(), "选择文件夹".into(), theme.success),
+                    ("v/Esc".into(), "取消".into(), theme.info),
                 ],
             )
         } else {
@@ -992,6 +1055,30 @@ impl Component for VideoDetailPage {
             }
         }
 
+        // Folder picker mode (after pressing `v`)
+        if self.folder_picker_mode {
+            match key {
+                KeyCode::Esc | KeyCode::Char('v') => {
+                    self.folder_picker_mode = false;
+                    return Some(AppAction::None);
+                }
+                KeyCode::Char(c) if c.is_ascii_digit() => {
+                    let index = c.to_digit(10).unwrap() as usize;
+                    if index > 0 && index <= self.folder_list.len() {
+                        let folder = &self.folder_list[index - 1];
+                        self.folder_picker_mode = false;
+                        return Some(AppAction::FavoriteVideoInFolder {
+                            aid: self.aid,
+                            media_id: folder.id,
+                            add: true,
+                        });
+                    }
+                    return Some(AppAction::None);
+                }
+                _ => return Some(AppAction::None),
+            }
+        }
+
         if keys.matches_quit(key) || keys.matches_back(key) {
             return Some(AppAction::BackToList);
         }
@@ -1027,10 +1114,11 @@ impl Component for VideoDetailPage {
             });
         }
         if key == KeyCode::Char('v') {
-            return Some(AppAction::FavoriteVideo {
-                bvid: self.bvid.clone(),
-                aid: self.aid,
-            });
+            if self.folder_picker_mode {
+                self.folder_picker_mode = false;
+                return Some(AppAction::None);
+            }
+            return Some(AppAction::LoadUserFavoriteFolders);
         }
         if keys.matches_play(key) {
             return Some(self.play_action());

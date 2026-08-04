@@ -31,12 +31,18 @@ pub enum NetworkCommand {
         req_id: u64,
         feed: HomeFeed,
         use_guest_feed: bool,
+        rid: i64,
     },
     LoadHomeMore {
         req_id: u64,
         fresh_idx: i32,
         feed: HomeFeed,
         use_guest_feed: bool,
+        rid: i64,
+    },
+    LoadSectionRanking {
+        req_id: u64,
+        rid: i64,
     },
     LoadHotwords {
         req_id: u64,
@@ -145,6 +151,12 @@ pub enum NetworkCommand {
         req_id: u64,
         mid: i64,
     },
+    /// Reload only the folder lists (created + collected) without reloading
+    /// the page content.  Used after creating / deleting a folder.
+    RefreshFavoriteFolders {
+        req_id: u64,
+        mid: i64,
+    },
     LoadFavoritesContent {
         req_id: u64,
         source: FavoriteSource,
@@ -174,6 +186,11 @@ pub enum NetworkEvent {
     HomeMoreLoaded {
         req_id: u64,
         feed: HomeFeed,
+        videos: Vec<VideoItem>,
+    },
+    SectionRankingLoaded {
+        req_id: u64,
+        rid: i64,
         videos: Vec<VideoItem>,
     },
     HotwordsLoaded {
@@ -295,6 +312,12 @@ pub enum NetworkEvent {
         created: Vec<FavoriteFolder>,
         collected: Vec<CollectedFolder>,
     },
+    /// Folder lists refreshed (after create / delete) – no content change.
+    FavoriteFoldersRefreshed {
+        req_id: u64,
+        created: Vec<FavoriteFolder>,
+        collected: Vec<CollectedFolder>,
+    },
     FavoritesWatchLaterLoaded {
         req_id: u64,
         page: i32,
@@ -395,8 +418,10 @@ impl NetworkCommand {
     fn cancel_key(&self) -> &'static str {
         match self {
             Self::LoadHome { .. } | Self::LoadHomeMore { .. } => "home",
+            Self::LoadSectionRanking { .. } => "sections",
             Self::LoadFavoriteResources { .. }
             | Self::LoadFavoritesInit { .. }
+            | Self::RefreshFavoriteFolders { .. }
             | Self::LoadFavoritesContent { .. } => "favorites",
             Self::BuildUpPlaylist { .. } | Self::BuildFavoritePlaylist { .. } => "playlist",
             Self::CancelPending => "cancel",
@@ -447,13 +472,14 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
             req_id,
             feed,
             use_guest_feed,
+            rid,
         } => {
             let result = match (feed, use_guest_feed) {
                 (HomeFeed::Recommended, false) => api_client.get_recommendations().await,
                 (HomeFeed::Recommended, true) | (HomeFeed::Popular, _) => {
                     api_client.get_popular_videos(1, 20).await
                 }
-                _ => api_client.get_home_feed(feed, 1, 20).await,
+                _ => api_client.get_home_feed(feed, 1, 20, rid).await,
             };
             match result {
                 Ok(mut videos) => {
@@ -472,6 +498,7 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
             fresh_idx,
             feed,
             use_guest_feed,
+            rid,
         } => {
             let result = match (feed, use_guest_feed) {
                 (HomeFeed::Recommended, false) => {
@@ -480,7 +507,7 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 (HomeFeed::Recommended, true) | (HomeFeed::Popular, _) => {
                     api_client.get_popular_videos(fresh_idx, 20).await
                 }
-                _ => api_client.get_home_feed(feed, fresh_idx, 20).await,
+                _ => api_client.get_home_feed(feed, fresh_idx, 20, rid).await,
             };
             match result {
                 Ok(mut videos) => {
@@ -492,6 +519,19 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                     }
                 }
                 Err(e) => failed(req_id, "home_more", e),
+            }
+        }
+        NetworkCommand::LoadSectionRanking { req_id, rid } => {
+            match api_client.get_ranking(rid).await {
+                Ok(mut videos) => {
+                    enrich_followers(&api_client, &mut videos).await;
+                    NetworkEvent::SectionRankingLoaded {
+                        req_id,
+                        rid,
+                        videos,
+                    }
+                }
+                Err(e) => failed(req_id, "sections", e),
             }
         }
         NetworkCommand::LoadHotwords { req_id } => match api_client.get_hot_search().await {
@@ -730,6 +770,19 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                     }
                 }
                 Err(error) => failed(req_id, "favorites_init", error),
+            }
+        }
+        NetworkCommand::RefreshFavoriteFolders { req_id, mid } => {
+            let created = api_client
+                .get_favorite_folders(mid)
+                .await
+                .unwrap_or_default();
+            let collected = match api_client.get_collected_folders(mid, 1, 50).await {
+                Ok(collected) => collected.list,
+                Err(_) => Vec::new(),
+            };
+            NetworkEvent::FavoriteFoldersRefreshed {
+                req_id, created, collected,
             }
         }
         NetworkCommand::LoadFavoritesContent {

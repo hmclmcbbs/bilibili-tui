@@ -28,8 +28,12 @@ pub struct FavoritesPage {
     pub loading_more: bool,
     pub error: Option<String>,
     pub message: Option<String>,
+    pub message_set_at: Option<Instant>,
     pub input_mode: Option<InputMode>,
     pub input_text: String,
+    /// After creating a folder, store its media_id here so the next
+    /// folder-list refresh auto-navigates to it.
+    pub pending_navigate_media_id: Option<i64>,
     last_click_time: Option<Instant>,
     last_click_index: Option<usize>,
 }
@@ -54,8 +58,10 @@ impl FavoritesPage {
             loading_more: false,
             error: None,
             message: None,
+            message_set_at: None,
             input_mode: None,
             input_text: String::new(),
+            pending_navigate_media_id: None,
             last_click_time: None,
             last_click_index: None,
         }
@@ -97,6 +103,54 @@ impl FavoritesPage {
         self.error = None;
     }
 
+    /// Reload only the folder lists (created + collected) without resetting
+    /// the active source or clearing videos.  Used after creating / deleting
+    /// a folder so the sidebar refreshes but the user stays on the current
+    /// source.
+    /// If a `media_id` is stored here, the next folder-list refresh will
+    /// auto-navigate to it.  Set by `CreateFavoriteFolder`, consumed by
+    /// `apply_folder_list_refresh`.
+    pub fn pending_navigate_media_id(&self) -> Option<i64> {
+        self.pending_navigate_media_id
+    }
+
+    pub fn apply_folder_list_refresh(
+        &mut self,
+        created: Vec<FavoriteFolder>,
+        collected: Vec<CollectedFolder>,
+    ) -> Option<i64> {
+        self.created = created;
+        self.collected = collected;
+        self.loading = false;
+        // Check if we need to auto-navigate to a newly created folder.
+        if let Some(media_id) = self.pending_navigate_media_id.take() {
+            if self.created.iter().any(|f| f.id == media_id) {
+                self.active_source = FavoriteSource::Created {
+                    media_id,
+                    title: self
+                        .created
+                        .iter()
+                        .find(|f| f.id == media_id)
+                        .map(|f| f.title.clone())
+                        .unwrap_or_default(),
+                };
+                self.selected_source = 1; // first created folder
+                return Some(media_id);
+            }
+        }
+        // Keep active_source unchanged – user stays on whatever they were
+        // viewing.  If the active source was a created folder that no longer
+        // exists (e.g. just deleted), fall back to WatchLater.
+        if let FavoriteSource::Created { media_id, .. } = &self.active_source {
+            if !self.created.iter().any(|f| f.id == *media_id) {
+                self.active_source = FavoriteSource::WatchLater;
+                self.selected_source = 0;
+                self.videos.clear();
+            }
+        }
+        None
+    }
+
     pub fn begin_source_load(&mut self, source: FavoriteSource) {
         self.active_source = source;
         self.page = 1;
@@ -104,6 +158,22 @@ impl FavoritesPage {
         self.videos.clear();
         self.loading = true;
         self.error = None;
+    }
+
+    /// Set a feedback message that auto-clears after 3 seconds.
+    pub fn set_message(&mut self, msg: String) {
+        self.message = Some(msg);
+        self.message_set_at = Some(Instant::now());
+    }
+
+    /// Auto-clear the feedback message after 3 seconds.
+    pub fn tick(&mut self) {
+        if let Some(set_at) = self.message_set_at {
+            if set_at.elapsed().as_secs() >= 3 {
+                self.message = None;
+                self.message_set_at = None;
+            }
+        }
     }
 
     pub fn apply_watch_later(&mut self, page: i32, data: WatchLaterData) {
@@ -446,7 +516,7 @@ impl Component for FavoritesPage {
                 if let FavoriteSource::Created { media_id, title } = source {
                     let title = title.clone();
                     let mid = self.mid;
-                    self.message = Some(format!("已删除收藏夹: {title}"));
+                    self.set_message(format!("已删除收藏夹: {title}"));
                     return Some(AppAction::DeleteFavoriteFolder(*media_id));
                 }
             }

@@ -56,6 +56,12 @@ pub struct UpPage {
     pub loading: bool,
     pub loading_more: bool,
     pub error: Option<String>,
+    /// Whether the current user follows this uploader. None = unknown.
+    pub is_followed: Option<bool>,
+    /// One-line follow feedback message.
+    pub follow_msg: Option<String>,
+    /// When the follow feedback was set, for auto-clear.
+    pub follow_msg_set_at: Option<std::time::Instant>,
 }
 
 impl UpPage {
@@ -90,6 +96,9 @@ impl UpPage {
             loading: true,
             loading_more: false,
             error: None,
+            is_followed: None,
+            follow_msg: None,
+            follow_msg_set_at: None,
         }
     }
 
@@ -281,6 +290,16 @@ impl UpPage {
         self.error = Some(error);
     }
 
+    /// Auto-clear the follow feedback message after 3 seconds.
+    pub fn tick(&mut self) {
+        if let Some(set_at) = self.follow_msg_set_at {
+            if set_at.elapsed().as_secs() >= 3 {
+                self.follow_msg = None;
+                self.follow_msg_set_at = None;
+            }
+        }
+    }
+
     fn selected_grid(&mut self) -> &mut VideoCardGrid {
         match self.tab {
             UpTab::Videos => &mut self.videos,
@@ -290,6 +309,12 @@ impl UpPage {
     }
 
     fn draw_header(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        // Split header into left (UP info) and right (follow box)
+        let header_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
+            .split(area);
+
         let (name, sign) = self
             .profile
             .as_ref()
@@ -306,7 +331,7 @@ impl UpPage {
                 )
             })
             .unwrap_or_default();
-        let text = vec![
+        let lines = vec![
             Line::from(Span::styled(
                 name,
                 Style::default()
@@ -317,10 +342,61 @@ impl UpPage {
             Line::from(Span::styled(stats, Style::default().fg(theme.fg_muted))),
         ];
         frame.render_widget(
-            Paragraph::new(text)
+            Paragraph::new(lines)
                 .wrap(Wrap { trim: true })
                 .block(Block::default().borders(Borders::ALL).title(" UP主空间 ")),
-            area,
+            header_chunks[0],
+        );
+
+        // Follow status box
+        let follow_state = match self.is_followed {
+            Some(true) => "已关注".to_string(),
+            Some(false) => "未关注".to_string(),
+            None => "关注状态未知".to_string(),
+        };
+        let state_style = match self.is_followed {
+            Some(true) => theme.success,
+            Some(false) => theme.warning,
+            None => theme.fg_muted,
+        };
+        let mut follow_lines = vec![
+            Line::from(vec![
+                Span::styled(
+                    "● ",
+                    Style::default().fg(if self.is_followed == Some(true) {
+                        theme.success
+                    } else {
+                        theme.fg_muted
+                    }),
+                ),
+                Span::styled(follow_state, Style::default().fg(state_style).add_modifier(Modifier::BOLD)),
+            ]),
+            Line::from(Span::styled(
+                "[f] 切换关注",
+                Style::default().fg(theme.info),
+            )),
+        ];
+        if let Some(msg) = &self.follow_msg {
+            follow_lines.push(Line::from(Span::styled(
+                msg.clone(),
+                Style::default().fg(theme.info),
+            )));
+        }
+        let border_style = if self.is_followed == Some(true) {
+            Style::default().fg(theme.success)
+        } else {
+            Style::default().fg(theme.border_subtle)
+        };
+        frame.render_widget(
+            Paragraph::new(follow_lines)
+                .wrap(Wrap { trim: true })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(border_style)
+                        .title(" 关注 "),
+                ),
+            header_chunks[1],
         );
     }
 }
@@ -503,6 +579,9 @@ impl Component for UpPage {
                     PlayOrder::Shuffle => PlayOrder::Forward,
                 };
                 return Some(AppAction::None);
+            }
+            KeyCode::Char('f') => {
+                return Some(AppAction::ToggleFollow { mid: self.mid });
             }
             _ => {}
         }

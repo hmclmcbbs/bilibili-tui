@@ -180,6 +180,7 @@ impl App {
                 page.draw(frame, area, &self.theme, &self.keybindings);
             }
             Page::Search(page) => page.draw(frame, area, &self.theme, &self.keybindings),
+            Page::Sections(page) => page.draw(frame, area, &self.theme, &self.keybindings),
             Page::Dynamic(page) => page.draw(frame, area, &self.theme, &self.keybindings),
             Page::DynamicDetail(page) => page.draw(frame, area, &self.theme, &self.keybindings),
             Page::ArticleDetail(page) => page.draw(frame, area, &self.theme, &self.keybindings),
@@ -204,6 +205,7 @@ impl App {
             Page::Login(page) => page.handle_input(key, keys),
             Page::Home(page) => page.handle_input(key, keys),
             Page::Search(page) => page.handle_input(key, keys),
+            Page::Sections(page) => page.handle_input(key, keys),
             Page::Dynamic(page) => page.handle_input_with_modifiers(key, modifiers, keys),
             Page::DynamicDetail(page) => page.handle_input(key, keys),
             Page::ArticleDetail(page) => page.handle_input(key, keys),
@@ -228,6 +230,7 @@ impl App {
             Page::Login(page) => page.handle_mouse(event, area),
             Page::Home(page) => page.handle_mouse(event, area),
             Page::Search(page) => page.handle_mouse(event, area),
+            Page::Sections(page) => page.handle_mouse(event, area),
             Page::Dynamic(page) => page.handle_mouse(event, area),
             Page::DynamicDetail(page) => page.handle_mouse(event, area),
             Page::ArticleDetail(page) => page.handle_mouse(event, area),
@@ -337,11 +340,16 @@ impl App {
                 page.poll_cover_results();
                 page.start_cover_downloads();
             }
+            Page::Sections(page) => {
+                page.videos.poll_cover_results();
+                page.videos.start_cover_downloads();
+            }
             Page::Dynamic(page) => {
                 page.poll_cover_results();
                 page.start_cover_downloads();
             }
             Page::VideoDetail(page) => {
+                page.tick();
                 page.poll_cover_results();
                 page.start_cover_downloads();
             }
@@ -354,6 +362,7 @@ impl App {
                 page.start_cover_downloads();
             }
             Page::Favorites(page) => {
+                page.tick();
                 page.videos.poll_cover_results();
                 page.videos.start_cover_downloads();
             }
@@ -362,6 +371,7 @@ impl App {
                 page.index_grid.start_cover_downloads();
             }
             Page::Up(page) => {
+                page.tick();
                 page.videos.poll_cover_results();
                 page.videos.start_cover_downloads();
                 page.favorite_videos.poll_cover_results();

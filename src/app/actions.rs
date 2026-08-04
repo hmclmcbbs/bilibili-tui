@@ -4,7 +4,7 @@ use crate::infrastructure::{media, persistence};
 use crate::presentation::tui::{
     ArticleDetailPage, BangumiDetailPage, BangumiPage, DynamicDetailPage, DynamicPage,
     FavoritesPage, HistoryPage, HomePage, LiveDetailPage, LivePage, LoginPage, NavItem, Page,
-    SearchPage, SettingsPage, Theme, UpPage,
+    SearchPage, SectionPage, SettingsPage, Theme, UpPage,
 };
 use std::sync::Arc;
 
@@ -72,12 +72,55 @@ impl App {
                 // Invalidate any pending pagination result before switching.
                 self.next_request_id("home_more");
                 let use_guest_feed = self.credentials.is_none();
+                let rid = if let Page::Home(page) = &mut self.current_page {
+                    page.ranking_rid()
+                } else {
+                    0
+                };
                 if let Page::Home(page) = &mut self.current_page {
                     page.begin_feed_load(feed);
                     self.send_network_command(network::NetworkCommand::LoadHome {
                         req_id,
                         feed,
                         use_guest_feed,
+                        rid,
+                    });
+                }
+            }
+            AppAction::SwitchRankingRid(rid) => {
+                let req_id = self.next_request_id("home");
+                self.next_request_id("home_more");
+                let use_guest_feed = self.credentials.is_none();
+                let feed = if let Page::Home(page) = &mut self.current_page {
+                    page.set_ranking_rid(rid);
+                    page.feed()
+                } else {
+                    return;
+                };
+                if let Page::Home(page) = &mut self.current_page {
+                    page.begin_feed_load(feed);
+                    self.send_network_command(network::NetworkCommand::LoadHome {
+                        req_id,
+                        feed,
+                        use_guest_feed,
+                        rid,
+                    });
+                }
+            }
+            AppAction::SwitchToSections => {
+                self.sidebar.select(NavItem::Sections);
+                if !matches!(self.current_page, Page::Sections(_)) {
+                    self.current_page = Page::Sections(SectionPage::new());
+                    self.init_current_page().await;
+                }
+            }
+            AppAction::SelectSection(rid) => {
+                let req_id = self.next_request_id("sections");
+                if let Page::Sections(page) = &mut self.current_page {
+                    page.begin_load();
+                    self.send_network_command(network::NetworkCommand::LoadSectionRanking {
+                        req_id,
+                        rid,
                     });
                 }
             }
@@ -366,6 +409,16 @@ impl App {
                     mid,
                     order: crate::api::space::SpaceVideoOrder::Latest,
                 });
+                // Query follow status for the current user.
+                if self.credentials.is_some() {
+                    let client = self.api_client.clone();
+                    let followed = client.get_follow_status(mid).await.unwrap_or(false);
+                    if let Page::Up(page) = &mut self.current_page
+                        && page.mid == mid
+                    {
+                        page.is_followed = Some(followed);
+                    }
+                }
             }
             AppAction::RefreshUpPage => {
                 if let Page::Up(page) = &mut self.current_page {
@@ -378,6 +431,15 @@ impl App {
                         mid,
                         order,
                     });
+                    if self.credentials.is_some() {
+                        let client = self.api_client.clone();
+                        let followed = client.get_follow_status(mid).await.unwrap_or(false);
+                        if let Page::Up(page) = &mut self.current_page
+                            && page.mid == mid
+                        {
+                            page.is_followed = Some(followed);
+                        }
+                    }
                 }
             }
             AppAction::SwitchUpVideoOrder(order) => {
@@ -644,11 +706,17 @@ impl App {
                 };
                 if let Some((fresh_idx, feed)) = request {
                     let req_id = self.next_request_id("home_more");
+                    let rid = if let Page::Home(page) = &mut self.current_page {
+                        page.ranking_rid()
+                    } else {
+                        0
+                    };
                     self.send_network_command(network::NetworkCommand::LoadHomeMore {
                         req_id,
                         fresh_idx,
                         feed,
                         use_guest_feed: self.credentials.is_none(),
+                        rid,
                     });
                 }
             }
@@ -935,14 +1003,14 @@ impl App {
                     match client.like_video(aid, target).await {
                         Ok(()) => {
                             page.liked = target;
-                            page.interaction_msg = Some(if target {
+                            page.set_interaction_msg(if target {
                                 "已点赞".to_string()
                             } else {
                                 "已取消点赞".to_string()
                             });
                         }
                         Err(e) => {
-                            page.interaction_msg = Some(format!("点赞失败: {e}"));
+                            page.set_interaction_msg(format!("点赞失败: {e}"));
                         }
                     }
                 }
@@ -955,20 +1023,41 @@ impl App {
                 let client = self.api_client.clone();
                 if let Page::VideoDetail(page) = &mut self.current_page {
                     if page.coined >= 2 {
-                        page.interaction_msg = Some("投币已达上限 (2枚)".to_string());
+                        page.set_interaction_msg("投币已达上限 (2枚)".to_string());
                         return;
                     }
                     match client.coin_video(aid, 1, true).await {
                         Ok(()) => {
                             page.coined += 1;
                             page.liked = true; // select_like=1
-                            page.interaction_msg =
-                                Some(format!("已投币 {} 枚", page.coined));
+                            page.set_interaction_msg(format!("已投币 {} 枚", page.coined));
                         }
                         Err(e) => {
-                            page.interaction_msg = Some(format!("投币失败: {e}"));
+                            page.set_interaction_msg(format!("投币失败: {e}"));
                         }
                     }
+                }
+            }
+            AppAction::LoadUserFavoriteFolders => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    return;
+                }
+                let client = self.api_client.clone();
+                if let Page::VideoDetail(page) = &mut self.current_page {
+                    let aid = page.aid;
+                    let bvid = page.bvid.clone();
+                    let folders = client
+                        .get_default_favorite_folder_list(aid)
+                        .await
+                        .unwrap_or_default();
+                    // Clear old state and set picker
+                    page.folder_picker_mode = true;
+                    page.folder_list = folders;
+                    page.set_interaction_msg(format!(
+                        "选择收藏夹 [1-{}]",
+                        page.folder_list.len()
+                    ));
                 }
             }
             AppAction::FavoriteVideo { bvid: _, aid } => {
@@ -979,21 +1068,21 @@ impl App {
                 let client = self.api_client.clone();
                 if let Page::VideoDetail(page) = &mut self.current_page {
                     let Some(media_id) = page.default_media_id else {
-                        page.interaction_msg = Some("未找到收藏夹".to_string());
+                        page.set_interaction_msg("未找到收藏夹".to_string());
                         return;
                     };
                     let target = !page.favorited;
                     match client.favorite_video(aid, media_id, target).await {
                         Ok(()) => {
                             page.favorited = target;
-                            page.interaction_msg = Some(if target {
+                            page.set_interaction_msg(if target {
                                 "已收藏".to_string()
                             } else {
                                 "已取消收藏".to_string()
                             });
                         }
                         Err(e) => {
-                            page.interaction_msg = Some(format!("收藏失败: {e}"));
+                            page.set_interaction_msg(format!("收藏失败: {e}"));
                         }
                     }
                 }
@@ -1018,6 +1107,36 @@ impl App {
                         page.load_data(&client).await;
                     } else if let Page::DynamicDetail(page) = &mut self.current_page {
                         page.load_data(&client).await;
+                    }
+                }
+            }
+            AppAction::ToggleFollow { mid } => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    return;
+                }
+                let client = self.api_client.clone();
+                let followed = client.get_follow_status(mid).await.unwrap_or(false);
+                match if followed {
+                    client.unfollow_user(mid).await
+                } else {
+                    client.follow_user(mid).await
+                } {
+                    Ok(()) => {
+                        if let Page::Up(page) = &mut self.current_page {
+                            let new_state = !followed;
+                            page.is_followed = Some(new_state);
+                            page.follow_msg =
+                                Some(if new_state { "已关注".to_string() } else { "已取消关注".to_string() });
+                            page.follow_msg_set_at = Some(std::time::Instant::now());
+                        }
+                    }
+                    Err(e) => {
+                        if let Page::Up(page) = &mut self.current_page {
+                            page.follow_msg =
+                                Some(format!("操作失败: {e}"));
+                            page.follow_msg_set_at = Some(std::time::Instant::now());
+                        }
                     }
                 }
             }
@@ -1220,13 +1339,14 @@ impl App {
                 match client.create_favorite_folder(&title, &intro, privacy).await {
                     Ok(id) => {
                         if let Page::Favorites(page) = &mut self.current_page {
-                            page.message = Some(format!("已创建: {title}"));
-                            // Reload folder list
+                            page.set_message(format!("已创建: {title}"));
                             page.loading = true;
+                            // Store the new folder's id so the refresh auto-navigates to it
+                            page.pending_navigate_media_id = Some(id);
                             let mid = page.mid;
-                            let req_id = self.next_request_id("fav_init");
+                            let req_id = self.next_request_id("favorites_refresh");
                             self.send_network_command(
-                                network::NetworkCommand::LoadFavoritesInit {
+                                network::NetworkCommand::RefreshFavoriteFolders {
                                     req_id,
                                     mid,
                                 },
@@ -1235,7 +1355,7 @@ impl App {
                     }
                     Err(e) => {
                         if let Page::Favorites(page) = &mut self.current_page {
-                            page.message = Some(format!("创建失败: {e}"));
+                            page.set_message(format!("创建失败: {e}"));
                         }
                     }
                 }
@@ -1249,12 +1369,12 @@ impl App {
                 match client.delete_favorite_folder(media_id).await {
                     Ok(()) => {
                         if let Page::Favorites(page) = &mut self.current_page {
-                            page.message = Some("已删除收藏夹".to_string());
+                            page.set_message("已删除收藏夹".to_string());
                             page.loading = true;
                             let mid = page.mid;
-                            let req_id = self.next_request_id("fav_init");
+                            let req_id = self.next_request_id("favorites_refresh");
                             self.send_network_command(
-                                network::NetworkCommand::LoadFavoritesInit {
+                                network::NetworkCommand::RefreshFavoriteFolders {
                                     req_id,
                                     mid,
                                 },
@@ -1263,7 +1383,7 @@ impl App {
                     }
                     Err(e) => {
                         if let Page::Favorites(page) = &mut self.current_page {
-                            page.message = Some(format!("删除失败: {e}"));
+                            page.set_message(format!("删除失败: {e}"));
                         }
                     }
                 }
@@ -1277,13 +1397,17 @@ impl App {
                 match client.favorite_video(aid, media_id, add).await {
                     Ok(()) => {
                         if let Page::VideoDetail(page) = &mut self.current_page {
-                            page.interaction_msg = Some(if add {
+                            if add {
+                                page.favorited = true;
+                                page.default_media_id = Some(media_id);
+                            }
+                            page.set_interaction_msg(if add {
                                 "已收藏".to_string()
                             } else {
                                 "已取消收藏".to_string()
                             });
                         } else if let Page::Favorites(page) = &mut self.current_page {
-                            page.message = Some(if add {
+                            page.set_message(if add {
                                 "已收藏到指定收藏夹".to_string()
                             } else {
                                 "已从收藏夹移除".to_string()
@@ -1303,9 +1427,9 @@ impl App {
                     }
                     Err(e) => {
                         if let Page::VideoDetail(page) = &mut self.current_page {
-                            page.interaction_msg = Some(format!("收藏失败: {e}"));
+                            page.set_interaction_msg(format!("收藏失败: {e}"));
                         } else if let Page::Favorites(page) = &mut self.current_page {
-                            page.message = Some(format!("操作失败: {e}"));
+                            page.set_message(format!("操作失败: {e}"));
                         }
                     }
                 }
@@ -1372,6 +1496,12 @@ impl App {
             NavItem::Search => {
                 if !matches!(self.current_page, Page::Search(_)) {
                     self.current_page = Page::Search(SearchPage::new());
+                    self.init_current_page().await;
+                }
+            }
+            NavItem::Sections => {
+                if !matches!(self.current_page, Page::Sections(_)) {
+                    self.current_page = Page::Sections(SectionPage::new());
                     self.init_current_page().await;
                 }
             }
@@ -1453,10 +1583,16 @@ impl App {
                     page.feed()
                 };
                 let home_req_id = self.next_request_id("home");
+                let rid = if let Page::Home(page) = &mut self.current_page {
+                    page.ranking_rid()
+                } else {
+                    0
+                };
                 self.send_network_command(network::NetworkCommand::LoadHome {
                     req_id: home_req_id,
                     feed,
                     use_guest_feed: self.credentials.is_none(),
+                    rid,
                 });
                 let hotword_req_id = self.next_request_id("hotwords");
                 self.send_network_command(network::NetworkCommand::LoadHotwords {
@@ -1476,6 +1612,15 @@ impl App {
                 page.start_hotword_loading();
                 let req_id = self.next_request_id("hotwords");
                 self.send_network_command(network::NetworkCommand::LoadHotwords { req_id });
+            }
+            Page::Sections(page) => {
+                let rid = page.selected_rid();
+                page.begin_load();
+                let req_id = self.next_request_id("sections");
+                self.send_network_command(network::NetworkCommand::LoadSectionRanking {
+                    req_id,
+                    rid,
+                });
             }
             Page::Dynamic(page) => {
                 if self.credentials.is_none() {
