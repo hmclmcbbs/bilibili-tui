@@ -190,6 +190,62 @@ impl App {
                     }
                 }
             }
+            network::NetworkEvent::NotificationsLoaded {
+                req_id,
+                append,
+                feed_type,
+                items,
+                unread,
+            } => {
+                let key = if append {
+                    "notifications_more"
+                } else {
+                    "notifications"
+                };
+                if !self.is_latest_request(key, req_id) {
+                    return;
+                }
+                if let Page::Notifications(page) = &mut self.current_page {
+                    if page.tab.feed_type() != feed_type {
+                        return;
+                    }
+                    page.apply_items(items, append);
+                    page.apply_unread(unread.0, unread.1, unread.2, unread.3);
+                }
+            }
+            network::NetworkEvent::ChatSessionsLoaded { req_id, sessions } => {
+                if !self.is_latest_request("notifications", req_id) {
+                    return;
+                }
+                if let Page::Notifications(page) = &mut self.current_page {
+                    page.apply_sessions(sessions);
+                }
+            }
+            network::NetworkEvent::ChatDetailLoaded {
+                req_id,
+                talker_id,
+                messages,
+            } => {
+                if !self.is_latest_request("chat_detail", req_id) {
+                    return;
+                }
+                if let Page::Notifications(page) = &mut self.current_page {
+                    page.apply_chat_messages(talker_id, messages);
+                }
+            }
+            network::NetworkEvent::ChatMessageSent {
+                req_id,
+                talker_id: _,
+                ok,
+                error,
+            } => {
+                if !self.is_latest_request("chat_send", req_id) {
+                    return;
+                }
+                if let Page::Notifications(page) = &mut self.current_page {
+                    page.apply_chat_sent(ok, error);
+                }
+            }
             network::NetworkEvent::HistoryDeleted {
                 req_id,
                 successful,
@@ -547,10 +603,30 @@ impl App {
                     page.set_index_items(items);
                 }
             }
+            network::NetworkEvent::BangumiFollowListLoaded { req_id, items } => {
+                if !self.is_latest_request("bangumi_follow_list", req_id) {
+                    return;
+                }
+                if let Page::Bangumi(page) = &mut self.current_page {
+                    page.set_follow_items(items);
+                }
+            }
+            network::NetworkEvent::BangumiSearchLoaded { req_id, keyword, items } => {
+                if !self.is_latest_request("bangumi_search", req_id) {
+                    return;
+                }
+                if let Page::Bangumi(page) = &mut self.current_page {
+                    if page.search_query() != keyword {
+                        return;
+                    }
+                    page.set_search_items(items);
+                }
+            }
             network::NetworkEvent::BangumiDetailLoaded {
                 req_id,
                 season_id,
                 season,
+                followed,
             } => {
                 if !self.is_latest_request("bangumi_detail", req_id) {
                     return;
@@ -560,6 +636,11 @@ impl App {
                         return;
                     }
                     page.set_season(season);
+                    // Override the follow state: set_season keeps user_status
+                    // when login=1, but the pgc view often reports login=0 for
+                    // valid sessions, so the network layer resolved the real
+                    // state from the follow list and we apply it here.
+                    page.apply_follow_status(followed);
                 }
             }
             network::NetworkEvent::RequestFailed {
@@ -637,8 +718,20 @@ impl App {
                     (Page::Bangumi(page), "bangumi_index") => {
                         page.set_error(format!("加载番剧索引失败: {}", error));
                     }
+                    (Page::Bangumi(page), "bangumi_follow_list") => {
+                        page.set_follow_error(format!("加载追番列表失败: {}", error));
+                    }
                     (Page::BangumiDetail(page), "bangumi_detail") => {
                         page.set_error(format!("加载番剧详情失败: {}", error));
+                    }
+                    (Page::Notifications(page), "chat_sessions") => {
+                        page.apply_sessions_error(format!("加载会话失败: {error}"));
+                    }
+                    (Page::Notifications(page), "chat_detail") => {
+                        page.apply_sessions_error(format!("加载聊天失败: {error}"));
+                    }
+                    (Page::Notifications(page), "notifications_init") => {
+                        page.apply_items_error(format!("加载消息失败: {error}"));
                     }
                     _ => {}
                 }

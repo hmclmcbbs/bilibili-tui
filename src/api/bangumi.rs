@@ -157,6 +157,24 @@ pub struct SeasonResult {
     pub is_finish: Option<i32>,
     #[serde(rename = "index_show")]
     pub index_show: Option<String>,
+    #[serde(rename = "user_status")]
+    pub user_status: Option<UserStatus>,
+}
+
+/// Current user's follow state for a season (requires login).
+#[derive(Debug, Clone, Deserialize)]
+pub struct UserStatus {
+    /// 1 = followed (追番/追剧)
+    #[serde(default)]
+    pub follow: i32,
+    /// 1 = anime (番剧), 2 = drama (影视), 3 = sports (赛事)
+    #[serde(rename = "follow_status", default)]
+    pub follow_status: i32,
+    /// 1 = the endpoint recognised the login cookie. When 0 the follow field
+    /// is meaningless (Bilibili's pgc season view sometimes answers login=0
+    /// even for valid sessions), so callers must fall back to the follow list.
+    #[serde(default)]
+    pub login: i32,
 }
 
 #[derive(Debug, Deserialize)]

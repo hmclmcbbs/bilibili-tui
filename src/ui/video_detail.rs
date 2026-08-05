@@ -930,9 +930,13 @@ impl Component for VideoDetailPage {
             }
         }
 
-        // Input box (only in input mode)
-        if self.input_mode {
-            let input_title = " ✏️ 发表评论 ";
+         // Input box (only in input mode)
+         if self.input_mode {
+             let input_title = if self.expanded_comment.is_some() {
+                 " 💬 回复评论 "
+             } else {
+                 " ✏️ 发表评论 "
+             };
             let input_block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
@@ -1046,7 +1050,7 @@ impl Component for VideoDetailPage {
                             oid: self.aid,
                             comment_type: 1, // Video comment type
                             message,
-                            root: None,
+                            root: self.expanded_comment, // 回复展开的评论
                         });
                     }
                     return Some(AppAction::None);

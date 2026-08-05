@@ -169,9 +169,39 @@ pub enum NetworkCommand {
     LoadBangumiIndex {
         req_id: u64,
     },
+    LoadBangumiFollowList {
+        req_id: u64,
+        mid: i64,
+    },
     LoadBangumiDetail {
         req_id: u64,
         season_id: i64,
+    },
+    LoadBangumiSearch {
+        req_id: u64,
+        keyword: String,
+        page: i32,
+    },
+    LoadNotificationsInit {
+        req_id: u64,
+        feed_type: i32,
+    },
+    LoadNotificationsMore {
+        req_id: u64,
+        feed_type: i32,
+        page: i32,
+    },
+    LoadChatSessions {
+        req_id: u64,
+    },
+    LoadChatDetail {
+        req_id: u64,
+        talker_id: i64,
+    },
+    SendChatMessage {
+        req_id: u64,
+        talker_id: i64,
+        content: String,
     },
 }
 
@@ -197,6 +227,33 @@ pub enum NetworkEvent {
         req_id: u64,
         hotwords: Vec<HotwordItem>,
     },
+    HistoryLoaded {
+        req_id: u64,
+        append: bool,
+        data: HistoryData,
+    },
+    NotificationsLoaded {
+        req_id: u64,
+        append: bool,
+        feed_type: i32,
+        items: Vec<crate::api::msg::NotificationItem>,
+        unread: (i32, i32, i32, i32),
+    },
+    ChatSessionsLoaded {
+        req_id: u64,
+        sessions: Vec<crate::api::msg::ChatSession>,
+    },
+    ChatDetailLoaded {
+        req_id: u64,
+        talker_id: i64,
+        messages: Vec<crate::api::msg::ChatMessage>,
+    },
+    ChatMessageSent {
+        req_id: u64,
+        talker_id: i64,
+        ok: bool,
+        error: Option<String>,
+    },
     SearchLoaded {
         req_id: u64,
         keyword: String,
@@ -218,11 +275,6 @@ pub enum NetworkEvent {
         items: Vec<crate::api::dynamic::DynamicItem>,
         offset: Option<String>,
         has_more: bool,
-    },
-    HistoryLoaded {
-        req_id: u64,
-        append: bool,
-        data: HistoryData,
     },
     HistoryDeleted {
         req_id: u64,
@@ -345,6 +397,10 @@ pub enum NetworkEvent {
         has_more_comments: bool,
         image_urls: Vec<String>,
     },
+    BangumiFollowListLoaded {
+        req_id: u64,
+        items: Vec<crate::api::space::SeriesInfo>,
+    },
     BangumiIndexLoaded {
         req_id: u64,
         items: Vec<SeasonRankItem>,
@@ -353,6 +409,15 @@ pub enum NetworkEvent {
         req_id: u64,
         season_id: i64,
         season: SeasonResult,
+        /// Resolved follow state for the current user. When the season view's
+        /// user_status.login is 1 this comes from user_status.follow; otherwise
+        /// it is checked against the real follow list (login=0 is unreliable).
+        followed: bool,
+    },
+    BangumiSearchLoaded {
+        req_id: u64,
+        keyword: String,
+        items: Vec<crate::api::search::SearchBangumiItem>,
     },
     RequestFailed {
         req_id: u64,
@@ -442,6 +507,13 @@ impl NetworkCommand {
             | Self::LoadSeriesArchives { .. } => "up",
             Self::LoadDynamicDetail { .. } => "dynamic_detail",
             Self::LoadBangumiIndex { .. } | Self::LoadBangumiDetail { .. } => "bangumi",
+            Self::LoadBangumiFollowList { .. } => "bangumi_follow_list",
+            Self::LoadBangumiSearch { .. } => "bangumi_search",
+            Self::LoadNotificationsInit { .. } | Self::LoadNotificationsMore { .. } => {
+                "notifications"
+            }
+            Self::LoadChatSessions { .. } | Self::LoadChatDetail { .. } => "chat",
+            Self::SendChatMessage { .. } => "chat_send",
         }
     }
 }
@@ -895,6 +967,82 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 Err(e) => failed(req_id, "history_init", e),
             }
         }
+        NetworkCommand::LoadNotificationsInit { req_id, feed_type } => {
+            match api_client.get_msg_feed(feed_type, 1).await {
+                Ok(items) => {
+                    let unread = api_client.get_msg_unread().await.unwrap_or(
+                        crate::api::msg::UnreadData {
+                            at: 0,
+                            chat: 0,
+                            like: 0,
+                            reply: 0,
+                            sys_msg: 0,
+                        },
+                    );
+                    NetworkEvent::NotificationsLoaded {
+                        req_id,
+                        append: false,
+                        feed_type,
+                        items,
+                        unread: (
+                            unread.reply,
+                            unread.at,
+                            unread.like,
+                            unread.sys_msg,
+                        ),
+                    }
+                }
+                Err(e) => failed(req_id, "notifications_init", e),
+            }
+        }
+        NetworkCommand::LoadNotificationsMore {
+            req_id,
+            feed_type,
+            page,
+        } => match api_client.get_msg_feed(feed_type, page).await {
+            Ok(items) => NetworkEvent::NotificationsLoaded {
+                req_id,
+                append: true,
+                feed_type,
+                items,
+                unread: (0, 0, 0, 0),
+            },
+            Err(e) => failed(req_id, "notifications_more", e),
+        },
+        NetworkCommand::LoadChatSessions { req_id } => {
+            match api_client.get_msg_sessions().await {
+                Ok(sessions) => NetworkEvent::ChatSessionsLoaded { req_id, sessions },
+                Err(e) => failed(req_id, "chat_sessions", e),
+            }
+        }
+        NetworkCommand::LoadChatDetail { req_id, talker_id } => {
+            match api_client.get_chat_detail(talker_id).await {
+                Ok(messages) => NetworkEvent::ChatDetailLoaded {
+                    req_id,
+                    talker_id,
+                    messages,
+                },
+                Err(e) => failed(req_id, "chat_detail", e),
+            }
+        }
+        NetworkCommand::SendChatMessage {
+            req_id,
+            talker_id,
+            content,
+        } => match api_client.send_chat_message(talker_id, &content).await {
+            Ok(()) => NetworkEvent::ChatMessageSent {
+                req_id,
+                talker_id,
+                ok: true,
+                error: None,
+            },
+            Err(e) => NetworkEvent::ChatMessageSent {
+                req_id,
+                talker_id,
+                ok: false,
+                error: Some(format!("{e:#}")),
+            },
+        },
         NetworkCommand::LoadHistoryMore { req_id, cursor } => match api_client
             .get_history(
                 Some(cursor.max),
@@ -1135,13 +1283,46 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
             Ok(items) => NetworkEvent::BangumiIndexLoaded { req_id, items },
             Err(e) => failed(req_id, "bangumi_index", e),
         },
+        NetworkCommand::LoadBangumiFollowList { req_id, mid } => {
+            match api_client.get_bangumi_follow_list(mid, 1, 1).await {
+                Ok(items) => NetworkEvent::BangumiFollowListLoaded { req_id, items },
+                Err(e) => failed(req_id, "bangumi_follow_list", e),
+            }
+        }
+        NetworkCommand::LoadBangumiSearch { req_id, keyword, page } => {
+            match api_client.search_bangumi(&keyword, page).await {
+                Ok(items) => NetworkEvent::BangumiSearchLoaded { req_id, keyword, items },
+                Err(e) => failed(req_id, "bangumi_search", e),
+            }
+        }
         NetworkCommand::LoadBangumiDetail { req_id, season_id } => {
             match api_client.get_bangumi_season(season_id).await {
-                Ok(season) => NetworkEvent::BangumiDetailLoaded {
-                    req_id,
-                    season_id,
-                    season,
-                },
+                Ok(season) => {
+                    // The pgc season view's user_status.follow is unreliable:
+                    // it can report login=1 + follow=0 even when the season is
+                    // in the user's real follow list (observed on this account).
+                    // Only trust follow=1 as a fast path; follow=0 must be
+                    // cross-checked against the real follow list.
+                    let status_follow = season
+                        .user_status
+                        .as_ref()
+                        .map(|u| u.follow == 1)
+                        .unwrap_or(false);
+                    let followed = if status_follow {
+                        true
+                    } else {
+                        api_client
+                            .is_bangumi_followed(season_id)
+                            .await
+                            .unwrap_or(false)
+                    };
+                    NetworkEvent::BangumiDetailLoaded {
+                        req_id,
+                        season_id,
+                        season,
+                        followed,
+                    }
+                }
                 Err(e) => failed(req_id, "bangumi_detail", e),
             }
         }

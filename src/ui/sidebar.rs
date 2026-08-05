@@ -14,9 +14,9 @@ pub enum NavItem {
     Favorites,
     Live,
     Bangumi,
+    Notifications,
     Settings,
 }
-
 impl NavItem {
     pub fn label(&self) -> &'static str {
         match self {
@@ -28,6 +28,7 @@ impl NavItem {
             NavItem::Favorites => "⭐ 收藏夹",
             NavItem::Live => "📡 直播",
             NavItem::Bangumi => "🎬 番剧",
+            NavItem::Notifications => "🔔 消息",
             NavItem::Settings => "⚙️ 设置",
         }
     }
@@ -41,6 +42,7 @@ impl NavItem {
             NavItem::Favorites,
             NavItem::Live,
             NavItem::Bangumi,
+            NavItem::Notifications,
             NavItem::Settings,
         ]
     }

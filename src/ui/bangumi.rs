@@ -19,6 +19,22 @@ pub struct BangumiPage {
     pub error_message: Option<String>,
     /// Parallel array storing season_id for each index card
     pub index_season_ids: Vec<i64>,
+    /// Follow list mode (我的追番)
+    pub follow_mode: bool,
+    pub follow_grid: VideoCardGrid,
+    pub follow_season_ids: Vec<i64>,
+    pub follow_loading: bool,
+    pub follow_error: Option<String>,
+    pub follow_loaded: bool,
+    // Search mode (番剧搜索)
+    pub search_input_mode: bool,
+    pub search_input: String,
+    pub search_query: String,
+    pub search_grid: VideoCardGrid,
+    pub search_season_ids: Vec<i64>,
+    pub search_loading: bool,
+    pub search_error: Option<String>,
+    pub search_has_results: bool,
     // Double-click detection
     last_click_time: Option<Instant>,
     last_click_index: Option<usize>,
@@ -31,9 +47,115 @@ impl BangumiPage {
             loading: true,
             error_message: None,
             index_season_ids: Vec::new(),
+            follow_mode: false,
+            follow_grid: VideoCardGrid::new(),
+            follow_season_ids: Vec::new(),
+            follow_loading: false,
+            follow_error: None,
+            follow_loaded: false,
+            search_input_mode: false,
+            search_input: String::new(),
+            search_query: String::new(),
+            search_grid: VideoCardGrid::new(),
+            search_season_ids: Vec::new(),
+            search_loading: false,
+            search_error: None,
+            search_has_results: false,
             last_click_time: None,
             last_click_index: None,
         }
+    }
+
+    /// Whether we are currently showing search results
+    pub fn is_searching(&self) -> bool {
+        !self.search_query.is_empty() || self.search_input_mode
+    }
+
+    pub fn search_query(&self) -> &str {
+        &self.search_query
+    }
+
+    pub fn start_search(&mut self, keyword: &str) {
+        let kw = keyword.trim().to_string();
+        self.search_query = kw.clone();
+        self.search_input.clear();
+        self.search_input_mode = false;
+        self.search_loading = true;
+        self.search_error = None;
+        self.search_has_results = false;
+        self.search_grid.clear();
+        self.search_season_ids.clear();
+    }
+
+    pub fn set_search_items(&mut self, items: Vec<crate::api::search::SearchBangumiItem>) {
+        self.search_grid.clear();
+        self.search_season_ids.clear();
+        for item in items {
+            let Some(season_id) = item.season_id else { continue };
+            self.search_season_ids.push(season_id);
+            let card = VideoCard::new(
+                None,
+                None,
+                item.display_title(),
+                item.display_subtitle(),
+                item.score_text(),
+                item.badge_text().unwrap_or_default(),
+                item.cover_url(),
+            );
+            self.search_grid.add_card(card);
+        }
+        self.search_loading = false;
+        self.search_error = None;
+        self.search_has_results = true;
+    }
+
+    pub fn set_search_error(&mut self, msg: String) {
+        self.search_loading = false;
+        self.search_error = Some(msg);
+    }
+
+    pub fn set_follow_items(&mut self, items: Vec<crate::api::space::SeriesInfo>) {
+        self.follow_grid.clear();
+        self.follow_season_ids.clear();
+        for item in items {
+            let Some(meta) = &item.meta else { continue };
+            let Some(season_id) = meta.season_id else { continue };
+            let title = meta
+                .title
+                .clone()
+                .or_else(|| meta.name.clone())
+                .unwrap_or_else(|| "未知番剧".to_string());
+            self.follow_season_ids.push(season_id);
+            let card = VideoCard::new(
+                None,
+                None,
+                title,
+                meta.description.clone().unwrap_or_default(),
+                item.total.map(|t| format!("{}话", t)).unwrap_or_default(),
+                String::new(),
+                meta.cover.clone(),
+            );
+            self.follow_grid.add_card(card);
+        }
+        self.follow_loading = false;
+        self.follow_error = None;
+        self.follow_loaded = true;
+    }
+
+    pub fn set_follow_error(&mut self, msg: String) {
+        self.follow_error = Some(msg);
+        self.follow_loading = false;
+    }
+
+    pub fn enter_follow_mode(&mut self) {
+        self.follow_mode = true;
+        if !self.follow_loaded {
+            self.follow_loading = true;
+        }
+    }
+
+    pub fn exit_follow_mode(&mut self) {
+        self.follow_mode = false;
     }
 
     pub fn set_index_items(&mut self, items: Vec<SeasonRankItem>) {
@@ -79,8 +201,26 @@ impl BangumiPage {
             .map(AppAction::OpenBangumiDetail)
     }
 
+    /// Get selected follow-list action
+    fn selected_follow_action(&self) -> Option<AppAction> {
+        let idx = self.follow_grid.selected_index;
+        self.follow_season_ids
+            .get(idx)
+            .copied()
+            .map(AppAction::OpenBangumiDetail)
+    }
+
+    /// Get selected search-result action
+    fn selected_search_action(&self) -> Option<AppAction> {
+        let idx = self.search_grid.selected_index;
+        self.search_season_ids
+            .get(idx)
+            .copied()
+            .map(AppAction::OpenBangumiDetail)
+    }
+
     fn render_footer(&self, frame: &mut Frame, area: Rect, theme: &Theme, keys: &Keybindings) {
-        let help_line = shortcut_footer(
+        let mut help_line = shortcut_footer(
             theme,
             [
                 (
@@ -101,6 +241,12 @@ impl BangumiPage {
                 (keys.refresh.clone(), "刷新".into(), theme.info),
             ],
         );
+        if !self.follow_mode {
+            help_line.push_span(Span::styled(
+                "   / 搜索",
+                Style::default().fg(theme.info),
+            ));
+        }
         let help = Paragraph::new(help_line).alignment(Alignment::Center);
         frame.render_widget(help, area);
     }
@@ -124,28 +270,96 @@ impl Component for BangumiPage {
             .split(area);
 
         // Title
-        let title = Paragraph::new(Line::from(vec![
+        let title_text = if self.follow_mode {
+            "我的追番"
+        } else if self.is_searching() {
+            "番剧搜索"
+        } else {
+            "番剧排行"
+        };
+        let mut title_spans = vec![
             Span::styled("🎬 ", Style::default().fg(theme.bilibili_pink)),
             Span::styled(
-                "番剧排行",
+                title_text,
                 Style::default()
                     .fg(theme.fg_primary)
                     .add_modifier(Modifier::BOLD),
             ),
-        ]))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(theme.border_subtle)),
-        )
-        .alignment(Alignment::Center);
+            Span::styled(
+                "  [Tab] 切换",
+                Style::default().fg(theme.fg_secondary),
+            ),
+        ];
+        if self.search_input_mode {
+            title_spans.push(Span::styled(
+                format!("  搜索: {}_", self.search_input),
+                Style::default().fg(theme.success),
+            ));
+        } else if !self.search_query.is_empty() {
+            title_spans.push(Span::styled(
+                format!("  「{}」", self.search_query),
+                Style::default().fg(theme.fg_secondary),
+            ));
+        }
+        let title = Paragraph::new(Line::from(title_spans))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(theme.border_subtle)),
+            )
+            .alignment(Alignment::Center);
         frame.render_widget(title, chunks[0]);
 
         // Content
         let content_area = chunks[1];
 
-        if self.loading {
+        if self.follow_mode {
+            if self.follow_loading {
+                let spinner = Paragraph::new("加载追番中...")
+                    .style(Style::default().fg(theme.fg_muted))
+                    .alignment(Alignment::Center);
+                frame.render_widget(spinner, content_area);
+            } else if let Some(ref err) = self.follow_error {
+                let error = Paragraph::new(err.as_str())
+                    .style(Style::default().fg(theme.error))
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: true });
+                frame.render_widget(error, content_area);
+            } else if self.follow_grid.cards.is_empty() {
+                let empty = Paragraph::new("还没有追番，去番剧详情页按 f 追番吧")
+                    .style(Style::default().fg(theme.fg_muted))
+                    .alignment(Alignment::Center);
+                frame.render_widget(empty, content_area);
+            } else {
+                self.follow_grid.render(frame, content_area, theme);
+            }
+        } else if self.search_input_mode {
+            let hint = Paragraph::new("输入番剧名后按回车搜索，Esc 取消")
+                .style(Style::default().fg(theme.fg_muted))
+                .alignment(Alignment::Center);
+            frame.render_widget(hint, content_area);
+        } else if self.search_loading {
+            let spinner = Paragraph::new("搜索中...")
+                .style(Style::default().fg(theme.fg_muted))
+                .alignment(Alignment::Center);
+            frame.render_widget(spinner, content_area);
+        } else if let Some(ref err) = self.search_error {
+            let error = Paragraph::new(err.as_str())
+                .style(Style::default().fg(theme.error))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true });
+            frame.render_widget(error, content_area);
+        } else if self.search_has_results {
+            if self.search_grid.cards.is_empty() {
+                let empty = Paragraph::new("没有找到相关番剧")
+                    .style(Style::default().fg(theme.fg_muted))
+                    .alignment(Alignment::Center);
+                frame.render_widget(empty, content_area);
+            } else {
+                self.search_grid.render(frame, content_area, theme);
+            }
+        } else if self.loading {
             let spinner = Paragraph::new("加载中...")
                 .style(Style::default().fg(theme.fg_muted))
                 .alignment(Alignment::Center);
@@ -184,38 +398,97 @@ impl Component for BangumiPage {
         if keys.matches_refresh(key) {
             return Some(AppAction::RefreshBangumi);
         }
+        if key == KeyCode::Tab || key == KeyCode::BackTab {
+            return Some(AppAction::SwitchBangumiTab(if self.follow_mode {
+                crate::application::BangumiTab::Index
+            } else {
+                crate::application::BangumiTab::Follow
+            }));
+        }
 
-        if self.loading {
+        // Search input mode: all keys go to the input buffer
+        if self.search_input_mode {
+            match key {
+                KeyCode::Esc => {
+                    self.search_input_mode = false;
+                    self.search_input.clear();
+                }
+                KeyCode::Enter => {
+                    let keyword = self.search_input.trim().to_string();
+                    self.search_input_mode = false;
+                    if !keyword.is_empty() {
+                        return Some(AppAction::SearchBangumi { keyword });
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.search_input.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.search_input.push(c);
+                }
+                _ => {}
+            }
             return Some(AppAction::None);
         }
 
+        // "/" opens search input (not in follow mode)
+        if !self.follow_mode && key == KeyCode::Char('/') {
+            self.search_input_mode = true;
+            self.search_input.clear();
+            return Some(AppAction::None);
+        }
+
+        if self.loading && !self.follow_mode && !self.is_searching() {
+            return Some(AppAction::None);
+        }
+        if self.follow_loading && self.follow_mode {
+            return Some(AppAction::None);
+        }
+        if self.search_loading && self.is_searching() {
+            return Some(AppAction::None);
+        }
+
+        let grid = if self.follow_mode {
+            &mut self.follow_grid
+        } else if self.is_searching() {
+            &mut self.search_grid
+        } else {
+            &mut self.index_grid
+        };
+
         if keys.matches_page_down(key) {
-            self.index_grid.move_page_down();
+            grid.move_page_down();
             return Some(AppAction::None);
         }
         if keys.matches_page_up(key) {
-            self.index_grid.move_page_up();
+            grid.move_page_up();
             return Some(AppAction::None);
         }
 
         if keys.matches_down(key) {
-            self.index_grid.move_down();
+            grid.move_down();
             return Some(AppAction::None);
         }
         if keys.matches_up(key) {
-            self.index_grid.move_up();
+            grid.move_up();
             return Some(AppAction::None);
         }
         if keys.matches_left(key) {
-            self.index_grid.move_left();
+            grid.move_left();
             return Some(AppAction::None);
         }
         if keys.matches_right(key) {
-            self.index_grid.move_right();
+            grid.move_right();
             return Some(AppAction::None);
         }
         if keys.matches_play(key) || keys.matches_confirm(key) {
-            return self.selected_index_action();
+            return if self.follow_mode {
+                self.selected_follow_action()
+            } else if self.is_searching() {
+                self.selected_search_action()
+            } else {
+                self.selected_index_action()
+            };
         }
 
         Some(AppAction::None)

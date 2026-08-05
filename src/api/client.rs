@@ -7,6 +7,7 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue, ORIGIN, REFERER, USER_AGENT};
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::io::Write;
@@ -251,6 +252,9 @@ impl ApiClient {
         // Interaction endpoints (like/coin/fav/relation) are risk-controlled:
         // without the buvid3/buvid4 fingerprint cookies Bilibili answers 412.
         self.ensure_buvid_cookies().await?;
+        // The web front-end also sends b_lsid/b_nut local-session cookies on
+        // every interaction; a missing pair can also produce 412.
+        self.ensure_lsid_cookies();
 
         let mut req = self.client.post(url);
 
@@ -390,7 +394,23 @@ impl ApiClient {
             params
         };
 
-        self.post_with_owned(base_url, signed_data).await
+        match self.post_with_owned(base_url, signed_data.clone()).await {
+            Ok(resp) => Ok(resp),
+            Err(err)
+                if err.to_string().contains("-403")
+                    || err.to_string().contains("-412")
+                    || err.to_string().contains("412") =>
+            {
+                // Risk control answers 412/403 when the request looks
+                // automated. Do NOT refresh the buvid fingerprint here:
+                // swapping the device fingerprint on every failure makes
+                // Bilibili treat the account as anomalous and escalates the
+                // risk-control window. Replay the exact same payload once;
+                // if it still fails, surface the error to the user.
+                self.post_with_owned(base_url, signed_data).await
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Fetch WBI keys from nav API
@@ -1152,6 +1172,30 @@ impl ApiClient {
         }))
     }
 
+    /// Search bangumi/season by keyword (search_type=media_bangumi)
+    pub async fn search_bangumi(
+        &self,
+        keyword: &str,
+        page: i32,
+    ) -> Result<Vec<super::search::SearchBangumiItem>> {
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/web-interface/wbi/search/type");
+
+        let params = vec![
+            ("search_type", "media_bangumi".to_string()),
+            ("keyword", keyword.to_string()),
+            ("page", page.to_string()),
+            ("order", "totalrank".to_string()),
+        ];
+
+        #[derive(serde::Deserialize)]
+        struct BangumiSearchData {
+            result: Option<Vec<super::search::SearchBangumiItem>>,
+        }
+
+        let resp: ApiResponse<BangumiSearchData> = self.get_with_wbi(&url, params).await?;
+        Ok(resp.data.and_then(|d| d.result).unwrap_or_default())
+    }
+
     /// Fetch hot search keywords (web)
     pub async fn get_hot_search(&self) -> Result<Vec<super::search::HotwordItem>> {
         const HOTWORD_URL: &str = "https://s.search.bilibili.com/main/hotword";
@@ -1337,11 +1381,322 @@ impl ApiClient {
             BilibiliApiDomain::Main.as_str()
         );
 
-        let resp: ApiResponse<super::dynamic::PortalData> = self.get(&url).await?;
-        Ok(resp
-            .data
-            .unwrap_or(super::dynamic::PortalData { up_list: None }))
-    }
+         let resp: ApiResponse<super::dynamic::PortalData> = self.get(&url).await?;
+         Ok(resp
+             .data
+             .unwrap_or(super::dynamic::PortalData { up_list: None }))
+     }
+
+     // Message notification API
+     pub async fn get_msg_unread(&self) -> Result<super::msg::UnreadData> {
+         let url = format!("{}/x/msgfeed/unread", BilibiliApiDomain::Main.as_str());
+         let resp: ApiResponse<super::msg::UnreadData> = self.get(&url).await?;
+         Ok(resp.data.unwrap_or(super::msg::UnreadData {
+             at: 0,
+             chat: 0,
+             like: 0,
+             reply: 0,
+             sys_msg: 0,
+         }))
+     }
+
+     /// Fetch a message feed tab. `feed_type`: 1=reply 2=at 3=like 6=system.
+     pub async fn get_msg_feed(
+         &self,
+         feed_type: i32,
+         page: i32,
+     ) -> Result<Vec<super::msg::NotificationItem>> {
+         if feed_type == 6 {
+             return self.get_system_notices(page).await;
+         }
+         let (path, extra) = match feed_type {
+             2 => ("/x/msgfeed/at".to_string(), String::new()),
+             3 => ("/x/msgfeed/like".to_string(), String::new()),
+             _ => ("/x/msgfeed/reply".to_string(), "&type=1".to_string()),
+         };
+         let url = format!(
+             "{}{}?page={}&page_size=20{}",
+             BilibiliApiDomain::Main.as_str(),
+             path,
+             page,
+             extra
+         );
+         if feed_type == 3 {
+             // The like feed nests items under data.latest / data.total.
+             let resp: ApiResponse<super::msg::LikeFeedData> = self.get(&url).await?;
+             let data = resp.data.unwrap_or(super::msg::LikeFeedData {
+                 latest: None,
+                 total: None,
+             });
+             let mut items: Vec<super::msg::NotificationItem> = Vec::new();
+             if let Some(section) = &data.latest {
+                 items.extend(
+                     section
+                         .items
+                         .iter()
+                         .filter_map(|v| super::msg::parse_feed_item(v, feed_type)),
+                 );
+             }
+             if let Some(section) = &data.total {
+                 items.extend(
+                     section
+                         .items
+                         .iter()
+                         .filter_map(|v| super::msg::parse_feed_item(v, feed_type)),
+                 );
+             }
+             return Ok(items);
+         }
+         let resp: ApiResponse<super::msg::FeedData> = self.get(&url).await?;
+         let data = resp.data.unwrap_or(super::msg::FeedData {
+             items: Vec::new(),
+             page: None,
+         });
+         Ok(data
+             .items
+             .iter()
+             .filter_map(|v| super::msg::parse_feed_item(v, feed_type))
+             .collect())
+     }
+
+     /// Fetch system notices from the unified notify endpoint.
+     /// This lives on message.bilibili.com (not api.bilibili.com) and the
+     /// legacy /x/msgfeed/sys and /x/msgfeed/notice are both unusable for
+     /// listing: sys is retired (404) and notice only marks items read.
+     pub async fn get_system_notices(&self, _page: i32) -> Result<Vec<super::msg::NotificationItem>> {
+         let url = format!(
+             "{}/x/sys-msg/query_unified_notify?page_size=20&build=0&mobi_app=web",
+             "https://message.bilibili.com"
+         );
+         let resp: ApiResponse<super::msg::SystemNotifyData> = self.get(&url).await?;
+         let data = resp.data.unwrap_or(super::msg::SystemNotifyData {
+             system_notify_list: Vec::new(),
+         });
+         Ok(data
+             .system_notify_list
+             .iter()
+             .filter_map(super::msg::parse_system_notify)
+             .collect())
+     }
+
+      /// Fetch the private-message conversation list.
+      /// GET https://api.vc.bilibili.com/session_svr/v1/session_svr/get_sessions
+      /// (the old api.bilibili.com/x/session/v2/sessions was retired in 2026;
+      /// the private-message service moved to the vc domain and requires WBI)
+      ///
+      /// The session endpoint only returns `talker_id` (no user name), so we
+      /// resolve display names in parallel via the user card API.
+      pub async fn get_msg_sessions(&self) -> Result<Vec<super::msg::ChatSession>> {
+          let url = "https://api.vc.bilibili.com/session_svr/v1/session_svr/get_sessions";
+          let params: Vec<(&str, String)> = vec![
+              ("session_type", "1".to_string()),
+              ("group_fold", "1".to_string()),
+              ("unfollow_fold", "0".to_string()),
+              ("sort_rule", "2".to_string()),
+              ("build", "0".to_string()),
+              ("mobi_app", "web".to_string()),
+          ];
+          let resp: ApiResponse<super::msg::SessionListData> =
+              self.get_with_wbi(url, params).await?;
+          let data = resp.data.unwrap_or(super::msg::SessionListData {
+              session_list: Vec::new(),
+              has_more: None,
+          });
+          let mut sessions: Vec<super::msg::ChatSession> = data
+              .session_list
+              .iter()
+              .filter_map(super::msg::parse_session)
+              .collect();
+
+          // The session API has no user names; fill them from the user card
+          // API in parallel (20 sessions -> 20 small GETs).
+          let mids: Vec<i64> = sessions.iter().map(|s| s.talker_id).collect();
+          let resolved = self.resolve_user_cards(&mids).await;
+          for session in sessions.iter_mut() {
+              if let Some(entry) = resolved.get(&session.talker_id) {
+                  if !entry.0.is_empty() {
+                      session.uname = entry.0.clone();
+                  }
+                  if session.face.is_none() && !entry.1.is_empty() {
+                      session.face = Some(entry.1.clone());
+                  }
+              }
+          }
+          Ok(sessions)
+      }
+
+      /// Resolve `mid -> (name, face)` for a list of user ids.
+      ///
+      /// Strategy (the standalone `/x/web-interface/card` endpoint is
+      /// frequently rate-limited to -352 from server IPs):
+      ///   1. scan the current user's following list (returns uname+face
+      ///      and is a stable endpoint);
+      ///   2. fill remaining ids with the card API best-effort.
+      /// Missing/private users are simply skipped (the caller keeps the
+      /// fallback "用户{id}" name).
+      async fn resolve_user_cards(&self, mids: &[i64]) -> HashMap<i64, (String, String)> {
+          if mids.is_empty() {
+              return HashMap::new();
+          }
+          let mut wanted: HashSet<i64> = mids.iter().copied().collect();
+          let mut result: HashMap<i64, (String, String)> = HashMap::new();
+
+          // 1. following list: 2 pages x 50 covers most private-message
+          // contacts (people you follow). The endpoint returns uname/face.
+          let my_uid = self
+              .cookies
+              .read()
+              .expect("cookies lock poisoned")
+              .as_ref()
+              .and_then(|c| {
+                  c.split(';').find_map(|part| {
+                      let part = part.trim();
+                      part.split_once('=')
+                          .filter(|(name, _)| *name == "DedeUserID")
+                          .map(|(_, value)| value.to_string())
+                  })
+              })
+              .unwrap_or_default();
+          if !my_uid.is_empty() {
+              for pn in 1..=2u32 {
+                  if wanted.is_empty() {
+                      break;
+                  }
+                  let url = format!(
+                      "{}/x/relation/followings?vmid={}&pn={}&ps=50&order=desc",
+                      BilibiliApiDomain::Main.as_str(),
+                      my_uid,
+                      pn
+                  );
+                  match self.get::<serde_json::Value>(&url).await {
+                      Ok(resp) => {
+                          let Some(data) = resp.data else {
+                              break;
+                          };
+                          let Some(list) = data.get("list").and_then(|l| l.as_array()) else {
+                              break;
+                          };
+                          for u in list {
+                              let Some(mid) = u.get("mid").and_then(|m| m.as_i64()) else {
+                                  continue;
+                              };
+                              if wanted.remove(&mid) {
+                                  let name = u
+                                      .get("uname")
+                                      .and_then(|n| n.as_str())
+                                      .unwrap_or("")
+                                      .to_string();
+                                  let face = u
+                                      .get("face")
+                                      .and_then(|f| f.as_str())
+                                      .unwrap_or("")
+                                      .to_string();
+                                  result.insert(mid, (name, face));
+                              }
+                          }
+                      }
+                      Err(_) => break,
+                  }
+              }
+          }
+
+          // 2. best-effort card lookup for the rest.
+          let remaining: Vec<i64> = wanted.into_iter().collect();
+          if remaining.is_empty() {
+              return result;
+          }
+          let futures = remaining.iter().map(|mid| {
+              let url = format!(
+                  "{}/x/web-interface/card?mid={}",
+                  BilibiliApiDomain::Main.as_str(),
+                  mid
+              );
+              async move {
+                  let resp: ApiResponse<serde_json::Value> = self.get(&url).await.ok()?;
+                  let card = resp.data.as_ref()?.get("card")?;
+                  let name = card.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                  let face = card.get("face").and_then(|f| f.as_str()).unwrap_or("").to_string();
+                  Some((*mid, (name, face)))
+              }
+          });
+          let results = futures_util::future::join_all(futures).await;
+          for (mid, (name, face)) in results.into_iter().flatten() {
+              result.insert(mid, (name, face));
+          }
+          result
+      }
+
+     /// Fetch chat history with one user.
+     /// GET https://api.vc.bilibili.com/svr_sync/v1/svr_sync/fetch_session_msgs
+     pub async fn get_chat_detail(&self, talker_id: i64) -> Result<Vec<super::msg::ChatMessage>> {
+         let url = "https://api.vc.bilibili.com/svr_sync/v1/svr_sync/fetch_session_msgs";
+         let params: Vec<(&str, String)> = vec![
+             ("talker_id", talker_id.to_string()),
+             ("session_type", "1".to_string()),
+             ("size", "30".to_string()),
+             ("build", "0".to_string()),
+             ("mobi_app", "web".to_string()),
+             ("sender_device_id", "1".to_string()),
+         ];
+         let resp: ApiResponse<super::msg::ChatDetailData> =
+             self.get_with_wbi(url, params).await?;
+         let data = resp.data.unwrap_or(super::msg::ChatDetailData {
+             messages: Vec::new(),
+             has_more: None,
+         });
+         Ok(data
+             .messages
+             .iter()
+             .filter_map(super::msg::parse_chat_message)
+             .collect())
+     }
+
+     /// Send a private message to `talker_id`.
+     /// POST https://customerservice.bilibili.com/x/custom/msg_svr/v1/send_msg
+     pub async fn send_chat_message(&self, talker_id: i64, content: &str) -> Result<()> {
+         let my_uid = self
+             .cookies
+             .read()
+             .expect("cookies lock poisoned")
+             .as_ref()
+             .and_then(|c| {
+                 c.split(';').find_map(|part| {
+                     let part = part.trim();
+                     part.split_once('=')
+                         .filter(|(name, _)| *name == "DedeUserID")
+                         .map(|(_, value)| value.to_string())
+                 })
+             })
+             .unwrap_or_default();
+         // Bilibili web IM expects a UUID v4 (upper-case) as dev_id; the old
+         // x/session/msg/send accepted a hex blob, the new endpoint validates it.
+         let dev_id = uuid_v4_upper();
+         let ts = std::time::SystemTime::now()
+             .duration_since(std::time::UNIX_EPOCH)
+             .map(|d| d.as_secs())
+             .unwrap_or(0);
+         let content_json = serde_json::json!({ "content": content }).to_string();
+         let url = "https://customerservice.bilibili.com/x/custom/msg_svr/v1/send_msg";
+         let form_data: Vec<(&str, String)> = vec![
+             ("sender_uid", my_uid),
+             ("receiver_id", talker_id.to_string()),
+             ("receiver_type", "1".to_string()),
+             ("msg_type", "1".to_string()),
+             ("content", content_json),
+             ("dev_id", dev_id),
+             ("msg_status", "0".to_string()),
+             ("msg_source", "6".to_string()),
+             ("timestamp", ts.to_string()),
+             ("build", "0".to_string()),
+             ("mobi_app", "web".to_string()),
+         ];
+         let _resp: ApiResponse<serde_json::Value> = self.post_with_wbi(&url, form_data).await?;
+         Ok(())
+     }
+
+     /// Send a private message to `talker_id` (alias kept for readability).
+
+     // Comments API
 
     // Comments API
     pub async fn get_comments(&self, oid: i64, pn: i32) -> Result<super::comment::CommentData> {
@@ -2023,16 +2378,118 @@ impl ApiClient {
     /// Bilibili's risk control answers 412 on interaction POSTs (relation,
     /// like, coin, fav) when these are missing. Fetch once from the spi
     /// endpoint and append them; subsequent requests take the fast path.
+    /// Returns true when the cookie string already carries a plausible
+    /// buvid3/buvid4 pair (Bilibili fingerprint cookies). A too-short value
+    /// means the fingerprint was captured mid-write or is a stale placeholder,
+    /// in which case we refresh it.
+    fn has_valid_buvid_cookies(cookie_str: &str) -> bool {
+        let valid = |needle: &str| -> bool {
+            cookie_str
+                .split(';')
+                .find_map(|part| {
+                    let part = part.trim();
+                    part.split_once('=')
+                        .filter(|(name, _)| *name == needle)
+                        .map(|(_, v)| v)
+                })
+                .map(|v| v.len() >= 20)
+                .unwrap_or(false)
+        };
+        valid("buvid3") && valid("buvid4")
+    }
+
+    fn set_buvid_cookies(&self, b3: &str, b4: &str) {
+        let mut cookies = self.cookies.write().expect("cookies lock poisoned");
+        if let Some(c) = cookies.as_mut() {
+            // Drop any existing buvid entries then append fresh ones.
+            let kept: Vec<&str> = c
+                .split(';')
+                .map(str::trim)
+                .filter(|part| {
+                    !part.is_empty()
+                        && !part.starts_with("buvid3=")
+                        && !part.starts_with("buvid4=")
+                })
+                .collect();
+            let mut joined = kept.join("; ");
+            if !joined.is_empty() {
+                joined.push_str("; ");
+            }
+            joined.push_str(&format!("buvid3={b3}; buvid4={b4}"));
+            *c = joined;
+        }
+    }
+
+    /// Generate a Bilibili `b_lsid` value: 8 random hex chars, underscore,
+    /// then 11 random hex chars (mirrors the web front-end's genLsid()).
+    fn generate_lsid() -> String {
+        use std::fs::File;
+        use std::io::Read;
+        let mut buf = [0u8; 19];
+        if let Ok(mut f) = File::open("/dev/urandom") {
+            let _ = f.read_exact(&mut buf);
+        }
+        let hex = |bytes: &[u8]| -> String {
+            bytes.iter().map(|b| format!("{b:02x}")).collect()
+        };
+        format!("{}_{}", &hex(&buf[..8]), &hex(&buf[8..]))
+    }
+
+    /// Ensure the cookie string carries the web-front-end local session
+    /// fingerprint cookies `b_lsid` + `b_nut`. Risk control answers 412 on
+    /// interaction POSTs when these are missing, even with buvid3/buvid4 set.
+    fn ensure_lsid_cookies(&self) {
+        let mut cookies = self.cookies.write().expect("cookies lock poisoned");
+        if let Some(c) = cookies.as_mut() {
+            let has_lsid = c
+                .split(';')
+                .any(|p| p.trim().starts_with("b_lsid="));
+            let has_nut = c.split(';').any(|p| p.trim().starts_with("b_nut="));
+            if has_lsid && has_nut {
+                return;
+            }
+            let lsid = Self::generate_lsid();
+            let nut = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs().to_string())
+                .unwrap_or_else(|_| "0".to_string());
+            let kept: Vec<&str> = c
+                .split(';')
+                .map(str::trim)
+                .filter(|part| {
+                    !part.is_empty()
+                        && !part.starts_with("b_lsid=")
+                        && !part.starts_with("b_nut=")
+                })
+                .collect();
+            let mut joined = kept.join("; ");
+            if !joined.is_empty() {
+                joined.push_str("; ");
+            }
+            joined.push_str(&format!("b_lsid={lsid}; b_nut={nut}"));
+            *c = joined;
+        }
+    }
+
+    /// Ensure the client carries Bilibili fingerprint cookies. When the
+    /// existing buvid3/buvid4 are missing or implausible, fetch fresh ones
+    /// from the official SPI endpoint.
     pub async fn ensure_buvid_cookies(&self) -> Result<()> {
         {
             let cookies = self.cookies.read().expect("cookies lock poisoned");
             if let Some(c) = cookies.as_ref() {
-                if c.contains("buvid3=") && c.contains("buvid4=") {
+                if Self::has_valid_buvid_cookies(c) {
                     return Ok(());
                 }
             }
         }
+        self.refresh_buvid_cookies().await
+    }
 
+    /// Force-fetch fresh buvid3/buvid4 from the SPI endpoint and overwrite
+    /// whatever fingerprint cookies are currently stored. Used both on first
+    /// request and as a self-healing retry after a -403 risk-control answer.
+    pub async fn refresh_buvid_cookies(&self) -> Result<()> {
         let url = "https://api.bilibili.com/x/frontend/finger/spi";
         let response: ApiResponse<serde_json::Value> = self.get(url).await?;
         let data = response.data.as_ref();
@@ -2042,16 +2499,7 @@ impl ApiClient {
         ) else {
             return Ok(());
         };
-
-        let mut cookies = self.cookies.write().expect("cookies lock poisoned");
-        if let Some(c) = cookies.as_mut() {
-            if !c.contains("buvid3=") {
-                c.push_str(&format!("; buvid3={b3}"));
-            }
-            if !c.contains("buvid4=") {
-                c.push_str(&format!("; buvid4={b4}"));
-            }
-        }
+        self.set_buvid_cookies(b3, b4);
         Ok(())
     }
 
@@ -2216,7 +2664,159 @@ impl ApiClient {
         }
         Ok(())
     }
-    /// Check whether the current user follows the given uploader.
+
+    // ── Bangumi follow (追番) ────────────────────────────────────────────
+
+    /// Follow a season (追番 / 追剧). Uses the current web client endpoint
+    /// `pgc/web/follow/add` (the legacy `/pgc/season/follow` returns 404).
+    pub async fn follow_bangumi(&self, season_id: i64) -> Result<()> {
+        let url = self.build_url(BilibiliApiDomain::Main, "/pgc/web/follow/add");
+        let form_data = vec![("season_id", season_id.to_string())];
+        let resp: ApiResponse<serde_json::Value> = self.post(&url, form_data).await?;
+        if resp.code != 0 {
+            return Err(anyhow!(
+                "追番失败 ({}): {}",
+                resp.code,
+                resp.message
+            ));
+        }
+        Ok(())
+    }
+
+    /// Unfollow a season (取消追番).
+    pub async fn unfollow_bangumi(&self, season_id: i64) -> Result<()> {
+        let url = self.build_url(BilibiliApiDomain::Main, "/pgc/web/follow/del");
+        let form_data = vec![("season_id", season_id.to_string())];
+        let resp: ApiResponse<serde_json::Value> = self.post(&url, form_data).await?;
+        if resp.code != 0 {
+            return Err(anyhow!(
+                "取消追番失败 ({}): {}",
+                resp.code,
+                resp.message
+            ));
+        }
+        Ok(())
+    }
+
+    /// Fetch the user's follow list (追番列表). `season_type`: 1=番剧, 2=影视.
+    /// Returns a list of followed seasons (title, season_id, cover).
+    /// Uses `/x/space/bangumi/follow/list`; the older
+    /// `/x/polymer/web-space/seasons_series_list` returns an empty list for
+    /// bangumi follows on the current API.
+    pub async fn get_bangumi_follow_list(
+        &self,
+        mid: i64,
+        season_type: i32,
+        page: i32,
+    ) -> Result<Vec<super::space::SeriesInfo>> {
+        let url = format!(
+            "{}/x/space/bangumi/follow/list?type={}&follow_status=0&pn={}&ps=20&vmid={}",
+            BilibiliApiDomain::Main.as_str(),
+            season_type,
+            page,
+            mid
+        );
+        let value = self.get_json(&url).await?;
+        Self::check_code(&value)?;
+        let list = value
+            .get("data")
+            .and_then(|d| d.get("list"))
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mut out = Vec::with_capacity(list.len());
+        for item in list {
+            let season_id = item.get("season_id").and_then(|v| v.as_i64());
+            let Some(season_id) = season_id else { continue };
+            let title = item
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or("未知番剧")
+                .to_string();
+            let cover = item
+                .get("cover")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned);
+            let description = item
+                .get("evaluate")
+                .and_then(|v| v.as_str())
+                .map(ToOwned::to_owned);
+            out.push(super::space::SeriesInfo {
+                id: None,
+                meta: Some(super::space::SeriesMeta {
+                    season_id: Some(season_id),
+                    name: Some(title.clone()),
+                    title: Some(title),
+                    description,
+                    total: None,
+                    cover,
+                }),
+                total: None,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Check whether the current user follows the given bangumi season.
+    /// The pgc season view sometimes reports `user_status.login = 0` even for
+    /// valid sessions (making `user_status.follow` unreliable), so this walks
+    /// the real follow list instead. Returns `false` when not logged in.
+    pub async fn is_bangumi_followed(&self, season_id: i64) -> Result<bool> {
+        let mid = {
+            let cookie_str = self.cookies.read().expect("cookies lock poisoned").clone();
+            cookie_str
+                .and_then(|c| {
+                    c.split(';')
+                        .filter_map(|part| {
+                            let mut it = part.trim().splitn(2, '=');
+                            match (it.next(), it.next()) {
+                                (Some("DedeUserID"), Some(v)) => v.trim().parse::<i64>().ok(),
+                                _ => None,
+                            }
+                        })
+                        .next()
+                })
+        };
+        let Some(mid) = mid else {
+            return Ok(false);
+        };
+        // Walk up to 20 pages (ps=20 → 400 seasons). ps>20 is rejected by the
+        // API with -400, which used to make every lookup fail and report
+        // "not followed" even when the season was in the list.
+        for page in 1..=20 {
+            let url = format!(
+                "{}/x/space/bangumi/follow/list?type=1&follow_status=0&pn={}&ps=20&vmid={}",
+                BilibiliApiDomain::Main.as_str(),
+                page,
+                mid
+            );
+            let value = self.get_json(&url).await?;
+            Self::check_code(&value)?;
+            let list = value
+                .get("data")
+                .and_then(|d| d.get("list"))
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            if list.iter().any(|item| {
+                item.get("season_id")
+                    .and_then(|v| v.as_i64())
+                    .map(|sid| sid == season_id)
+                    .unwrap_or(false)
+            }) {
+                return Ok(true);
+            }
+            let total = value
+                .get("data")
+                .and_then(|d| d.get("total"))
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            if list.is_empty() || (page as i64) * 50 >= total {
+                break;
+            }
+        }
+        Ok(false)
+    }
 
     /// Check whether the current user follows the given uploader.
     /// Returns `true` if followed (attribute & 1 != 0).
@@ -2284,6 +2884,40 @@ fn parse_home_videos(items: Vec<serde_json::Value>) -> Vec<super::recommend::Vid
         .filter_map(|item| serde_json::from_value::<super::recommend::VideoItem>(item).ok())
         .filter(|video| video.id > 0 && video.bvid.is_some())
         .collect()
+}
+
+/// UUID v4 (upper-case), the `dev_id` format the Bilibili web IM expects.
+fn uuid_v4_upper() -> String {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    // Prefer OS randomness; fall back to a time/pid mix if /dev/urandom is
+    // unavailable. The endpoint only validates the shape, not the entropy.
+    let ok = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .is_ok();
+    if !ok {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let pid = std::process::id() as u64;
+        let seed = ts ^ (pid << 32) ^ 0x9e3779b97f4a7c15;
+        for (i, b) in bytes.iter_mut().enumerate() {
+            *b = (seed.rotate_left((i as u32) * 7) >> ((i % 8) * 8)) as u8;
+        }
+    }
+    // RFC 4122: version 4, variant 10xx
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    let hex = bytes.iter().map(|b| format!("{:02X}", b)).collect::<String>();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &hex[0..8],
+        &hex[8..12],
+        &hex[12..16],
+        &hex[16..20],
+        &hex[20..32]
+    )
 }
 
 impl Default for ApiClient {

@@ -24,6 +24,25 @@ pub enum AppAction {
     SwitchToSections,
     /// Load videos for a section (rid) in the sections page.
     SelectSection(i64),
+    /// Switch to the message notification center.
+    SwitchToNotifications,
+    /// Switch the notification tab (reply / at / like / sys).
+    SwitchNotifTab(crate::presentation::tui::NotifTab),
+    /// Refresh the current notification tab.
+    RefreshNotifications,
+    /// Load more notifications for the current tab.
+    LoadMoreNotifications,
+    /// Open a private-message conversation with a user.
+    OpenChat(i64),
+    /// Return from chat detail view back to the session list.
+    BackToChatList,
+    /// Send a private message.
+    SendChatMessage {
+        talker_id: i64,
+        content: String,
+    },
+    /// Open the most recent video-share message in the open chat.
+    OpenChatVideo(String),
     /// Switch to login page
     SwitchToLogin,
     /// Switch to settings page
@@ -168,6 +187,8 @@ pub enum AppAction {
     },
     /// Toggle follow/unfollow an uploader (mid)
     ToggleFollow { mid: i64 },
+    /// Toggle follow/unfollow a bangumi season (追番)
+    ToggleBangumiFollow { season_id: i64 },
     /// Switch to live page
     SwitchToLive,
     /// Open live room detail
@@ -187,6 +208,8 @@ pub enum AppAction {
     RefreshBangumi,
     /// Switch bangumi tab
     SwitchBangumiTab(BangumiTab),
+    /// Search bangumi by keyword
+    SearchBangumi { keyword: String },
     /// Open bangumi detail page
     OpenBangumiDetail(i64),
     /// Load more bangumi index items
@@ -220,4 +243,5 @@ pub enum AppAction {
 pub enum BangumiTab {
     Timeline,
     Index,
+    Follow,
 }

@@ -4,8 +4,8 @@ use crate::application::{AppAction, network};
 use crate::infrastructure::{media, persistence};
 use crate::presentation::tui::{
     ArticleDetailPage, BangumiDetailPage, BangumiPage, DynamicDetailPage, DynamicPage,
-    FavoritesPage, HistoryPage, HomePage, LiveDetailPage, LivePage, LoginPage, NavItem, Page,
-    SearchPage, SectionPage, SettingsPage, Theme, UpPage,
+    FavoritesPage, HistoryPage, HomePage, LiveDetailPage, LivePage, LoginPage, NavItem,
+    NotificationsPage, NotifTab, Page, SearchPage, SectionPage, SettingsPage, Theme, UpPage,
 };
 use std::sync::Arc;
 
@@ -124,6 +124,112 @@ impl App {
                         rid,
                     });
                 }
+            }
+            AppAction::SwitchToNotifications => {
+                self.sidebar.select(NavItem::Notifications);
+                if !matches!(self.current_page, Page::Notifications(_)) {
+                    self.current_page = Page::Notifications(NotificationsPage::new());
+                    self.init_current_page().await;
+                }
+            }
+            AppAction::SwitchNotifTab(tab) => {
+                if let Page::Notifications(page) = &mut self.current_page {
+                    page.begin_loading();
+                    let req_id = self.next_request_id("notifications");
+                    if tab == NotifTab::Chat {
+                        self.send_network_command(network::NetworkCommand::LoadChatSessions {
+                            req_id,
+                        });
+                    } else {
+                        let feed_type = tab.feed_type();
+                        self.send_network_command(network::NetworkCommand::LoadNotificationsInit {
+                            req_id,
+                            feed_type,
+                        });
+                    }
+                }
+            }
+            AppAction::RefreshNotifications => {
+                let req_id = self.next_request_id("notifications");
+                if let Page::Notifications(page) = &mut self.current_page {
+                    page.begin_loading();
+                    if page.tab == NotifTab::Chat {
+                        self.send_network_command(network::NetworkCommand::LoadChatSessions {
+                            req_id,
+                        });
+                        return;
+                    }
+                    let feed_type = page.tab.feed_type();
+                    self.send_network_command(network::NetworkCommand::LoadNotificationsInit {
+                        req_id,
+                        feed_type,
+                    });
+                }
+            }
+            AppAction::OpenChat(talker_id) => {
+                if let Page::Notifications(page) = &mut self.current_page {
+                    page.open_chat(talker_id);
+                    let req_id = self.next_request_id("chat_detail");
+                    self.send_network_command(network::NetworkCommand::LoadChatDetail {
+                        req_id,
+                        talker_id,
+                    });
+                }
+            }
+            AppAction::BackToChatList => {
+                if let Page::Notifications(page) = &mut self.current_page {
+                    page.chat_view = false;
+                    page.begin_loading();
+                    let req_id = self.next_request_id("notifications");
+                    self.send_network_command(network::NetworkCommand::LoadChatSessions {
+                        req_id,
+                    });
+                }
+            }
+            AppAction::SendChatMessage { talker_id, content } => {
+                let req_id = self.next_request_id("chat_send");
+                self.send_network_command(network::NetworkCommand::SendChatMessage {
+                    req_id,
+                    talker_id,
+                    content,
+                });
+            }
+            AppAction::OpenChatVideo(bvid) => {
+                // Same behaviour as OpenVideoDetail (opens from the chat page).
+                let detail_page = crate::presentation::tui::VideoDetailPage::new(bvid.clone(), 0);
+                let previous = std::mem::replace(
+                    &mut self.current_page,
+                    Page::VideoDetail(Box::new(detail_page)),
+                );
+                self.navigation_stack.push(previous);
+                let req_id = self.next_request_id("video_detail");
+                self.send_network_command(network::NetworkCommand::LoadVideoDetail {
+                    req_id,
+                    bvid,
+                    aid: 0,
+                });
+            }
+            AppAction::LoadMoreNotifications => {
+                let feed_type;
+                let page_num;
+                {
+                    let page = match &mut self.current_page {
+                        Page::Notifications(page) => page,
+                        _ => return,
+                    };
+                    if page.loading_more || page.loading {
+                        return;
+                    }
+                    page.loading_more = true;
+                    feed_type = page.tab.feed_type();
+                    page_num = page.items.len() as i32 / 20 + 1;
+                }
+                let req_id = self.next_request_id("notifications_more");
+                self.send_network_command(network::NetworkCommand::LoadNotificationsMore {
+                    req_id,
+                    feed_type,
+                    page: page_num,
+                });
             }
             AppAction::SwitchToLogin => {
                 self.current_page = Page::Login(LoginPage::new());
@@ -1209,6 +1315,36 @@ impl App {
                     }
                 }
             }
+            AppAction::ToggleBangumiFollow { season_id } => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    return;
+                }
+                let client = self.api_client.clone();
+                let followed = client.is_bangumi_followed(season_id).await.unwrap_or(false);
+                let result = if followed {
+                    client.unfollow_bangumi(season_id).await
+                } else {
+                    client.follow_bangumi(season_id).await
+                };
+                match result {
+                    Ok(()) => {
+                        if let Page::BangumiDetail(page) = &mut self.current_page {
+                            page.followed = Some(!followed);
+                            page.follow_msg = Some(if !followed {
+                                "已追番".to_string()
+                            } else {
+                                "已取消追番".to_string()
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        if let Page::BangumiDetail(page) = &mut self.current_page {
+                            page.follow_msg = Some(format!("操作失败: {e}"));
+                        }
+                    }
+                }
+            }
             AppAction::SaveKeybindings(new_keybindings) => {
                 self.keybindings = (*new_keybindings).clone();
                 self.config.keybindings = *new_keybindings;
@@ -1350,8 +1486,45 @@ impl App {
                 self.current_page = Page::Bangumi(Box::<BangumiPage>::default());
                 self.init_current_page().await;
             }
-            AppAction::SwitchBangumiTab(_tab) => {
-                // Single tab mode, no-op
+            AppAction::SwitchBangumiTab(tab) => {
+                if let Page::Bangumi(page) = &mut self.current_page {
+                    match tab {
+                        crate::application::BangumiTab::Follow => {
+                            page.enter_follow_mode();
+                            if !page.follow_loaded {
+                                let mid = self
+                                    .credentials
+                                    .as_ref()
+                                    .and_then(|c| c.dede_user_id.parse::<i64>().ok());
+                                if let Some(mid) = mid {
+                                    let req_id = self.next_request_id("bangumi_follow_list");
+                                    self.send_network_command(
+                                        network::NetworkCommand::LoadBangumiFollowList {
+                                            req_id,
+                                            mid,
+                                        },
+                                    );
+                                } else {
+                                    page.set_follow_error(Self::login_required_message());
+                                }
+                            }
+                        }
+                        _ => {
+                            page.exit_follow_mode();
+                        }
+                    }
+                }
+            }
+            AppAction::SearchBangumi { keyword } => {
+                if let Page::Bangumi(page) = &mut self.current_page {
+                    page.start_search(&keyword);
+                }
+                let req_id = self.next_request_id("bangumi_search");
+                self.send_network_command(network::NetworkCommand::LoadBangumiSearch {
+                    req_id,
+                    keyword,
+                    page: 1,
+                });
             }
             AppAction::OpenBangumiDetail(season_id) => {
                 self.save_previous_page();
@@ -1636,6 +1809,12 @@ impl App {
                     }
                 }
             }
+            NavItem::Notifications => {
+                if !matches!(self.current_page, Page::Notifications(_)) {
+                    self.current_page = Page::Notifications(NotificationsPage::new());
+                    self.init_current_page().await;
+                }
+            }
         }
     }
 
@@ -1744,6 +1923,26 @@ impl App {
             }
             Page::BangumiDetail(_) => {
                 // BangumiDetail is initialized when created
+            }
+            Page::Notifications(page) => {
+                if self.credentials.is_none() {
+                    page.set_message(Self::login_required_message());
+                    return;
+                }
+                let is_chat = page.tab == NotifTab::Chat;
+                let feed_type = page.tab.feed_type();
+                page.begin_loading();
+                let req_id = self.next_request_id("notifications");
+                if is_chat {
+                    self.send_network_command(network::NetworkCommand::LoadChatSessions {
+                        req_id,
+                    });
+                } else {
+                    self.send_network_command(network::NetworkCommand::LoadNotificationsInit {
+                        req_id,
+                        feed_type,
+                    });
+                }
             }
             Page::Up(_) => {
                 // UpPage is initialized by OpenUpPage with an identity-bound request.

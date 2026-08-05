@@ -192,6 +192,7 @@ impl App {
             Page::Settings(page) => page.draw(frame, area, &self.theme, &self.keybindings),
             Page::Bangumi(page) => page.draw(frame, area, &self.theme, &self.keybindings),
             Page::BangumiDetail(page) => page.draw(frame, area, &self.theme, &self.keybindings),
+            Page::Notifications(page) => page.draw(frame, area, &self.theme, &self.keybindings),
             Page::Up(page) => page.draw(frame, area, &self.theme, &self.keybindings),
         }
     }
@@ -218,6 +219,7 @@ impl App {
             Page::Bangumi(page) => page.handle_input(key, keys),
             Page::BangumiDetail(page) => page.handle_input(key, keys),
             Page::Up(page) => page.handle_input(key, keys),
+            Page::Notifications(page) => page.handle_input(key, keys),
         };
 
         if let Some(action) = action {
@@ -243,6 +245,7 @@ impl App {
             Page::Bangumi(page) => page.handle_mouse(event, area),
             Page::BangumiDetail(page) => page.handle_mouse(event, area),
             Page::Up(page) => page.handle_mouse(event, area),
+            Page::Notifications(page) => page.handle_mouse(event, area),
         };
 
         if let Some(action) = action {
@@ -380,6 +383,10 @@ impl App {
                 page.series_videos.start_cover_downloads();
                 page.series_cards.poll_cover_results();
                 page.series_cards.start_cover_downloads();
+            }
+            Page::Notifications(page) => {
+                page.poll_avatar_results();
+                page.poll_cover_results();
             }
             _ => {}
         }

@@ -21,6 +21,10 @@ pub struct BangumiDetailPage {
     pub selected_episode: usize,
     target_episode_id: Option<i64>,
     pub auto_play_pending: bool,
+    /// Current user's follow state for this season (None = unknown / not logged in).
+    pub followed: Option<bool>,
+    /// Short message shown after a follow/unfollow operation.
+    pub follow_msg: Option<String>,
     // Flat list of all episodes for navigation
     flat_episodes: Vec<FlatEpisode>,
     last_click_time: Option<Instant>,
@@ -45,6 +49,8 @@ impl BangumiDetailPage {
             selected_episode: 0,
             target_episode_id: None,
             auto_play_pending: false,
+            followed: None,
+            follow_msg: None,
             flat_episodes: Vec::new(),
             last_click_time: None,
             last_click_index: None,
@@ -72,6 +78,12 @@ impl BangumiDetailPage {
         self.season = Some(season);
         self.loading = false;
         self.error_message = None;
+        self.followed = self
+            .season
+            .as_ref()
+            .and_then(|s| s.user_status.as_ref())
+            .filter(|u| u.login == 1)
+            .map(|u| u.follow == 1);
         let target_index = self.target_episode_id.and_then(|ep_id| {
             self.flat_episodes
                 .iter()
@@ -89,6 +101,12 @@ impl BangumiDetailPage {
     pub fn set_error(&mut self, msg: String) {
         self.error_message = Some(msg);
         self.loading = false;
+    }
+
+    /// Apply the follow state resolved by the network layer (from the real
+    /// follow list when the season view reported login=0).
+    pub fn apply_follow_status(&mut self, followed: bool) {
+        self.followed = Some(followed);
     }
 
     pub async fn load_data(&mut self, api_client: &ApiClient) {
@@ -203,6 +221,25 @@ impl BangumiDetailPage {
                     format!(" · {}", badge),
                     Style::default().fg(theme.bilibili_pink),
                 ));
+            }
+            if let Some(followed) = self.followed {
+                stats_spans.push(Span::styled(" │ ", Style::default().fg(theme.fg_muted)));
+                let follow_text = if followed {
+                    "[f] 已追番 ✓"
+                } else {
+                    "[f] 未追番"
+                };
+                let follow_color = if followed { theme.success } else { theme.fg_secondary };
+                stats_spans.push(Span::styled(
+                    follow_text,
+                    Style::default().fg(follow_color).add_modifier(Modifier::BOLD),
+                ));
+                if let Some(msg) = &self.follow_msg {
+                    stats_spans.push(Span::styled(
+                        format!(" {}", msg),
+                        Style::default().fg(theme.fg_secondary),
+                    ));
+                }
             }
             frame.render_widget(Paragraph::new(Line::from(stats_spans)), chunks[1]);
 
@@ -386,6 +423,12 @@ impl Component for BangumiDetailPage {
 
         if self.loading {
             return Some(AppAction::None);
+        }
+
+        if key == KeyCode::Char('f') {
+            return Some(AppAction::ToggleBangumiFollow {
+                season_id: self.season_id,
+            });
         }
 
         if keys.matches_down(key) {

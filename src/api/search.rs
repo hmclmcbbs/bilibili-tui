@@ -129,6 +129,113 @@ pub struct SearchUserData {
     pub pagesize: Option<i32>,
 }
 
+/// Search result for a bangumi/season (media_bangumi)
+#[derive(Debug, Clone, Deserialize)]
+pub struct SearchBangumiItem {
+    #[serde(rename = "season_id")]
+    pub season_id: Option<i64>,
+    pub title: Option<String>,
+    pub cover: Option<String>,
+    /// Can be a plain string ("9.7") or an object ({"user_score": {...}})
+    pub score: Option<serde_json::Value>,
+    pub areas: Option<Vec<BangumiArea>>,
+    pub styles: Option<Vec<BangumiStyle>>,
+    pub desc: Option<String>,
+    pub pubdate: Option<i64>,
+    #[serde(rename = "media_type")]
+    pub media_type: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BangumiArea {
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BangumiStyle {
+    pub name: Option<String>,
+}
+
+impl SearchBangumiItem {
+    /// Strip HTML em tags from title
+    pub fn display_title(&self) -> String {
+        self.title
+            .as_deref()
+            .unwrap_or("无标题")
+            .replace("<em class=\"keyword\">", "")
+            .replace("</em>", "")
+    }
+
+    pub fn display_subtitle(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(areas) = &self.areas {
+            let names: Vec<&str> = areas.iter().filter_map(|a| a.name.as_deref()).collect();
+            if !names.is_empty() {
+                parts.push(names.join("/"));
+            }
+        }
+        if let Some(styles) = &self.styles {
+            let names: Vec<&str> = styles.iter().filter_map(|s| s.name.as_deref()).collect();
+            if !names.is_empty() {
+                parts.push(names.join("/"));
+            }
+        }
+        if parts.is_empty() {
+            "-".to_string()
+        } else {
+            parts.join(" · ")
+        }
+    }
+
+    pub fn score_text(&self) -> String {
+        match &self.score {
+            Some(serde_json::Value::String(s)) if !s.is_empty() => format!("{}分", s),
+            Some(serde_json::Value::Object(obj)) => {
+                if let Some(us) = obj.get("user_score") {
+                    if let Some(score) = us.get("score") {
+                        if let Some(s) = score.as_str() {
+                            return format!("{}分", s);
+                        }
+                    }
+                }
+                String::new()
+            }
+            _ => String::new(),
+        }
+    }
+
+    pub fn badge_text(&self) -> Option<String> {
+        match &self.score {
+            Some(serde_json::Value::String(s)) if !s.is_empty() => Some(format!("评分 {}", s)),
+            Some(serde_json::Value::Object(obj)) => {
+                if let Some(us) = obj.get("user_score") {
+                    if let Some(score) = us.get("score") {
+                        if let Some(s) = score.as_str() {
+                            return Some(format!("评分 {}", s));
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    pub fn cover_url(&self) -> Option<String> {
+        self.cover.as_ref().map(|url| {
+            if url.starts_with("//") {
+                format!("https:{}", url)
+            } else {
+                url.clone()
+            }
+        })
+    }
+
+    pub fn description(&self) -> String {
+        self.desc.clone().unwrap_or_default()
+    }
+}
+
 /// Hot search item from web endpoint
 #[derive(Debug, Clone, Deserialize)]
 pub struct HotwordItem {
