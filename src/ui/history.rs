@@ -40,6 +40,10 @@ enum HistoryMode {
 
 pub struct HistoryPage {
     items: Vec<HistoryCard>,
+    full_items: Vec<HistoryItem>,
+    filter: Option<String>,
+    filter_input_mode: bool,
+    filter_input: String,
     selected: usize,
     scroll_offset: usize,
     loading: bool,
@@ -73,6 +77,10 @@ impl HistoryPage {
 
         Self {
             items: Vec::new(),
+            full_items: Vec::new(),
+            filter: None,
+            filter_input_mode: false,
+            filter_input: String::new(),
             selected: 0,
             scroll_offset: 0,
             loading: false,
@@ -99,16 +107,10 @@ impl HistoryPage {
 
         match api_client.get_history(None, None, None).await {
             Ok(data) => {
-                self.items = data
-                    .list
-                    .into_iter()
-                    .map(|item| HistoryCard {
-                        item,
-                        cover_protocol: None,
-                    })
-                    .collect();
+                self.full_items = data.list;
+                self.apply_filter();
                 self.cursor = Some(data.cursor);
-                self.has_more = !self.items.is_empty();
+                self.has_more = !self.full_items.is_empty();
                 self.loading = false;
                 self.reset_selection_and_downloads();
             }
@@ -125,21 +127,75 @@ impl HistoryPage {
     }
 
     pub fn apply_history_init(&mut self, data: crate::api::history::HistoryData) {
-        self.items = data
-            .list
-            .into_iter()
-            .map(|item| HistoryCard {
-                item,
-                cover_protocol: None,
-            })
-            .collect();
+        self.full_items = data.list;
+        self.apply_filter();
         self.cursor = Some(data.cursor);
-        self.has_more = !self.items.is_empty();
+        self.has_more = !self.full_items.is_empty();
         self.selected = 0;
         self.scroll_offset = 0;
         self.loading = false;
         self.error = None;
         self.reset_selection_and_downloads();
+    }
+
+    /// Rebuild `items` from `full_items` according to the active filter.
+    /// Keeps selection in bounds.
+    fn apply_filter(&mut self) {
+        // Preserve already-downloaded cover protocols across the rebuild so
+        // scrolling (which triggers load-more -> apply_filter) does not reset
+        // every cover and force a full redownload.
+        let mut cached: std::collections::HashMap<HistoryKey, StatefulProtocol> =
+            std::collections::HashMap::new();
+        for card in self.items.drain(..) {
+            if let (Some(protocol), Some(key)) = (card.cover_protocol, card.item.history_key()) {
+                cached.insert(key, protocol);
+            }
+        }
+
+        if let Some(filter) = self.filter.as_deref()
+            && !filter.trim().is_empty()
+        {
+            let filter = filter.trim().to_lowercase();
+            self.items = self
+                .full_items
+                .iter()
+                .filter(|item| item.title.to_lowercase().contains(&filter))
+                .map(|item| HistoryCard {
+                    item: item.clone(),
+                    cover_protocol: item
+                        .history_key()
+                        .and_then(|key| cached.remove(&key)),
+                })
+                .collect();
+        } else {
+            self.items = self
+                .full_items
+                .iter()
+                .map(|item| HistoryCard {
+                    item: item.clone(),
+                    cover_protocol: item
+                        .history_key()
+                        .and_then(|key| cached.remove(&key)),
+                })
+                .collect();
+        }
+        // In-flight downloads reference stale indices after the rebuild;
+        // invalidate them so results cannot land on the wrong card.
+        self.pending_downloads.clear();
+        self.generation = self.generation.wrapping_add(1);
+        self.selected = self.selected.min(self.items.len().saturating_sub(1));
+        self.scroll_offset = self.scroll_offset.min(
+            self.items
+                .len()
+                .div_ceil(Self::COLUMNS)
+                .saturating_sub(1),
+        );
+    }
+
+    fn update_filter_from_input(&mut self) {
+        let kw = self.filter_input.trim().to_string();
+        self.filter = if kw.is_empty() { None } else { Some(kw) };
+        self.apply_filter();
     }
 
     pub fn start_load_more_request(&mut self) -> Option<crate::api::history::HistoryCursor> {
@@ -152,20 +208,14 @@ impl HistoryPage {
     }
 
     pub fn apply_history_more(&mut self, data: crate::api::history::HistoryData) {
-        let new_items: Vec<HistoryCard> = data
-            .list
-            .into_iter()
-            .map(|item| HistoryCard {
-                item,
-                cover_protocol: None,
-            })
-            .collect();
+        let new_items = data.list;
 
         if new_items.is_empty() {
             self.has_more = false;
         } else {
             self.cursor = Some(data.cursor);
-            self.items.extend(new_items);
+            self.full_items.extend(new_items);
+            self.apply_filter();
         }
         self.loading = false;
     }
@@ -201,20 +251,14 @@ impl HistoryPage {
             .await
         {
             Ok(data) => {
-                let new_items: Vec<HistoryCard> = data
-                    .list
-                    .into_iter()
-                    .map(|item| HistoryCard {
-                        item,
-                        cover_protocol: None,
-                    })
-                    .collect();
+                let new_items = data.list;
 
                 if new_items.is_empty() {
                     self.has_more = false;
                 } else {
                     self.cursor = Some(data.cursor);
-                    self.items.extend(new_items);
+                    self.full_items.extend(new_items);
+                    self.apply_filter();
                 }
                 self.loading = false;
             }
@@ -224,7 +268,6 @@ impl HistoryPage {
             }
         }
     }
-
     fn is_near_bottom(&self, visible_rows: usize) -> bool {
         if self.items.is_empty() {
             return false;
@@ -433,6 +476,10 @@ impl HistoryPage {
                 .history_key()
                 .is_none_or(|key| !successful.contains(&key))
         });
+        self.full_items.retain(|item| {
+            item.history_key()
+                .is_none_or(|key| !successful.contains(&key))
+        });
         self.pending_downloads.clear();
         self.generation = self.generation.wrapping_add(1);
         for card in &mut self.items {
@@ -467,7 +514,14 @@ impl Component for HistoryPage {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.border_subtle))
             .title(Span::styled(
-                " 📜 观看历史 ",
+                format!(
+                    " 📜 观看历史{} ",
+                    self.filter
+                        .as_deref()
+                        .filter(|f| !f.is_empty())
+                        .map(|f| format!(" | 筛选: {}", f))
+                        .unwrap_or_default()
+                ),
                 Style::default()
                     .fg(theme.bilibili_pink)
                     .add_modifier(Modifier::BOLD),
@@ -497,9 +551,13 @@ impl Component for HistoryPage {
 
         // Empty state
         if self.items.is_empty() {
-            let empty = Paragraph::new("暂无历史记录")
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(theme.fg_muted));
+            let empty = Paragraph::new(if self.filter.as_deref().is_some_and(|f| !f.is_empty()) {
+                "没有匹配的历史记录，按 / 修改筛选"
+            } else {
+                "暂无历史记录"
+            })
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(theme.fg_muted));
             frame.render_widget(empty, inner);
             return;
         }
@@ -543,6 +601,38 @@ impl Component for HistoryPage {
             return None;
         }
 
+        // Filter input mode: typing a keyword filters the loaded history.
+        if self.filter_input_mode {
+            match key {
+                KeyCode::Esc => {
+                    self.filter_input_mode = false;
+                    self.filter_input.clear();
+                    self.filter = None;
+                    self.apply_filter();
+                }
+                KeyCode::Enter => {
+                    self.filter_input_mode = false;
+                    let kw = self.filter_input.trim().to_string();
+                    if kw.is_empty() {
+                        self.filter = None;
+                    } else {
+                        crate::storage::save_search_history(&kw);
+                    }
+                    self.apply_filter();
+                }
+                KeyCode::Backspace => {
+                    self.filter_input.pop();
+                    self.update_filter_from_input();
+                }
+                KeyCode::Char(c) => {
+                    self.filter_input.push(c);
+                    self.update_filter_from_input();
+                }
+                _ => {}
+            }
+            return None;
+        }
+
         if modifiers.contains(KeyModifiers::CONTROL) && key == KeyCode::Char('a') {
             self.select_all_loaded();
             return None;
@@ -569,6 +659,12 @@ impl Component for HistoryPage {
             }
             self.notice = None;
             self.mode = HistoryMode::ConfirmDelete;
+            return None;
+        }
+        if key == KeyCode::Char('/') {
+            self.filter_input_mode = true;
+            self.filter_input.clear();
+            self.filter = None;
             return None;
         }
         if key == KeyCode::Esc || keys.matches_back(key) {
@@ -895,9 +991,14 @@ impl HistoryPage {
             [
                 (
                     format!(
-                        "{}/{}",
+                        "{}/{} · {}",
                         keys.get_arrow_keys_display(),
-                        keys.get_nav_keys_display()
+                        keys.get_nav_keys_display(),
+                        if self.filter_input_mode {
+                            "输入筛选，Enter 应用，Esc 取消"
+                        } else {
+                            "/ 筛选"
+                        }
                     ),
                     "导航".into(),
                     theme.fg_accent,

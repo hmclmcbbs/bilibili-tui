@@ -428,6 +428,7 @@ impl App {
                 self.send_network_command(network::NetworkCommand::CancelPending);
             }
             AppAction::Search(keyword) => {
+                crate::storage::save_search_history(&keyword);
                 let mut start_search = false;
                 match &mut self.current_page {
                     Page::Home(home) => {
@@ -437,6 +438,7 @@ impl App {
                         page.loading = true;
                         page.show_hot_list = false;
                         page.mode = crate::ui::SearchMode::Video;
+                        page.reload_history();
                         start_search = true;
                     }
                     Page::Search(page) => {
@@ -445,6 +447,7 @@ impl App {
                         page.loading = true;
                         page.show_hot_list = false;
                         page.mode = crate::ui::SearchMode::Video;
+                        page.reload_history();
                         start_search = true;
                     }
                     _ => {}
@@ -459,6 +462,7 @@ impl App {
                 }
             }
             AppAction::SearchUsers(keyword) => {
+                crate::storage::save_search_history(&keyword);
                 let mut start_search = false;
                 match &mut self.current_page {
                     Page::Home(home) => {
@@ -468,6 +472,7 @@ impl App {
                         page.user_loading = true;
                         page.show_hot_list = false;
                         page.mode = crate::ui::SearchMode::User;
+                        page.reload_history();
                         start_search = true;
                     }
                     Page::Search(page) => {
@@ -476,6 +481,7 @@ impl App {
                         page.user_loading = true;
                         page.show_hot_list = false;
                         page.mode = crate::ui::SearchMode::User;
+                        page.reload_history();
                         start_search = true;
                     }
                     _ => {}
@@ -1516,8 +1522,10 @@ impl App {
                 }
             }
             AppAction::SearchBangumi { keyword } => {
+                crate::storage::save_search_history(&keyword);
                 if let Page::Bangumi(page) = &mut self.current_page {
                     page.start_search(&keyword);
+                    page.reload_search_history();
                 }
                 let req_id = self.next_request_id("bangumi_search");
                 self.send_network_command(network::NetworkCommand::LoadBangumiSearch {

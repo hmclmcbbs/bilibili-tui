@@ -20,6 +20,13 @@ pub enum SearchMode {
     User,
 }
 
+/// Which picker panel currently has keyboard focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PickerFocus {
+    History,
+    Hotwords,
+}
+
 pub struct SearchPage {
     pub query: String,
     pub mode: SearchMode,
@@ -34,7 +41,10 @@ pub struct SearchPage {
     pub hotword_error: Option<String>,
     pub hotword_loading: bool,
     pub show_hot_list: bool,
+    picker_focus: PickerFocus,
+    history_selected: Option<usize>,
     hot_selected: Option<usize>,
+    pub history: Vec<String>,
     pub page: i32,
     pub total_results: i32,
     pub loading_more: bool,
@@ -49,6 +59,7 @@ impl SearchPage {
     pub fn new() -> Self {
         let mut user_grid = VideoCardGrid::new_list();
         user_grid.card_height = 8;
+        let history = crate::storage::load_search_history();
         Self {
             query: String::new(),
             mode: SearchMode::Video,
@@ -63,7 +74,14 @@ impl SearchPage {
             hotword_error: None,
             hotword_loading: false,
             show_hot_list: true,
+            picker_focus: if history.is_empty() {
+                PickerFocus::Hotwords
+            } else {
+                PickerFocus::History
+            },
+            history_selected: if history.is_empty() { None } else { Some(0) },
             hot_selected: None,
+            history,
             page: 1,
             total_results: 0,
             loading_more: false,
@@ -75,15 +93,116 @@ impl SearchPage {
         }
     }
 
+    /// Reload persisted search history (called after a search is executed so
+    /// the newest keyword appears at the top of the picker list).
+    pub fn reload_history(&mut self) {
+        self.history = crate::storage::load_search_history();
+        match self.picker_focus {
+            PickerFocus::History => {
+                if self.history.is_empty() {
+                    self.history_selected = None;
+                    if !self.hotwords.is_empty() {
+                        self.hot_selected = Some(0);
+                        self.picker_focus = PickerFocus::Hotwords;
+                    }
+                } else if self.history_selected.is_none() {
+                    self.history_selected = Some(0);
+                }
+            }
+            PickerFocus::Hotwords => {
+                if self.hotwords.is_empty() && !self.history.is_empty() {
+                    self.picker_focus = PickerFocus::History;
+                    self.history_selected = Some(0);
+                }
+            }
+        }
+    }
+
+    fn history_len(&self) -> usize {
+        self.history.len()
+    }
+
+    fn hotword_len(&self) -> usize {
+        self.hotwords.len()
+    }
+
+    fn move_history(&mut self, delta: i32) {
+        let len = self.history_len();
+        if len == 0 {
+            self.history_selected = None;
+            return;
+        }
+        let current = self.history_selected.unwrap_or(0) as i32;
+        let next = (current + delta).rem_euclid(len as i32) as usize;
+        self.history_selected = Some(next);
+    }
+
+    fn move_hotwords(&mut self, delta: i32) {
+        let len = self.hotword_len();
+        if len == 0 {
+            self.hot_selected = None;
+            return;
+        }
+        let current = self.hot_selected.unwrap_or(0) as i32;
+        let next = (current + delta).rem_euclid(len as i32) as usize;
+        self.hot_selected = Some(next);
+    }
+
+    fn move_focus(&mut self, delta: i32) {
+        match self.picker_focus {
+            PickerFocus::History => self.move_history(delta),
+            PickerFocus::Hotwords => self.move_hotwords(delta),
+        }
+    }
+
+    /// j/k 导航：历史栏在最底部按 j 切到热搜栏，热搜栏在最顶部按 k 切回历史栏。
+    fn picker_nav(&mut self, delta: i32) {
+        match self.picker_focus {
+            PickerFocus::History => {
+                if delta > 0 {
+                    let len = self.history_len();
+                    let cur = self.history_selected.unwrap_or(0);
+                    if len > 0 && cur + 1 >= len {
+                        // 到底部再按 j/↓：切到热搜栏（即使热搜还在加载也切，让用户看到焦点移动）
+                        self.picker_focus = PickerFocus::Hotwords;
+                        self.hot_selected = if self.hotwords.is_empty() { None } else { Some(0) };
+                        return;
+                    }
+                    self.move_history(1);
+                } else {
+                    self.move_history(-1);
+                }
+            }
+            PickerFocus::Hotwords => {
+                if delta < 0 {
+                    let cur = self.hot_selected.unwrap_or(0);
+                    if cur == 0 {
+                        if !self.history.is_empty() {
+                            self.picker_focus = PickerFocus::History;
+                            self.history_selected = Some(self.history_len().saturating_sub(1));
+                        }
+                        return;
+                    }
+                    self.move_hotwords(-1);
+                } else {
+                    self.move_hotwords(1);
+                }
+            }
+        }
+    }
+
     /// 按左方向键（h）时是否应该回到侧边栏：
     /// - 输入模式（input_mode）时不拦截，h 作为字符输入
     /// - 热词列表状态：h 没有其他用途，直接回侧边栏
     /// - 结果列表：已处于最左列时回侧边栏，否则交给网格左移
     pub fn wants_left_to_sidebar(&self) -> bool {
-        if self.input_mode {
+        // 输入模式但还没有任何字符时（正在浏览搜索历史/热搜下拉栏），
+        // h 键应该回到侧边栏而不是当作字符输入。
+        if self.input_mode && !self.query.is_empty() {
             return false;
         }
         if self.show_hot_list {
+            // 下拉栏可见时 h/← 一律回侧边栏；历史/热搜栏之间的切换用 j/k 在底部/顶部完成
             return true;
         }
         match self.mode {
@@ -195,6 +314,10 @@ impl SearchPage {
         } else {
             Some(0)
         };
+        // 历史为空时默认焦点落到热搜栏
+        if self.history.is_empty() && !self.hotwords.is_empty() {
+            self.picker_focus = PickerFocus::Hotwords;
+        }
     }
 
     pub fn set_hotword_error(&mut self, msg: String) {
@@ -271,24 +394,22 @@ impl SearchPage {
         self.user_grid.start_cover_downloads();
     }
 
-    fn select_hotword(&mut self, idx: usize) {
-        if idx < self.hotwords.len() {
-            self.hot_selected = Some(idx);
-        }
-    }
-
-    fn search_selected_hotword(&mut self) -> Option<AppAction> {
-        if let Some(idx) = self.hot_selected
-            && let Some(item) = self.hotwords.get(idx)
-            && let Some(keyword) = item.keyword_text()
-        {
-            self.query = keyword.clone();
-            self.loading = true;
-            self.page = 1;
-            self.show_hot_list = false;
-            return Some(AppAction::Search(keyword));
-        }
-        None
+    fn search_selected_picker(&mut self) -> Option<AppAction> {
+        let keyword = match self.picker_focus {
+            PickerFocus::History => {
+                let idx = self.history_selected?;
+                self.history.get(idx).cloned()?
+            }
+            PickerFocus::Hotwords => {
+                let idx = self.hot_selected?;
+                self.hotwords.get(idx).and_then(|item| item.keyword_text())?
+            }
+        };
+        self.query = keyword.clone();
+        self.loading = true;
+        self.page = 1;
+        self.show_hot_list = false;
+        Some(AppAction::Search(keyword))
     }
 
     fn handle_user_mouse(&mut self, event: MouseEvent, area: Rect) -> Option<AppAction> {
@@ -369,13 +490,108 @@ impl SearchPage {
     }
 
     fn draw_hot_list(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        // 两个独立栏：搜索历史（上）、热搜（下），各自带边框
+        let hist_h = if self.history.is_empty() {
+            0
+        } else {
+            (self.history.len() as u16 + 2).min(8)
+        };
+        let hot_h = if self.hotword_loading || !self.hotword_error.is_none() || !self.hotwords.is_empty()
+        {
+            (self.hotwords.len() as u16 + 2).min(8).max(3)
+        } else {
+            0
+        };
+
+        if hist_h == 0 && hot_h == 0 {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.border_subtle))
+                .title(Span::styled(
+                    " 搜索历史 / 热搜 ",
+                    Style::default().fg(theme.bilibili_pink),
+                ));
+            let empty = Paragraph::new("暂无热搜数据")
+                .style(Style::default().fg(theme.fg_secondary))
+                .alignment(Alignment::Center)
+                .block(block);
+            frame.render_widget(empty, area);
+            return;
+        }
+
+        let (hist_area, hot_area) = if hist_h > 0 && hot_h > 0 {
+            let layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(hist_h), Constraint::Length(hot_h)])
+                .split(area);
+            (layout[0], layout[1])
+        } else if hist_h > 0 {
+            (area, Rect::default())
+        } else {
+            (Rect::default(), area)
+        };
+
+        if hist_h > 0 {
+            self.draw_history_picker(frame, hist_area, theme);
+        }
+        if hot_h > 0 {
+            self.draw_hotword_picker(frame, hot_area, theme);
+        }
+    }
+
+    fn draw_history_picker(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let focused = self.picker_focus == PickerFocus::History;
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(theme.border_subtle))
+            .border_style(Style::default().fg(if focused {
+                theme.bilibili_pink
+            } else {
+                theme.border_subtle
+            }))
             .title(Span::styled(
-                " 热搜榜 ",
-                Style::default().fg(theme.bilibili_pink),
+                " 搜索历史 ",
+                Style::default().fg(if focused {
+                    theme.bilibili_pink
+                } else {
+                    theme.fg_muted
+                }),
+            ));
+
+        let mut items: Vec<ListItem> = Vec::new();
+        for keyword in &self.history {
+            items.push(ListItem::new(Line::from(vec![
+                Span::styled("历史 ", Style::default().fg(theme.fg_muted)),
+                Span::styled(keyword.as_str(), Style::default().fg(theme.fg_primary)),
+            ])));
+        }
+
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(Style::default().fg(theme.bilibili_pink).bg(theme.bg_highlight))
+            .highlight_symbol("▶ ");
+        let mut state = ListState::default().with_selected(self.history_selected);
+        frame.render_stateful_widget(list, area, &mut state);
+    }
+
+    fn draw_hotword_picker(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let focused = self.picker_focus == PickerFocus::Hotwords;
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(if focused {
+                theme.bilibili_pink
+            } else {
+                theme.border_subtle
+            }))
+            .title(Span::styled(
+                " 热搜 ",
+                Style::default().fg(if focused {
+                    theme.bilibili_pink
+                } else {
+                    theme.fg_muted
+                }),
             ));
 
         if self.hotword_loading {
@@ -396,44 +612,30 @@ impl SearchPage {
             return;
         }
 
-        if self.hotwords.is_empty() {
-            let empty = Paragraph::new("暂无热搜数据")
-                .style(Style::default().fg(theme.fg_secondary))
-                .alignment(Alignment::Center)
-                .block(block);
-            frame.render_widget(empty, area);
-            return;
+        let mut items: Vec<ListItem> = Vec::new();
+        for (idx, item) in self.hotwords.iter().enumerate() {
+            let mut spans = vec![
+                Span::styled(
+                    format!("{:>2}. ", idx + 1),
+                    Style::default().fg(theme.fg_muted),
+                ),
+                Span::styled(item.display_text(), Style::default().fg(theme.fg_primary)),
+            ];
+
+            if let Some(badge) = item.badge() {
+                spans.push(Span::styled(
+                    format!(" [{}]", badge),
+                    Style::default().fg(theme.bilibili_pink),
+                ));
+            }
+
+            items.push(ListItem::new(Line::from(spans)));
         }
-
-        let items: Vec<ListItem> = self
-            .hotwords
-            .iter()
-            .enumerate()
-            .map(|(idx, item)| {
-                let mut spans = vec![
-                    Span::styled(
-                        format!("{:>2}. ", idx + 1),
-                        Style::default().fg(theme.fg_muted),
-                    ),
-                    Span::styled(item.display_text(), Style::default().fg(theme.fg_primary)),
-                ];
-
-                if let Some(badge) = item.badge() {
-                    spans.push(Span::styled(
-                        format!(" [{}]", badge),
-                        Style::default().fg(theme.bilibili_pink),
-                    ));
-                }
-
-                ListItem::new(Line::from(spans))
-            })
-            .collect();
 
         let list = List::new(items)
             .block(block)
-            .highlight_style(Style::default().fg(theme.bilibili_pink))
+            .highlight_style(Style::default().fg(theme.bilibili_pink).bg(theme.bg_highlight))
             .highlight_symbol("▶ ");
-
         let mut state = ListState::default().with_selected(self.hot_selected);
         frame.render_stateful_widget(list, area, &mut state);
     }
@@ -488,7 +690,73 @@ impl Component for SearchPage {
 
         // Results
         if self.show_hot_list {
-            self.draw_hot_list(frame, chunks[1], theme);
+            // 搜索下拉栏：输入框正下方，固定小高度
+            let hist_h = if self.history.is_empty() {
+                0
+            } else {
+                (self.history.len() as u16 + 2).min(8)
+            };
+            let hot_h = if self.hotword_loading
+                || !self.hotword_error.is_none()
+                || !self.hotwords.is_empty()
+            {
+                (self.hotwords.len() as u16 + 2).min(8).max(3)
+            } else {
+                0
+            };
+            let dropdown_height = (hist_h + hot_h).max(3).min(16);
+            let dropdown_area = Rect {
+                y: chunks[0].y + chunks[0].height,
+                height: dropdown_height,
+                x: chunks[0].x,
+                width: chunks[0].width,
+            };
+            self.draw_hot_list(frame, dropdown_area, theme);
+
+            // 下拉栏下方：显示已有结果或提示
+            let results_top = dropdown_area.y + dropdown_area.height;
+            let results_area = Rect {
+                y: results_top,
+                height: chunks[1].height.saturating_sub(results_top.saturating_sub(chunks[1].y)),
+                ..chunks[1]
+            };
+            if self.mode == SearchMode::User {
+                if self.user_grid.cards.is_empty() {
+                    let empty = Paragraph::new(if self.query.is_empty() {
+                        "输入关键词开始搜索UP主"
+                    } else {
+                        "没有找到相关UP主"
+                    })
+                    .style(Style::default().fg(theme.fg_secondary))
+                    .alignment(Alignment::Center)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
+                            .border_style(Style::default().fg(theme.border_unfocused)),
+                    );
+                    frame.render_widget(empty, results_area);
+                } else {
+                    self.user_grid.render(frame, results_area, theme);
+                }
+            } else if self.grid.cards.is_empty() {
+                let empty = Paragraph::new(if self.query.is_empty() {
+                    "输入关键词开始搜索"
+                } else {
+                    "没有找到相关视频"
+                })
+                .style(Style::default().fg(theme.fg_secondary))
+                .alignment(Alignment::Center)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(theme.border_unfocused)),
+                );
+                frame.render_widget(empty, results_area);
+            } else {
+                self.grid.render(frame, results_area, theme);
+            }
         } else if self.mode == SearchMode::User {
             if self.user_loading {
                 let loading = Paragraph::new("⏳ 搜索UP主中...")
@@ -708,38 +976,73 @@ impl Component for SearchPage {
         if self.input_mode {
             match key {
                 KeyCode::Char(c) => {
+                    // 下拉栏可见且还没输入任何字符时，j/k 作为导航键
+                    if self.show_hot_list && self.query.is_empty() {
+                        if c == 'j' {
+                            self.picker_nav(1);
+                            return Some(AppAction::None);
+                        }
+                        if c == 'k' {
+                            self.picker_nav(-1);
+                            return Some(AppAction::None);
+                        }
+                    }
                     self.query.push(c);
                     self.show_hot_list = true;
-                    if self.hot_selected.is_none() && !self.hotwords.is_empty() {
-                        self.hot_selected = Some(0);
+                    match self.picker_focus {
+                        PickerFocus::History => {
+                            if self.history_selected.is_none() && !self.history.is_empty() {
+                                self.history_selected = Some(0);
+                            }
+                        }
+                        PickerFocus::Hotwords => {
+                            if self.hot_selected.is_none() && !self.hotwords.is_empty() {
+                                self.hot_selected = Some(0);
+                            }
+                        }
                     }
                     Some(AppAction::None)
                 }
                 KeyCode::Backspace => {
                     self.query.pop();
                     self.show_hot_list = true;
-                    if self.hot_selected.is_none() && !self.hotwords.is_empty() {
-                        self.hot_selected = Some(0);
+                    match self.picker_focus {
+                        PickerFocus::History => {
+                            if self.history_selected.is_none() && !self.history.is_empty() {
+                                self.history_selected = Some(0);
+                            }
+                        }
+                        PickerFocus::Hotwords => {
+                            if self.hot_selected.is_none() && !self.hotwords.is_empty() {
+                                self.hot_selected = Some(0);
+                            }
+                        }
                     }
                     Some(AppAction::None)
                 }
                 KeyCode::Up => {
-                    if self.show_hot_list && !self.hotwords.is_empty() {
-                        let len = self.hotwords.len();
-                        let current = self.hot_selected.unwrap_or(0);
-                        let next = if current == 0 { len - 1 } else { current - 1 };
-                        self.hot_selected = Some(next);
+                    if self.show_hot_list {
+                        self.picker_nav(-1);
                     }
                     Some(AppAction::None)
                 }
                 KeyCode::Down => {
-                    if self.show_hot_list && !self.hotwords.is_empty() {
-                        let len = self.hotwords.len();
-                        let current = self.hot_selected.unwrap_or(0);
-                        let next = (current + 1) % len;
-                        self.hot_selected = Some(next);
+                    if self.show_hot_list {
+                        self.picker_nav(1);
                     }
                     Some(AppAction::None)
+                }
+                KeyCode::Left => {
+                    // 下拉栏可见时回侧边栏由外层处理；否则作为字符输入
+                    self.query.push('h');
+                    self.show_hot_list = true;
+                    return Some(AppAction::None);
+                }
+                KeyCode::Right => {
+                    // 不再用于切换栏，作为字符输入
+                    self.query.push('l');
+                    self.show_hot_list = true;
+                    return Some(AppAction::None);
                 }
                 KeyCode::Enter => {
                     if !self.query.trim().is_empty() {
@@ -757,7 +1060,7 @@ impl Component for SearchPage {
                             }
                         }
                     } else if self.show_hot_list {
-                        self.search_selected_hotword()
+                        self.search_selected_picker()
                     } else {
                         Some(AppAction::None)
                     }
@@ -771,26 +1074,16 @@ impl Component for SearchPage {
                 _ => Some(AppAction::None),
             }
         } else if self.show_hot_list {
-            if keys.matches_up(key) {
-                if !self.hotwords.is_empty() {
-                    let len = self.hotwords.len();
-                    let current = self.hot_selected.unwrap_or(0);
-                    let next = if current == 0 { len - 1 } else { current - 1 };
-                    self.hot_selected = Some(next);
-                }
+            if keys.matches_up(key) || key == KeyCode::Char('k') {
+                self.picker_nav(-1);
                 return Some(AppAction::None);
             }
-            if keys.matches_down(key) {
-                if !self.hotwords.is_empty() {
-                    let len = self.hotwords.len();
-                    let current = self.hot_selected.unwrap_or(0);
-                    let next = (current + 1) % len;
-                    self.hot_selected = Some(next);
-                }
+            if keys.matches_down(key) || key == KeyCode::Char('j') {
+                self.picker_nav(1);
                 return Some(AppAction::None);
             }
             if keys.matches_confirm(key) {
-                return self.search_selected_hotword();
+                return self.search_selected_picker();
             }
             if keys.matches_search_focus(key) {
                 self.input_mode = true;
@@ -959,39 +1252,79 @@ impl Component for SearchPage {
                 ])
                 .split(area);
 
-            let list_area = chunks[1];
+            let hist_h = if self.history.is_empty() {
+                0
+            } else {
+                (self.history.len() as u16 + 2).min(8)
+            };
+            let hot_h = if self.hotword_loading
+                || !self.hotword_error.is_none()
+                || !self.hotwords.is_empty()
+            {
+                (self.hotwords.len() as u16 + 2).min(8).max(3)
+            } else {
+                0
+            };
+            let dropdown_height = (hist_h + hot_h).max(3).min(16);
+            let dropdown_area = Rect {
+                y: chunks[0].y + chunks[0].height,
+                height: dropdown_height,
+                x: chunks[0].x,
+                width: chunks[0].width,
+            };
 
-            if !list_area.contains(ratatui::layout::Position::new(event.column, event.row)) {
+            if !dropdown_area.contains(ratatui::layout::Position::new(event.column, event.row)) {
                 return None;
             }
 
             return match event.kind {
                 MouseEventKind::Down(MouseButton::Left) => {
-                    // Convert click position to list index (account for top border)
-                    let row_offset = event.row.saturating_sub(list_area.y + 1);
-                    let idx = row_offset as usize;
-                    if idx < self.hotwords.len() {
-                        self.select_hotword(idx);
-                        return self.search_selected_hotword();
+                    // 历史栏区域
+                    let hist_area = Rect {
+                        y: dropdown_area.y,
+                        height: hist_h.min(dropdown_area.height),
+                        ..dropdown_area
+                    };
+                    let hot_area = Rect {
+                        y: dropdown_area.y + hist_area.height,
+                        height: dropdown_area.height.saturating_sub(hist_area.height),
+                        ..dropdown_area
+                    };
+                    if hist_h > 0
+                        && hist_area.contains(ratatui::layout::Position::new(
+                            event.column,
+                            event.row,
+                        ))
+                    {
+                        let idx = event.row.saturating_sub(hist_area.y + 1) as usize;
+                        if idx < self.history.len() {
+                            self.picker_focus = PickerFocus::History;
+                            self.history_selected = Some(idx);
+                            return self.search_selected_picker();
+                        }
+                        return None;
+                    }
+                    if hot_h > 0
+                        && hot_area.contains(ratatui::layout::Position::new(
+                            event.column,
+                            event.row,
+                        ))
+                    {
+                        let idx = event.row.saturating_sub(hot_area.y + 1) as usize;
+                        if idx < self.hotwords.len() {
+                            self.picker_focus = PickerFocus::Hotwords;
+                            self.hot_selected = Some(idx);
+                            return self.search_selected_picker();
+                        }
                     }
                     None
                 }
                 MouseEventKind::ScrollDown => {
-                    if !self.hotwords.is_empty() {
-                        let len = self.hotwords.len();
-                        let current = self.hot_selected.unwrap_or(0);
-                        let next = (current + 1) % len;
-                        self.hot_selected = Some(next);
-                    }
+                    self.move_focus(1);
                     Some(AppAction::None)
                 }
                 MouseEventKind::ScrollUp => {
-                    if !self.hotwords.is_empty() {
-                        let len = self.hotwords.len();
-                        let current = self.hot_selected.unwrap_or(0);
-                        let next = if current == 0 { len - 1 } else { current - 1 };
-                        self.hot_selected = Some(next);
-                    }
+                    self.move_focus(-1);
                     Some(AppAction::None)
                 }
                 _ => None,

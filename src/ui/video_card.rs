@@ -36,6 +36,30 @@ pub struct VideoCard {
     pub sign: String,
 }
 
+impl Clone for VideoCard {
+    /// Cover protocol is not cloneable (image pixels + stateful protocol);
+    /// a cloned card starts without a cover and re-downloads via
+    /// `start_cover_downloads`.
+    fn clone(&self) -> Self {
+        Self {
+            bvid: self.bvid.clone(),
+            aid: self.aid,
+            uploader_mid: self.uploader_mid,
+            title: self.title.clone(),
+            author: self.author.clone(),
+            views: self.views.clone(),
+            duration: self.duration.clone(),
+            pic_url: self.pic_url.clone(),
+            cover: None,
+            user_card: self.user_card,
+            face_url: self.face_url.clone(),
+            fans: self.fans.clone(),
+            video_count: self.video_count.clone(),
+            sign: self.sign.clone(),
+        }
+    }
+}
+
 impl VideoCard {
     pub fn new(
         bvid: Option<String>,

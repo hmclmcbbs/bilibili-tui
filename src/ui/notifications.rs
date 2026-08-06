@@ -21,6 +21,7 @@ use ratatui_image::{StatefulImage, picker::Picker, protocol::StatefulProtocol};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthStr;
 
 /// Result of a background avatar download.
 struct AvatarResult {
@@ -32,6 +33,55 @@ struct AvatarResult {
 struct CoverResult {
     index: usize,
     protocol: Option<StatefulProtocol>,
+}
+
+/// Number of display lines `text` occupies when wrapped to `width` columns.
+/// Uses unicode display widths (CJK = 2) so the estimate matches ratatui's
+/// rendering closely enough for scroll math.
+fn wrapped_line_count(text: &str, width: u16) -> usize {
+    let width = width.max(1) as usize;
+    let mut lines = 1usize;
+    let mut cur = 0usize;
+    for ch in text.chars() {
+        if ch == '\n' {
+            lines += 1;
+            cur = 0;
+            continue;
+        }
+        let w = UnicodeWidthStr::width(ch.to_string().as_str());
+        if cur + w > width && w <= width {
+            lines += 1;
+            cur = 0;
+        }
+        cur += w;
+    }
+    lines
+}
+
+/// Split `text` into display lines that fit `width` columns (CJK = 2 cols).
+fn wrap_text(text: &str, width: u16) -> Vec<String> {
+    let width = width.max(1) as usize;
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0usize;
+    for ch in text.chars() {
+        if ch == '\n' {
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0;
+            continue;
+        }
+        let w = UnicodeWidthStr::width(ch.to_string().as_str());
+        if cur_w + w > width && !cur.is_empty() {
+            lines.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        cur.push(ch);
+        cur_w += w;
+    }
+    if !cur.is_empty() || lines.is_empty() {
+        lines.push(cur);
+    }
+    lines
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -375,6 +425,94 @@ impl NotificationsPage {
         let end = (start + page).min(self.rows.len());
         (start, end)
     }
+
+    /// Relative time string for a unix timestamp (or empty).
+    fn rel_time(ct: i64) -> String {
+        if ct <= 0 {
+            return String::new();
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let diff = now - ct;
+        if diff < 60 {
+            "刚刚".to_string()
+        } else if diff < 3600 {
+            format!("{}分钟前", diff / 60)
+        } else if diff < 86400 {
+            format!("{}小时前", diff / 3600)
+        } else if diff < 2592000 {
+            format!("{}天前", diff / 86400)
+        } else {
+            format!("{}月前", diff / 2592000)
+        }
+    }
+
+    /// Display lines for one notification item, styled like a chat message:
+    /// `用户名: 内容` wrapped, then the title (if any), then a relative-time
+    /// line (if any).  Matches the ordinary-message layout in `draw_chat`.
+    fn item_display_lines(&self, item_idx: usize, width: u16) -> Vec<String> {
+        let Some(item) = self.items.get(item_idx) else {
+            return vec!["(无内容)".to_string()];
+        };
+        let width = width.max(1);
+        let name = item
+            .user_name
+            .clone()
+            .unwrap_or_else(|| "未知用户".to_string());
+        let mut lines = Vec::new();
+        let msg = item.message.as_deref().unwrap_or("").trim();
+        if !msg.is_empty() {
+            lines.extend(wrap_text(&format!("{}: {}", name, msg), width));
+        } else if let Some(t) = item.title.as_deref() {
+            let t = t.trim();
+            if !t.is_empty() {
+                lines.extend(wrap_text(&format!("{}: {}", name, t), width));
+            }
+        } else {
+            lines.push(format!("{}: (无内容)", name));
+        }
+        if let Some(t) = item.title.as_deref() {
+            let t = t.trim();
+            if !t.is_empty() {
+                lines.extend(wrap_text(&format!("  {}", t), width));
+            }
+        }
+        if let Some(ct) = item.ctime {
+            let rel = Self::rel_time(ct);
+            if !rel.is_empty() {
+                lines.push(format!("    ({})", rel));
+            }
+        }
+        lines
+    }
+
+    /// Build the display-line table for the grouped list. Each header is one
+    /// line; each item is expanded to as many lines as its wrapped text takes.
+    /// Returns (row_idx, display_line) pairs where display_line is the line
+    /// number within that logical row (0-based).
+    fn display_rows(&self, width: u16) -> Vec<(usize, usize)> {
+        let wrap_width = width.saturating_sub(2).max(1);
+        let mut out = Vec::new();
+        for (ri, row) in self.rows.iter().enumerate() {
+            match row {
+                NotifRow::Header { .. } => out.push((ri, 0)),
+                NotifRow::Item { item_idx } => {
+                    let lines = self.item_display_lines(*item_idx, wrap_width).len().max(1);
+                    for li in 0..lines {
+                        out.push((ri, li));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Logical row index (into `rows`) for a display-line index.
+    fn display_line_count(&self, width: u16) -> usize {
+        self.display_rows(width).len()
+    }
 }
 
 impl Default for NotificationsPage {
@@ -531,7 +669,20 @@ impl Component for NotificationsPage {
                 } else {
                     Style::default().fg(theme.fg_primary)
                 };
-                let name_para = Paragraph::new(Line::from(vec![
+                let last_text = session
+                    .last_msg
+                    .as_ref()
+                    .map(session_last_text)
+                    .unwrap_or_default();
+                let time = session
+                    .last_msg
+                    .as_ref()
+                    .map(|m| m.format_time())
+                    .unwrap_or_default();
+                // Row 0: name + unread on the left, time on the right.
+                let time_width = UnicodeWidthStr::width(time.as_str()) as u16;
+                let name_max = text_area.width.saturating_sub(time_width + 1).max(4);
+                let mut name_spans = vec![
                     Span::styled(
                         if is_selected { "▶ " } else { "  " },
                         text_style(Style::default().fg(if is_selected {
@@ -541,23 +692,30 @@ impl Component for NotificationsPage {
                         })),
                     ),
                     Span::styled(format!("{}{}", session.uname, unread), text_style(name_style)),
-                ]));
-                frame.render_widget(name_para, Rect::new(text_area.x, text_area.y, text_area.width, 1));
-                if let Some(last) = &session.last_msg {
-                    let truncated: String = session_last_text(last).chars().take(40).collect();
-                    let last_para = Paragraph::new(Line::from(Span::styled(
-                        format!("  {}", truncated),
-                        text_style(Style::default().fg(theme.fg_secondary)),
-                    )));
-                    frame.render_widget(last_para, Rect::new(text_area.x, text_area.y + 1, text_area.width, 1));
-                    let time = last.format_time();
-                    if !time.is_empty() {
-                        let time_para = Paragraph::new(Line::from(Span::styled(
-                            format!("  {}", time),
-                            text_style(Style::default().fg(theme.fg_secondary)),
-                        )));
-                        frame.render_widget(time_para, Rect::new(text_area.x, text_area.y + 2, text_area.width, 1));
+                ];
+                if !time.is_empty() {
+                    let used = UnicodeWidthStr::width(format!("{}{}", session.uname, unread).as_str()) as u16 + 2;
+                    if used < name_max {
+                        name_spans.push(Span::raw(" ".repeat((name_max - used) as usize)));
                     }
+                    name_spans.push(Span::styled(
+                        time,
+                        text_style(Style::default().fg(theme.fg_secondary)),
+                    ));
+                }
+                let name_para = Paragraph::new(Line::from(name_spans));
+                frame.render_widget(name_para, Rect::new(text_area.x, text_area.y, text_area.width, 1));
+                // Rows 1-2: last message, wrapped to two rows max.
+                if !last_text.is_empty() {
+                    let last_para = Paragraph::new(Line::from(Span::styled(
+                        format!("  {}", last_text),
+                        text_style(Style::default().fg(theme.fg_secondary)),
+                    )))
+                    .wrap(Wrap { trim: true });
+                    frame.render_widget(
+                        last_para,
+                        Rect::new(text_area.x, text_area.y + 1, text_area.width, 2),
+                    );
                 }
             }
             let footer = shortcut_footer(
@@ -574,28 +732,109 @@ impl Component for NotificationsPage {
             frame.render_widget(Paragraph::new(footer), chunks[3]);
             return;
         }
-        let mut items: Vec<ListItem> = Vec::new();
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(theme.border_subtle));
+        let inner = block.inner(chunks[2]);
+        frame.render_widget(block, chunks[2]);
         if self.loading && self.items.is_empty() {
-            items.push(ListItem::new(Line::from(Span::styled(
+            let msg = Paragraph::new(Line::from(Span::styled(
                 "  ⏳ 加载中...",
                 Style::default().fg(theme.fg_secondary),
-            ))));
+            )));
+            frame.render_widget(msg, inner);
         } else if self.items.is_empty() {
-            if let Some(err) = &self.message {
-                items.push(ListItem::new(Line::from(Span::styled(
-                    format!("  {}", err),
-                    Style::default().fg(theme.warning),
-                ))));
+            let text = if let Some(err) = &self.message {
+                format!("  {}", err)
+            } else if self.tab == NotifTab::Sys {
+                "  暂无系统消息".to_string()
             } else {
-                let empty_text = if self.tab == NotifTab::Sys {
-                    "  暂无系统消息"
-                } else {
-                    "  (空) 暂无消息"
-                };
-                items.push(ListItem::new(Line::from(Span::styled(
-                    empty_text,
+                "  (空) 暂无消息".to_string()
+            };
+            let style = if self.message.is_some() {
+                Style::default().fg(theme.warning)
+            } else {
+                Style::default().fg(theme.fg_secondary)
+            };
+            let msg = Paragraph::new(Line::from(Span::styled(text, style)));
+            frame.render_widget(msg, inner);
+        } else {
+            // Grouped rows: section header + notification items.
+            let display = self.display_rows(inner.width);
+            if display.is_empty() {
+                let msg = Paragraph::new(Line::from(Span::styled(
+                    "  (空) 暂无消息",
                     Style::default().fg(theme.fg_secondary),
-                ))));
+                )));
+                frame.render_widget(msg, inner);
+                return;
+            }
+            // Keep the selected item visible: compute its first display line.
+            let sel_disp = display
+                .iter()
+                .position(|(ri, _li)| {
+                    matches!(self.rows[*ri], NotifRow::Item { item_idx } if item_idx == self.selected)
+                })
+                .unwrap_or(0);
+            let height = inner.height as usize;
+            if self.scroll_offset > sel_disp {
+                self.scroll_offset = sel_disp;
+            }
+            let sel_lines = display
+                .iter()
+                .filter(|(ri, _li)| {
+                    matches!(self.rows[*ri], NotifRow::Item { item_idx } if item_idx == self.selected)
+                })
+                .count();
+            if sel_disp + sel_lines > self.scroll_offset + height {
+                self.scroll_offset = sel_disp + sel_lines - height;
+            }
+            let start = self.scroll_offset.min(display.len());
+            let max_rows = inner.height as usize;
+            let end = (start + max_rows).min(display.len());
+            for (i, row_idx) in (start..end).enumerate() {
+                let row_area = Rect::new(inner.x, inner.y + i as u16, inner.width, 1);
+                let (logical_row, line_no) = display[row_idx];
+                match &self.rows[logical_row] {
+                    NotifRow::Header { name, count } => {
+                        let line = Line::from(Span::styled(
+                            format!("── {} ({}条) ──", name, count),
+                            Style::default().fg(theme.border_subtle),
+                        ));
+                        frame.render_widget(Paragraph::new(line), row_area);
+                    }
+                    NotifRow::Item { item_idx } => {
+                        let is_selected = *item_idx == self.selected;
+                        let wrap_width = inner.width.saturating_sub(2).max(1);
+                        let lines = self.item_display_lines(*item_idx, wrap_width);
+                        let text = lines
+                            .get(line_no)
+                            .cloned()
+                            .unwrap_or_default();
+                        let base = if is_selected {
+                            Style::default().bg(theme.selection_bg)
+                        } else {
+                            Style::default()
+                        };
+                        // First line: `用户名: 内容` with the name bold and
+                        // colored, matching the chat-detail message style.
+                        let line = if line_no == 0 {
+                            match text.split_once(':') {
+                                Some((head, rest)) => Line::from(vec![
+                                    Span::styled(
+                                        format!("  {}:", head),
+                                        base.fg(theme.info).add_modifier(Modifier::BOLD),
+                                    ),
+                                    Span::styled(rest, base.fg(theme.fg_primary)),
+                                ]),
+                                None => Line::from(Span::styled(format!("  {}", text), base)),
+                            }
+                        } else {
+                            Line::from(Span::styled(format!("  {}", text), base))
+                        };
+                        frame.render_widget(Paragraph::new(line), row_area);
+                    }
+                }
             }
         }
 
@@ -720,6 +959,21 @@ impl Component for NotificationsPage {
                 return Some(AppAction::RefreshNotifications);
             }
             KeyCode::Char('1') => return Some(self.switch_tab(NotifTab::Chat)),
+            KeyCode::Char('2') => return Some(self.switch_tab(NotifTab::At)),
+            KeyCode::Char('3') => return Some(self.switch_tab(NotifTab::Like)),
+            KeyCode::Char('4') => return Some(self.switch_tab(NotifTab::Sys)),
+            KeyCode::Left => {
+                let tabs = NotifTab::all();
+                let cur = tabs.iter().position(|t| *t == self.tab).unwrap_or(0);
+                let next = if cur == 0 { tabs.len() - 1 } else { cur - 1 };
+                return Some(self.switch_tab(tabs[next]));
+            }
+            KeyCode::Right => {
+                let tabs = NotifTab::all();
+                let cur = tabs.iter().position(|t| *t == self.tab).unwrap_or(0);
+                let next = (cur + 1) % tabs.len();
+                return Some(self.switch_tab(tabs[next]));
+            }
             KeyCode::Down | KeyCode::Char('j') => {
                 if self.tab == NotifTab::Chat {
                     if self.session_selected + 1 < self.sessions.len() {
@@ -734,9 +988,8 @@ impl Component for NotificationsPage {
                     if let Some(next) = self.next_item_row(cur) {
                         if let NotifRow::Item { item_idx } = self.rows[next] {
                             self.selected = item_idx;
-                            if next >= self.scroll_offset + 8 {
-                                self.scroll_offset += 1;
-                            }
+                            // Scroll offset is adjusted during draw to keep
+                            // the selected item fully visible.
                         }
                     }
                 }
@@ -756,9 +1009,7 @@ impl Component for NotificationsPage {
                     if let Some(prev) = self.prev_item_row(cur) {
                         if let NotifRow::Item { item_idx } = self.rows[prev] {
                             self.selected = item_idx;
-                            if prev < self.scroll_offset {
-                                self.scroll_offset = prev;
-                            }
+                            // Scroll offset is adjusted during draw.
                         }
                     }
                 }
@@ -896,22 +1147,29 @@ impl NotificationsPage {
         }
 
         // Row layout: video shares take 7 rows (cover + info), matching the
-        // list cards used in video-detail collections; ordinary
-        // messages take 2 rows when they have a timestamp (content + time),
-        // otherwise 1.  The timestamp line used to leak into the next
-        // message's area (and cover video cards), because the row table
-        // only counted 1 row per ordinary message.
+        // list cards used in video-detail collections. Ordinary messages
+        // wrap when their content is wider than the message area, so their
+        // height is dynamic: wrapped content rows + one timestamp row (when
+        // the message has a time).  The row table is rebuilt every frame so
+        // a terminal resize re-wraps automatically.
+        let wrap_width = list_inner.width.saturating_sub(2).max(1);
+        let msg_rows = |msg: &ChatMessage| -> usize {
+            if msg.is_video_share() {
+                7
+            } else {
+                let time_rows = if msg.format_time().is_empty() { 0 } else { 1 };
+                let sender = if msg.sender_uid != talker_id { "我" } else { name.as_str() };
+                let badge = msg.type_badge();
+                let content: String = msg.content.chars().take(120).collect();
+                let full = format!("{}: {}{}", sender, badge, content);
+                wrapped_line_count(&full, wrap_width).max(1) + time_rows
+            }
+        };
         let mut row_of: Vec<usize> = Vec::with_capacity(self.chat_messages.len());
         let mut row = 0usize;
         for msg in &self.chat_messages {
             row_of.push(row);
-            row += if msg.is_video_share() {
-                7
-            } else if msg.format_time().is_empty() {
-                1
-            } else {
-                2
-            };
+            row += msg_rows(msg);
         }
         let height = list_inner.height as usize;
         // Bottom boundary of the message area. Rows at or beyond this y are
@@ -927,15 +1185,7 @@ impl NotificationsPage {
         let sel_rows = self
             .chat_messages
             .get(self.chat_selected)
-            .map(|m| {
-                if m.is_video_share() {
-                    7
-                } else if m.format_time().is_empty() {
-                    1
-                } else {
-                    2
-                }
-            })
+            .map(msg_rows)
             .unwrap_or(1);
         if sel_row < self.chat_scroll {
             self.chat_scroll = sel_row;
@@ -950,15 +1200,7 @@ impl NotificationsPage {
             let last_rows = self
                 .chat_messages
                 .last()
-                .map(|m| {
-                    if m.is_video_share() {
-                        7
-                    } else if m.format_time().is_empty() {
-                        1
-                    } else {
-                        2
-                    }
-                })
+                .map(msg_rows)
                 .unwrap_or(1);
             let max_scroll = (last_row + last_rows).saturating_sub(height);
             if self.chat_scroll > max_scroll {
@@ -969,13 +1211,7 @@ impl NotificationsPage {
         let scroll_i = self.chat_scroll as i64;
         for (i, msg) in self.chat_messages.iter().enumerate() {
             let msg_row = row_of[i];
-            let rows_used = if msg.is_video_share() {
-                7
-            } else if msg.format_time().is_empty() {
-                1
-            } else {
-                2
-            };
+            let rows_used = msg_rows(msg);
             // Signed visibility: a negative visible_start means the card is
             // partially scrolled off the top. saturating_sub used to turn
             // that into 0, which re-drew the whole card on top of the rows
@@ -1149,12 +1385,17 @@ impl NotificationsPage {
                 continue;
             }
 
-            // Ordinary message: `sender: content`.
+            // Ordinary message: `sender: content`, wrapping over as many
+            // rows as the content needs. The timestamp sits one row below
+            // the last wrapped content row.
             let sender = if is_me { "我" } else { name.as_str() };
             let badge = msg.type_badge();
             let content: String = msg.content.chars().take(120).collect();
-            // Content occupies card row 0.
-            if clip == 0 {
+            let time = msg.format_time();
+            let has_time = !time.is_empty();
+            let content_rows = rows_used.saturating_sub(if has_time { 1 } else { 0 });
+            // Content occupies card rows 0..content_rows (wrapped).
+            if (clip as usize) < content_rows {
                 let line = Line::from(vec![
                     Span::styled(
                         format!("{}: ", sender),
@@ -1174,16 +1415,22 @@ impl NotificationsPage {
                     ),
                     Span::styled(content, s_style(Style::default().fg(theme.fg_primary))),
                 ]);
-                frame.render_widget(Paragraph::new(line), row_area);
+                let cy = row_area.y + clip;
+                if cy < bottom {
+                    let ch = (content_rows - clip as usize).min((bottom - cy) as usize) as u16;
+                    frame.render_widget(
+                        Paragraph::new(line).wrap(Wrap { trim: true }),
+                        Rect::new(row_area.x, cy, row_area.width, ch),
+                    );
+                }
             }
-            let time = msg.format_time();
-            // Timestamp occupies card row 1.
-            if !time.is_empty() && clip <= 1 {
+            // Timestamp occupies the row right after the wrapped content.
+            if has_time && (clip as usize) <= content_rows {
                 let time_line = Line::from(Span::styled(
                     format!("    {}", time),
                     s_style(Style::default().fg(theme.fg_secondary)),
                 ));
-                let ty = row_area.y + 1 - clip;
+                let ty = row_area.y + content_rows as u16 - clip;
                 if ty < bottom {
                     frame.render_widget(
                         Paragraph::new(time_line),

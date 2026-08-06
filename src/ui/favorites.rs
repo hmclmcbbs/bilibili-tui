@@ -22,6 +22,12 @@ pub struct FavoritesPage {
     pub focus_sources: bool,
     pub active_source: FavoriteSource,
     pub videos: VideoCardGrid,
+    /// All loaded cards regardless of filter; rebuilt into `videos` when the
+    /// local filter changes.
+    all_cards: Vec<VideoCard>,
+    filter: Option<String>,
+    filter_input_mode: bool,
+    filter_input: String,
     pub page: i32,
     pub total: i64,
     pub loading: bool,
@@ -52,6 +58,10 @@ impl FavoritesPage {
             focus_sources: true,
             active_source: FavoriteSource::WatchLater,
             videos: VideoCardGrid::new_list(),
+            all_cards: Vec::new(),
+            filter: None,
+            filter_input_mode: false,
+            filter_input: String::new(),
             page: 1,
             total: 0,
             loading: true,
@@ -96,6 +106,9 @@ impl FavoritesPage {
         self.active_source = FavoriteSource::WatchLater;
         self.selected_source = 0;
         self.videos.clear();
+        self.all_cards.clear();
+        self.filter = None;
+        self.filter_input.clear();
         self.page = 1;
         self.total = watch_later.count;
         self.append_watch_later(watch_later);
@@ -156,6 +169,9 @@ impl FavoritesPage {
         self.page = 1;
         self.total = 0;
         self.videos.clear();
+        self.all_cards.clear();
+        self.filter = None;
+        self.filter_input.clear();
         self.loading = true;
         self.error = None;
     }
@@ -179,10 +195,12 @@ impl FavoritesPage {
     pub fn apply_watch_later(&mut self, page: i32, data: WatchLaterData) {
         if page == 1 {
             self.videos.clear();
+            self.all_cards.clear();
         }
         self.page = page;
         self.total = data.count;
         self.append_watch_later(data);
+        self.apply_filter();
         self.finish_load();
     }
 
@@ -199,24 +217,25 @@ impl FavoritesPage {
                 .and_then(|stat| stat.view)
                 .map(format_count)
                 .unwrap_or_else(|| "-".to_string());
-            self.videos.add_card(
-                VideoCard::new(
-                    Some(item.bvid),
-                    Some(item.aid),
-                    item.title,
-                    author,
-                    views,
-                    format_duration(item.duration.unwrap_or_default()),
-                    item.pic,
-                )
-                .with_uploader_mid(uploader_mid),
-            );
+            let card = VideoCard::new(
+                Some(item.bvid),
+                Some(item.aid),
+                item.title,
+                author,
+                views,
+                format_duration(item.duration.unwrap_or_default()),
+                item.pic,
+            )
+            .with_uploader_mid(uploader_mid);
+            self.videos.add_card(card.clone());
+            self.all_cards.push(card);
         }
     }
 
     pub fn apply_created(&mut self, page: i32, data: FavoriteResourceData) {
         if page == 1 {
             self.videos.clear();
+            self.all_cards.clear();
         }
         self.page = page;
         self.total = data
@@ -237,25 +256,27 @@ impl FavoritesPage {
                 .and_then(|count| count.play)
                 .map(format_count)
                 .unwrap_or_else(|| "-".to_string());
-            self.videos.add_card(
-                VideoCard::new(
-                    Some(bvid),
-                    Some(item.id),
-                    item.title,
-                    author,
-                    views,
-                    format_duration(item.duration.unwrap_or_default()),
-                    item.cover,
-                )
-                .with_uploader_mid(uploader_mid),
-            );
+            let card = VideoCard::new(
+                Some(bvid),
+                Some(item.id),
+                item.title,
+                author,
+                views,
+                format_duration(item.duration.unwrap_or_default()),
+                item.cover,
+            )
+            .with_uploader_mid(uploader_mid);
+            self.videos.add_card(card.clone());
+            self.all_cards.push(card);
         }
+        self.apply_filter();
         self.finish_load();
     }
 
     pub fn apply_collected(&mut self, page: i32, data: SeasonArchivesData) {
         if page == 1 {
             self.videos.clear();
+            self.all_cards.clear();
         }
         self.page = data.page.page_num;
         self.total = data.page.total;
@@ -269,7 +290,7 @@ impl FavoritesPage {
                 .and_then(|stat| stat.view)
                 .map(format_count)
                 .unwrap_or_else(|| "-".to_string());
-            self.videos.add_card(VideoCard::new(
+            let card = VideoCard::new(
                 Some(item.bvid),
                 Some(item.aid),
                 item.title,
@@ -277,9 +298,37 @@ impl FavoritesPage {
                 views,
                 format_duration(item.duration.unwrap_or_default()),
                 item.pic,
-            ));
+            );
+            self.videos.add_card(card.clone());
+            self.all_cards.push(card);
         }
+        self.apply_filter();
         self.finish_load();
+    }
+
+    /// Rebuild the visible card grid from `all_cards` according to the active
+    /// local filter.  Filtering happens on the already-loaded pages only.
+    fn apply_filter(&mut self) {
+        let Some(filter) = self.filter.as_deref() else {
+            if self.videos.cards.len() != self.all_cards.len() {
+                self.videos.cards = self.all_cards.clone();
+                self.videos.selected_index = 0;
+                self.videos.update_scroll(self.videos.cached_visible_rows);
+            }
+            return;
+        };
+        let filter = filter.trim().to_lowercase();
+        self.videos.cards = if filter.is_empty() {
+            self.all_cards.clone()
+        } else {
+            self.all_cards
+                .iter()
+                .filter(|card| card.title.to_lowercase().contains(&filter))
+                .cloned()
+                .collect()
+        };
+        self.videos.selected_index = 0;
+        self.videos.update_scroll(self.videos.cached_visible_rows);
     }
 
     fn finish_load(&mut self) {
@@ -376,19 +425,26 @@ impl Component for FavoritesPage {
                 Constraint::Length(2),
             ])
             .split(chunks[1]);
-        let header_title = if self.input_mode.is_some() {
+        let header_title = if self.filter_input_mode {
+            format!("筛选收藏: {}_", self.filter_input)
+        } else if self.input_mode.is_some() {
             format!("输入收藏夹名称: {}_", self.input_text)
         } else if let Some(ref msg) = self.message {
             msg.clone()
         } else {
             format!(
-                "{}  ·  {}/{}",
+                "{}  ·  {}/{}{}",
                 Self::source_label(&self.active_source),
                 self.videos.cards.len(),
-                self.total
+                self.total,
+                self.filter
+                    .as_deref()
+                    .filter(|f| !f.is_empty())
+                    .map(|f| format!("  |  筛选: {}", f))
+                    .unwrap_or_default()
             )
         };
-        let header_style = if self.input_mode.is_some() {
+        let header_style = if self.filter_input_mode || self.input_mode.is_some() {
             Style::default().fg(theme.warning)
         } else if self.message.is_some() {
             Style::default().fg(theme.success)
@@ -405,6 +461,12 @@ impl Component for FavoritesPage {
         } else if let Some(error) = &self.error {
             frame.render_widget(
                 Paragraph::new(error.as_str()).style(Style::default().fg(theme.error)),
+                right[1],
+            );
+        } else if self.videos.cards.is_empty() && !self.all_cards.is_empty() {
+            frame.render_widget(
+                Paragraph::new("没有匹配的收藏，按 / 修改筛选")
+                    .style(Style::default().fg(theme.fg_secondary)),
                 right[1],
             );
         } else {
@@ -425,6 +487,7 @@ impl Component for FavoritesPage {
                     ("n".into(), "新建收藏夹".into(), theme.info),
                     ("x".into(), "删除收藏夹".into(), theme.error),
                     ("Del".into(), "移除视频".into(), theme.warning),
+                    ("/".into(), "搜索".into(), theme.info),
                     (keys.nav_next_page.clone(), "下一页面".into(), theme.info),
                     (keys.nav_prev_page.clone(), "上一页面".into(), theme.info),
                 ],
@@ -436,6 +499,41 @@ impl Component for FavoritesPage {
     }
 
     fn handle_input(&mut self, key: KeyCode, keys: &Keybindings) -> Option<AppAction> {
+        // Local filter input mode (triggered by `/`)
+        if self.filter_input_mode {
+            match key {
+                KeyCode::Esc => {
+                    self.filter_input_mode = false;
+                    self.filter_input.clear();
+                    self.filter = None;
+                    self.apply_filter();
+                    return Some(AppAction::None);
+                }
+                KeyCode::Enter => {
+                    self.filter_input_mode = false;
+                    let kw = self.filter_input.trim().to_string();
+                    self.filter = if kw.is_empty() { None } else { Some(kw.clone()) };
+                    crate::storage::save_search_history(&kw);
+                    self.apply_filter();
+                    return Some(AppAction::None);
+                }
+                KeyCode::Backspace => {
+                    self.filter_input.pop();
+                    let kw = self.filter_input.trim().to_string();
+                    self.filter = if kw.is_empty() { None } else { Some(kw) };
+                    self.apply_filter();
+                    return Some(AppAction::None);
+                }
+                KeyCode::Char(c) => {
+                    self.filter_input.push(c);
+                    let kw = self.filter_input.trim().to_string();
+                    self.filter = if kw.is_empty() { None } else { Some(kw) };
+                    self.apply_filter();
+                    return Some(AppAction::None);
+                }
+                _ => return Some(AppAction::None),
+            }
+        }
         // Text input mode for creating folder name
         if self.input_mode.is_some() {
             match key {
@@ -472,6 +570,13 @@ impl Component for FavoritesPage {
         }
         if keys.matches_quit(key) {
             return Some(AppAction::Quit);
+        }
+        if key == KeyCode::Char('/') {
+            self.filter_input_mode = true;
+            self.filter_input.clear();
+            self.filter = None;
+            self.apply_filter();
+            return Some(AppAction::None);
         }
         if keys.matches_nav_next(key) {
             return Some(AppAction::NavNext);

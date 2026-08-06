@@ -35,6 +35,8 @@ pub struct BangumiPage {
     pub search_loading: bool,
     pub search_error: Option<String>,
     pub search_has_results: bool,
+    pub search_history: Vec<String>,
+    pub history_selected: Option<usize>,
     // Double-click detection
     last_click_time: Option<Instant>,
     last_click_index: Option<usize>,
@@ -61,8 +63,20 @@ impl BangumiPage {
             search_loading: false,
             search_error: None,
             search_has_results: false,
+            search_history: crate::storage::load_search_history(),
+            history_selected: None,
             last_click_time: None,
             last_click_index: None,
+        }
+    }
+
+    /// Reload persisted search history for the bangumi search picker.
+    pub fn reload_search_history(&mut self) {
+        self.search_history = crate::storage::load_search_history();
+        if self.search_history.is_empty() {
+            self.history_selected = None;
+        } else if self.history_selected.is_none() {
+            self.history_selected = Some(0);
         }
     }
 
@@ -313,65 +327,125 @@ impl Component for BangumiPage {
 
         // Content
         let content_area = chunks[1];
+        let mut render_area = content_area;
+
+        // 搜索输入模式：标题栏下方弹出搜索历史下拉栏，剩余区域继续显示内容
+        if self.search_input_mode {
+            if self.search_input.is_empty() && !self.search_history.is_empty() {
+                let hist_len = self.search_history.len() as u16;
+                let dropdown_height = hist_len.min(8) + 2;
+                let dropdown_area = Rect {
+                    height: dropdown_height,
+                    ..render_area
+                };
+                let items: Vec<ListItem> = self
+                    .search_history
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, kw)| {
+                        ListItem::new(Line::from(vec![
+                            Span::styled(
+                                "历史 ",
+                                Style::default().fg(theme.fg_muted),
+                            ),
+                            Span::styled(kw.as_str(), Style::default().fg(theme.fg_primary)),
+                        ]))
+                        .style(if Some(idx) == self.history_selected {
+                            Style::default().fg(theme.bilibili_pink)
+                        } else {
+                            Style::default()
+                        })
+                    })
+                    .collect();
+                let list = List::new(items)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
+                            .border_style(Style::default().fg(theme.border_subtle))
+                            .title(Span::styled(
+                                " 搜索历史（↑↓ 选择，Enter 搜索，Esc 取消） ",
+                                Style::default().fg(theme.bilibili_pink),
+                            )),
+                    )
+                    .highlight_symbol("▶ ");
+                let mut state = ListState::default().with_selected(self.history_selected);
+                frame.render_stateful_widget(list, dropdown_area, &mut state);
+                render_area = Rect {
+                    y: render_area.y + dropdown_height,
+                    height: render_area.height.saturating_sub(dropdown_height),
+                    ..render_area
+                };
+            } else {
+                let hint = Paragraph::new("输入番剧名后按回车搜索，Esc 取消")
+                    .style(Style::default().fg(theme.fg_muted))
+                    .alignment(Alignment::Center);
+                let hint_area = Rect {
+                    height: 1,
+                    ..render_area
+                };
+                frame.render_widget(hint, hint_area);
+                render_area = Rect {
+                    y: render_area.y + 1,
+                    height: render_area.height.saturating_sub(1),
+                    ..render_area
+                };
+            }
+        }
 
         if self.follow_mode {
             if self.follow_loading {
                 let spinner = Paragraph::new("加载追番中...")
                     .style(Style::default().fg(theme.fg_muted))
                     .alignment(Alignment::Center);
-                frame.render_widget(spinner, content_area);
+                frame.render_widget(spinner, render_area);
             } else if let Some(ref err) = self.follow_error {
                 let error = Paragraph::new(err.as_str())
                     .style(Style::default().fg(theme.error))
                     .alignment(Alignment::Center)
                     .wrap(Wrap { trim: true });
-                frame.render_widget(error, content_area);
+                frame.render_widget(error, render_area);
             } else if self.follow_grid.cards.is_empty() {
                 let empty = Paragraph::new("还没有追番，去番剧详情页按 f 追番吧")
                     .style(Style::default().fg(theme.fg_muted))
                     .alignment(Alignment::Center);
-                frame.render_widget(empty, content_area);
+                frame.render_widget(empty, render_area);
             } else {
-                self.follow_grid.render(frame, content_area, theme);
+                self.follow_grid.render(frame, render_area, theme);
             }
-        } else if self.search_input_mode {
-            let hint = Paragraph::new("输入番剧名后按回车搜索，Esc 取消")
-                .style(Style::default().fg(theme.fg_muted))
-                .alignment(Alignment::Center);
-            frame.render_widget(hint, content_area);
         } else if self.search_loading {
             let spinner = Paragraph::new("搜索中...")
                 .style(Style::default().fg(theme.fg_muted))
                 .alignment(Alignment::Center);
-            frame.render_widget(spinner, content_area);
+            frame.render_widget(spinner, render_area);
         } else if let Some(ref err) = self.search_error {
             let error = Paragraph::new(err.as_str())
                 .style(Style::default().fg(theme.error))
                 .alignment(Alignment::Center)
                 .wrap(Wrap { trim: true });
-            frame.render_widget(error, content_area);
+            frame.render_widget(error, render_area);
         } else if self.search_has_results {
             if self.search_grid.cards.is_empty() {
                 let empty = Paragraph::new("没有找到相关番剧")
                     .style(Style::default().fg(theme.fg_muted))
                     .alignment(Alignment::Center);
-                frame.render_widget(empty, content_area);
+                frame.render_widget(empty, render_area);
             } else {
-                self.search_grid.render(frame, content_area, theme);
+                self.search_grid.render(frame, render_area, theme);
             }
         } else if self.loading {
             let spinner = Paragraph::new("加载中...")
                 .style(Style::default().fg(theme.fg_muted))
                 .alignment(Alignment::Center);
-            frame.render_widget(spinner, content_area);
+            frame.render_widget(spinner, render_area);
         } else if let Some(ref err) = self.error_message {
             let error = Paragraph::new(err.as_str())
                 .style(Style::default().fg(theme.error))
                 .alignment(Alignment::Center)
                 .wrap(Wrap { trim: true });
-            frame.render_widget(error, content_area);
+            frame.render_widget(error, render_area);
         } else {
-            self.index_grid.render(frame, content_area, theme);
+            self.index_grid.render(frame, render_area, theme);
         }
 
         // Footer help
@@ -412,19 +486,51 @@ impl Component for BangumiPage {
                 KeyCode::Esc => {
                     self.search_input_mode = false;
                     self.search_input.clear();
+                    self.history_selected = None;
                 }
                 KeyCode::Enter => {
-                    let keyword = self.search_input.trim().to_string();
-                    self.search_input_mode = false;
-                    if !keyword.is_empty() {
-                        return Some(AppAction::SearchBangumi { keyword });
+                    if self.search_input.is_empty() {
+                        if let Some(idx) = self.history_selected
+                            && let Some(kw) = self.search_history.get(idx)
+                        {
+                            self.search_input_mode = false;
+                            self.search_input.clear();
+                            self.history_selected = None;
+                            return Some(AppAction::SearchBangumi {
+                                keyword: kw.clone(),
+                            });
+                        }
+                    } else {
+                        let keyword = self.search_input.trim().to_string();
+                        self.search_input_mode = false;
+                        self.search_input.clear();
+                        self.history_selected = None;
+                        if !keyword.is_empty() {
+                            return Some(AppAction::SearchBangumi { keyword });
+                        }
+                    }
+                }
+                KeyCode::Up => {
+                    if self.search_input.is_empty() && !self.search_history.is_empty() {
+                        let len = self.search_history.len();
+                        let current = self.history_selected.unwrap_or(0);
+                        self.history_selected = Some(if current == 0 { len - 1 } else { current - 1 });
+                    }
+                }
+                KeyCode::Down => {
+                    if self.search_input.is_empty() && !self.search_history.is_empty() {
+                        let len = self.search_history.len();
+                        let current = self.history_selected.unwrap_or(0);
+                        self.history_selected = Some((current + 1) % len);
                     }
                 }
                 KeyCode::Backspace => {
                     self.search_input.pop();
+                    self.history_selected = None;
                 }
                 KeyCode::Char(c) => {
                     self.search_input.push(c);
+                    self.history_selected = None;
                 }
                 _ => {}
             }
@@ -435,6 +541,7 @@ impl Component for BangumiPage {
         if !self.follow_mode && key == KeyCode::Char('/') {
             self.search_input_mode = true;
             self.search_input.clear();
+            self.reload_search_history();
             return Some(AppAction::None);
         }
 

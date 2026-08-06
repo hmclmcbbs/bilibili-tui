@@ -699,6 +699,44 @@ pub fn remove_cookie_export(path: &std::path::Path) -> Result<()> {
     }
 }
 
+const SEARCH_HISTORY_LIMIT: usize = 20;
+
+fn get_search_history_path() -> Result<PathBuf> {
+    Ok(get_config_dir()?.join("search_history.json"))
+}
+
+/// Load previously searched keywords, newest first. Returns an empty vec when
+/// the file does not exist or is malformed.
+pub fn load_search_history() -> Vec<String> {
+    let path = match get_search_history_path() {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let Ok(json) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    serde_json::from_str(&json).unwrap_or_default()
+}
+
+/// Record a searched keyword. Deduplicates case-insensitively, keeps the most
+/// recent entry first and caps the list at SEARCH_HISTORY_LIMIT entries.
+pub fn save_search_history(keyword: &str) {
+    let keyword = keyword.trim();
+    if keyword.is_empty() {
+        return;
+    }
+    let mut list = load_search_history();
+    list.retain(|k| !k.eq_ignore_ascii_case(keyword));
+    list.insert(0, keyword.to_string());
+    list.truncate(SEARCH_HISTORY_LIMIT);
+    let Ok(path) = get_search_history_path() else {
+        return;
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&list) {
+        let _ = fs::write(path, json);
+    }
+}
+
 #[cfg(test)]
 mod config_tests {
     use super::*;

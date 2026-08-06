@@ -1060,4 +1060,94 @@ mod tests {
         assert_eq!(msg.content, "对方主动回复或关注你前，最多发送1条信息");
         assert_eq!(session_last_text(&msg), "对方主动回复或关注你前，最多发送1条信息");
     }
+
+    #[test]
+    fn real_at_feed_item_parses() {
+        // Exact shape returned by /x/msgfeed/at (captured live).
+        let raw = serde_json::json!({
+            "id": 1063306647674882_i64,
+            "user": {
+                "mid": 3706940863548342_i64,
+                "fans": 0,
+                "nickname": "哔哩艺术社",
+                "avatar": "https://i0.hdslb.com/bfs/face/x.jpg",
+                "mid_link": "",
+                "follow": false
+            },
+            "item": {
+                "type": "reply",
+                "business": "评论",
+                "business_id": 12,
+                "title": "【小画家专属绘画礼包福利合集】",
+                "image": "https://i0.hdslb.com/bfs/new_dyn/x.png",
+                "uri": "https://www.bilibili.com/opus/1175029247487508480",
+                "subject_id": 46370129,
+                "root_id": 0,
+                "target_id": 0,
+                "source_id": 301572394592_i64,
+                "source_content": "@Folk15305"
+            }
+        });
+        let item = parse_feed_item(&raw, 2).expect("at item parses");
+        assert_eq!(item.user_name.as_deref(), Some("哔哩艺术社"));
+        assert_eq!(item.message.as_deref(), Some("@Folk15305"));
+        assert_eq!(item.title.as_deref(), Some("【小画家专属绘画礼包福利合集】"));
+    }
+
+    #[test]
+    fn real_like_feed_item_parses() {
+        // Exact shape returned by /x/msgfeed/like total.items (captured live).
+        let raw = serde_json::json!({
+            "id": 1127686823452673_i64,
+            "users": [{
+                "mid": 3493114587121732_i64,
+                "fans": 0,
+                "nickname": "bili_98970302958",
+                "avatar": "https://i1.hdslb.com/bfs/face/x.jpg",
+                "mid_link": "",
+                "follow": false
+            }],
+            "item": {
+                "item_id": 1839442000219289088_i64,
+                "pid": 0,
+                "type": "danmu",
+                "business": "弹幕",
+                "business_id": 0,
+                "title": "不信谣不传谣",
+                "desc": "",
+                "image": "",
+                "uri": "https://www.bilibili.com/video/BV12T4y1u7my?dm_progress=3254&p=0&dmid=1839442000219289088",
+                "detail_name": "",
+                "native_uri": "bilibili://video/925731064?dm_progress=3254&cid=191157884&dmid=1839442000219289088",
+                "ctime": 1746369774
+            }
+        });
+        let item = parse_feed_item(&raw, 3).expect("like item parses");
+        assert_eq!(item.user_name.as_deref(), Some("bili_98970302958"));
+        assert_eq!(item.title.as_deref(), Some("不信谣不传谣"));
+        assert_eq!(item.bvid.as_deref(), Some("BV12T4y1u7my"));
+    }
+
+    #[test]
+    fn real_sys_notify_parses() {
+        // Exact shape returned by message.bilibili.com query_unified_notify.
+        let raw = serde_json::json!({
+            "id": 236,
+            "cursor": 1773658800000000000_i64,
+            "type": 4,
+            "title": "《哔哩哔哩隐私政策》修订通知",
+            "content": "{\"web\":\"亲爱的用户，根据业务开展实际情况，哔哩哔哩于近期更新了《哔哩哔哩隐私政策》中的相关内容，您可以前往哔哩哔哩客户端【我的-设置-隐私政策-哔哩哔哩隐私政策全文】查看主要更新提示以及更新后的全部内容。\"}",
+            "source": {"name": "", "logo": "http://i2.hdslb.com/u_user/31ce8733288c19be92d7ce9cb83462dc.png"},
+            "time_at": "2026-03-16 19:00:00",
+            "card_type": 0
+        });
+        let item = parse_system_notify(&raw).expect("sys notify parses");
+        assert_eq!(item.title.as_deref(), Some("《哔哩哔哩隐私政策》修订通知"));
+        assert!(item
+            .message
+            .as_deref()
+            .map(|m| m.contains("哔哩哔哩隐私政策"))
+            .unwrap_or(false));
+        assert!(item.ctime.unwrap_or(0) > 0);
+    }
 }

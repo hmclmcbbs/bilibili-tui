@@ -138,22 +138,17 @@ pub struct SearchBangumiItem {
     pub cover: Option<String>,
     /// Can be a plain string ("9.7") or an object ({"user_score": {...}})
     pub score: Option<serde_json::Value>,
-    pub areas: Option<Vec<BangumiArea>>,
-    pub styles: Option<Vec<BangumiStyle>>,
+    /// Bilibili returns `areas`/`styles` as an array in most responses but as
+    /// a plain string in some (e.g. "澳大利亚"). Keep as Value so either shape
+    /// deserializes without failing the whole search request.
+    #[serde(default)]
+    pub areas: Option<serde_json::Value>,
+    #[serde(default)]
+    pub styles: Option<serde_json::Value>,
     pub desc: Option<String>,
     pub pubdate: Option<i64>,
     #[serde(rename = "media_type")]
     pub media_type: Option<i64>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BangumiArea {
-    pub name: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct BangumiStyle {
-    pub name: Option<String>,
 }
 
 impl SearchBangumiItem {
@@ -168,22 +163,32 @@ impl SearchBangumiItem {
 
     pub fn display_subtitle(&self) -> String {
         let mut parts = Vec::new();
-        if let Some(areas) = &self.areas {
-            let names: Vec<&str> = areas.iter().filter_map(|a| a.name.as_deref()).collect();
-            if !names.is_empty() {
-                parts.push(names.join("/"));
-            }
-        }
-        if let Some(styles) = &self.styles {
-            let names: Vec<&str> = styles.iter().filter_map(|s| s.name.as_deref()).collect();
-            if !names.is_empty() {
-                parts.push(names.join("/"));
-            }
-        }
+        self.push_name_list(&mut parts, self.areas.as_ref());
+        self.push_name_list(&mut parts, self.styles.as_ref());
         if parts.is_empty() {
             "-".to_string()
         } else {
             parts.join(" · ")
+        }
+    }
+
+    /// Append names from a Value that may be a string ("澳大利亚") or an
+    /// array of objects ([{"name":"日本"}]).
+    fn push_name_list(&self, parts: &mut Vec<String>, value: Option<&serde_json::Value>) {
+        let Some(value) = value else { return };
+        match value {
+            serde_json::Value::String(s) if !s.is_empty() => parts.push(s.clone()),
+            serde_json::Value::Array(arr) => {
+                let names: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !names.is_empty() {
+                    parts.push(names.join("/"));
+                }
+            }
+            _ => {}
         }
     }
 

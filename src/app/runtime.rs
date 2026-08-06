@@ -372,6 +372,10 @@ impl App {
             Page::Bangumi(page) => {
                 page.index_grid.poll_cover_results();
                 page.index_grid.start_cover_downloads();
+                page.follow_grid.poll_cover_results();
+                page.follow_grid.start_cover_downloads();
+                page.search_grid.poll_cover_results();
+                page.search_grid.start_cover_downloads();
             }
             Page::Up(page) => {
                 page.tick();
