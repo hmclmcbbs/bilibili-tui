@@ -1279,15 +1279,77 @@ impl App {
                     return;
                 }
                 let client = self.api_client.clone();
-                if let Ok(_response) = client
+                match client
                     .add_comment(oid, comment_type, &message, root, root)
                     .await
                 {
-                    // Reload comments to show new comment
-                    if let Page::VideoDetail(page) = &mut self.current_page {
-                        page.load_data(&client).await;
-                    } else if let Page::DynamicDetail(page) = &mut self.current_page {
-                        page.load_data(&client).await;
+                    Ok(_response) => {
+                        // Reload comments to show new comment
+                        if let Page::VideoDetail(page) = &mut self.current_page {
+                            let feedback = if root.is_some() {
+                                "回复成功".to_string()
+                            } else {
+                                "评论成功".to_string()
+                            };
+                            page.set_interaction_msg(feedback);
+                            page.load_data(&client).await;
+                        } else if let Page::DynamicDetail(page) = &mut self.current_page {
+                            page.error_message = Some("评论成功".to_string());
+                            page.load_data(&client).await;
+                        }
+                    }
+                    Err(e) => {
+                        let feedback = format!("评论失败: {e}");
+                        if let Page::VideoDetail(page) = &mut self.current_page {
+                            page.set_interaction_msg(feedback);
+                        } else if let Page::DynamicDetail(page) = &mut self.current_page {
+                            page.error_message = Some(feedback);
+                        }
+                    }
+                }
+            }
+            AppAction::SendLiveDanmaku { room_id, msg } => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    return;
+                }
+                let client = self.api_client.clone();
+                match client.send_live_danmaku(room_id, &msg).await {
+                    Ok(()) => {
+                        if let Page::LiveDetail(page) = &mut self.current_page {
+                            page.set_feedback("弹幕已发送".to_string());
+                            page.push_own_danmaku(msg);
+                        }
+                    }
+                    Err(e) => {
+                        if let Page::LiveDetail(page) = &mut self.current_page {
+                            page.set_feedback(format!("发送失败: {e}"));
+                        }
+                    }
+                }
+            }
+            AppAction::PostDynamic { content } => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    return;
+                }
+                let client = self.api_client.clone();
+                match client.post_dynamic(&content).await {
+                    Ok(()) => {
+                        if let Page::Dynamic(page) = &mut self.current_page {
+                            page.set_message("动态已发布".to_string());
+                        }
+                        let req_id = self.next_request_id("dynamic_refresh");
+                        self.send_network_command(network::NetworkCommand::LoadDynamicRefresh {
+                            req_id,
+                            tab: crate::presentation::tui::DynamicTab::All,
+                            host_mid: None,
+                        });
+                    }
+                    Err(e) => {
+                        if let Page::Dynamic(page) = &mut self.current_page {
+                            page.error_message = Some(format!("发布失败: {e}"));
+                        }
                     }
                 }
             }

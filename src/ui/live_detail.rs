@@ -52,6 +52,11 @@ pub struct LiveDetailPage {
     entries: VecDeque<EntryItem>,
     popularity: Option<u32>,
     history_loaded: bool,
+
+    // Input mode (press / to send a danmaku)
+    input_mode: bool,
+    input_text: String,
+    feedback: Option<String>,
 }
 
 impl LiveDetailPage {
@@ -69,6 +74,25 @@ impl LiveDetailPage {
             entries: VecDeque::with_capacity(MAX_MESSAGES),
             popularity: None,
             history_loaded: false,
+            input_mode: false,
+            input_text: String::new(),
+            feedback: None,
+        }
+    }
+
+    pub fn set_feedback(&mut self, msg: String) {
+        self.feedback = Some(msg);
+    }
+
+    pub fn push_own_danmaku(&mut self, content: String) {
+        self.danmakus.push_back(DanmakuItem {
+            uname: "我".to_string(),
+            content,
+            color: Color::LightBlue,
+            timestamp: Instant::now(),
+        });
+        while self.danmakus.len() > MAX_MESSAGES {
+            self.danmakus.pop_front();
         }
     }
 
@@ -281,8 +305,39 @@ impl Component for LiveDetailPage {
     }
 
     fn handle_input(&mut self, key: KeyCode, keys: &Keybindings) -> Option<AppAction> {
-        if keys.matches_quit(key) || keys.matches_back(key) {
+        // Input mode: / already pressed, typing a danmaku.
+        if self.input_mode {
+            match key {
+                KeyCode::Esc => {
+                    self.input_mode = false;
+                    self.input_text.clear();
+                    Some(AppAction::None)
+                }
+                KeyCode::Enter => {
+                    let msg = std::mem::take(&mut self.input_text);
+                    self.input_mode = false;
+                    if msg.trim().is_empty() {
+                        return Some(AppAction::None);
+                    }
+                    let room_id = self.room_id;
+                    Some(AppAction::SendLiveDanmaku { room_id, msg })
+                }
+                KeyCode::Backspace => {
+                    self.input_text.pop();
+                    Some(AppAction::None)
+                }
+                KeyCode::Char(c) => {
+                    self.input_text.push(c);
+                    Some(AppAction::None)
+                }
+                _ => Some(AppAction::None),
+            }
+        } else if keys.matches_quit(key) || keys.matches_back(key) {
             Some(AppAction::BackToList)
+        } else if key == KeyCode::Char('/') {
+            self.input_mode = true;
+            self.input_text.clear();
+            Some(AppAction::None)
         } else if keys.matches_confirm(key) || keys.matches_play(key) {
             self.room_info.as_ref().map(|info| AppAction::PlayLive {
                 room_id: info.room_id,
@@ -307,12 +362,13 @@ impl LiveDetailPage {
         theme: &Theme,
         keys: &Keybindings,
     ) {
-        // Layout: main content + bottom hints
+        // Layout: main content + bottom hints (input box when active)
+        let bottom_height = if self.input_mode { 3 } else { 2 };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(10),   // Content
-                Constraint::Length(1), // Hints
+                Constraint::Min(10),             // Content
+                Constraint::Length(bottom_height), // Bottom (input/hints)
             ])
             .split(area);
 
@@ -343,10 +399,27 @@ impl LiveDetailPage {
         // Entry panel
         self.render_entry_panel(frame, right_chunks[1], theme);
 
-        // Bottom hints
-        let hints = Paragraph::new(shortcut_footer(
-            theme,
-            [
+        // Bottom: input box or hints + feedback
+        if self.input_mode {
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.bilibili_pink))
+                .title(Span::styled(
+                    " 发送弹幕 (Enter 发送, Esc 取消) ",
+                    Style::default().fg(theme.fg_secondary),
+                ));
+            let input_inner = input_block.inner(chunks[1]);
+            frame.render_widget(input_block, chunks[1]);
+            let display = if self.input_text.is_empty() {
+                " ".to_string()
+            } else {
+                self.input_text.clone()
+            };
+            frame.render_widget(Paragraph::new(display), input_inner);
+        } else {
+            let mut hint_items: Vec<(String, String, Color)> = vec![
+                ("/".to_string(), "发弹幕".into(), theme.bilibili_pink),
                 (
                     format!("{}/{}", keys.confirm, keys.play),
                     "播放".into(),
@@ -357,10 +430,14 @@ impl LiveDetailPage {
                     "返回".into(),
                     theme.info,
                 ),
-            ],
-        ))
-        .alignment(Alignment::Center);
-        frame.render_widget(hints, chunks[1]);
+            ];
+            if let Some(ref fb) = self.feedback {
+                hint_items.push(("".to_string(), format!(" | {fb}"), theme.fg_accent));
+            }
+            let hints = Paragraph::new(shortcut_footer(theme, hint_items))
+                .alignment(Alignment::Center);
+            frame.render_widget(hints, chunks[1]);
+        }
     }
 
     fn render_info_panel(&self, frame: &mut Frame, area: Rect, info: &LiveRoomInfo, theme: &Theme) {

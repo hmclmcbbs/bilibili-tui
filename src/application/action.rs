@@ -202,6 +202,15 @@ pub enum AppAction {
         room_id: i64,
         title: String,
     },
+    /// Send a danmaku to a live room
+    SendLiveDanmaku {
+        room_id: i64,
+        msg: String,
+    },
+    /// Publish a text dynamic
+    PostDynamic {
+        content: String,
+    },
     /// Switch to bangumi page
     SwitchToBangumi,
     /// Refresh bangumi timeline

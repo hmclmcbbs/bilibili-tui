@@ -65,6 +65,9 @@ pub struct DynamicPage {
     pub dynamic_items: Vec<DynamicItem>,
     last_click_time: Option<Instant>,
     last_click_index: Option<usize>,
+    input_mode: bool,
+    input_text: String,
+    message: Option<String>,
 }
 
 impl DynamicPage {
@@ -86,7 +89,14 @@ impl DynamicPage {
             dynamic_items: Vec::new(),
             last_click_time: None,
             last_click_index: None,
+            input_mode: false,
+            input_text: String::new(),
+            message: None,
         }
+    }
+
+    pub fn set_message(&mut self, msg: String) {
+        self.message = Some(msg);
     }
 
     pub fn set_up_list(&mut self, up_list: Vec<crate::api::dynamic::UpListItem>) {
@@ -404,7 +414,7 @@ impl Component for DynamicPage {
             .constraints([
                 Constraint::Length(5),
                 Constraint::Min(10),
-                Constraint::Length(2),
+                Constraint::Length(if self.input_mode { 3 } else { 2 }),
             ])
             .split(panes[1]);
         let header_chunks = Layout::default()
@@ -483,25 +493,48 @@ impl Component for DynamicPage {
             self.grid.render(frame, chunks[1], theme);
         }
 
-        frame.render_widget(
-            Paragraph::new(shortcut_footer(
-                theme,
-                [
-                    ("↑/↓".into(), "选择动态".into(), theme.fg_accent),
-                    (
-                        format!("{}/{}", keys.page_up, keys.page_down),
-                        "翻页".into(),
-                        theme.fg_accent,
-                    ),
-                    ("←/→".into(), "切换面板".into(), theme.fg_accent),
-                    (keys.tab_1.clone(), "切标签".into(), theme.info),
-                    (keys.confirm.clone(), "详情".into(), theme.success),
-                    (keys.refresh.clone(), "刷新".into(), theme.info),
-                ],
-            ))
-            .alignment(Alignment::Center),
-            chunks[2],
-        );
+        // Bottom: input box (when active) or hints + feedback
+        if self.input_mode {
+            let input_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.bilibili_pink))
+                .title(Span::styled(
+                    " 发布动态 (Enter 发布, Esc 取消) ",
+                    Style::default().fg(theme.fg_secondary),
+                ));
+            let input_inner = input_block.inner(chunks[2]);
+            frame.render_widget(input_block, chunks[2]);
+            frame.render_widget(
+                Paragraph::new(if self.input_text.is_empty() {
+                    " ".to_string()
+                } else {
+                    self.input_text.clone()
+                }),
+                input_inner,
+            );
+        } else {
+            let mut items: Vec<(String, String, Color)> = vec![
+                ("↑/↓".into(), "选择动态".into(), theme.fg_accent),
+                (
+                    format!("{}/{}", keys.page_up, keys.page_down),
+                    "翻页".into(),
+                    theme.fg_accent,
+                ),
+                ("←/→".into(), "切换面板".into(), theme.fg_accent),
+                ("/".into(), "发布动态".into(), theme.bilibili_pink),
+                (keys.tab_1.clone(), "切标签".into(), theme.info),
+                (keys.confirm.clone(), "详情".into(), theme.success),
+                (keys.refresh.clone(), "刷新".into(), theme.info),
+            ];
+            if let Some(ref msg) = self.message {
+                items.push(("".into(), format!(" | {msg}"), theme.fg_accent));
+            }
+            frame.render_widget(
+                Paragraph::new(shortcut_footer(theme, items)).alignment(Alignment::Center),
+                chunks[2],
+            );
+        }
     }
 
     fn handle_input_with_modifiers(
@@ -511,7 +544,33 @@ impl Component for DynamicPage {
         keys: &crate::storage::Keybindings,
     ) -> Option<AppAction> {
         let _ = modifiers;
-        if keys.matches_quit(key) {
+        // Input mode: / already pressed, typing dynamic content.
+        if self.input_mode {
+            match key {
+                KeyCode::Esc => {
+                    self.input_mode = false;
+                    self.input_text.clear();
+                    return Some(AppAction::None);
+                }
+                KeyCode::Enter => {
+                    let content = std::mem::take(&mut self.input_text);
+                    self.input_mode = false;
+                    if content.trim().is_empty() {
+                        return Some(AppAction::None);
+                    }
+                    return Some(AppAction::PostDynamic { content });
+                }
+                KeyCode::Backspace => {
+                    self.input_text.pop();
+                    return Some(AppAction::None);
+                }
+                KeyCode::Char(c) => {
+                    self.input_text.push(c);
+                    return Some(AppAction::None);
+                }
+                _ => return Some(AppAction::None),
+            }
+        } else if keys.matches_quit(key) {
             return Some(AppAction::Quit);
         }
         if keys.matches_nav_next(key) {
@@ -519,6 +578,12 @@ impl Component for DynamicPage {
         }
         if keys.matches_nav_prev(key) {
             return Some(AppAction::NavPrev);
+        }
+
+        if key == KeyCode::Char('/') {
+            self.input_mode = true;
+            self.input_text.clear();
+            return Some(AppAction::None);
         }
 
         if self.focus_up_list {

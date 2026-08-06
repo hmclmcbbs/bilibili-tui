@@ -18,6 +18,7 @@ const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (
 pub enum BilibiliApiDomain {
     Main,
     Passport,
+    Live,
 }
 
 impl BilibiliApiDomain {
@@ -25,6 +26,7 @@ impl BilibiliApiDomain {
         match self {
             BilibiliApiDomain::Main => "https://api.bilibili.com",
             BilibiliApiDomain::Passport => "https://passport.bilibili.com",
+            BilibiliApiDomain::Live => "https://api.live.bilibili.com",
         }
     }
 }
@@ -1888,7 +1890,7 @@ impl ApiClient {
         }
 
         let resp: ApiResponse<super::comment::AddCommentResponse> =
-            self.post(&url, form_data).await?;
+            self.post_with_wbi(&url, form_data).await?;
 
         if resp.code != 0 {
             return Err(anyhow::anyhow!("Failed to add comment: {}", resp.message));
@@ -1916,7 +1918,7 @@ impl ApiClient {
             ("action", if action { "1" } else { "0" }.to_string()),
         ];
 
-        let resp: ApiResponse<serde_json::Value> = self.post(&url, form_data).await?;
+        let resp: ApiResponse<serde_json::Value> = self.post_with_wbi(&url, form_data).await?;
 
         if resp.code != 0 {
             return Err(anyhow::anyhow!(
@@ -2621,7 +2623,73 @@ impl ApiClient {
         Ok(())
     }
 
-    // ========== Relation APIs (关注/取关) ==========
+    /// Send a danmaku to a live room (直播弹幕).
+    /// Uses the web live API (not the WebSocket send path).
+    pub async fn send_live_danmaku(&self, room_id: i64, msg: &str) -> Result<()> {
+        let url = self.build_url(
+            BilibiliApiDomain::Live,
+            "/xlive/web-interface/v1/danmaku/send",
+        );
+        let rnd = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("Time went backwards")
+            .as_secs();
+        let form_data = vec![
+            ("room_id", room_id.to_string()),
+            ("msg", msg.to_string()),
+            ("color", "16777215".to_string()),
+            ("fontsize", "25".to_string()),
+            ("mode", "1".to_string()),
+            ("rnd", rnd.to_string()),
+            ("platform", "web".to_string()),
+            ("buvid", self.get_buvid3().await.unwrap_or_default()),
+        ];
+        let resp: ApiResponse<serde_json::Value> = self.post(&url, form_data).await?;
+        if resp.code != 0 {
+            return Err(anyhow!(
+                "发送直播弹幕失败 ({}): {}",
+                resp.code,
+                resp.message
+            ));
+        }
+        Ok(())
+    }
+
+    /// Publish a text dynamic (发布动态/图文动态的文字内容).
+    /// Uses the web dynamic door API with a JSON dyn_req payload.
+    pub async fn post_dynamic(&self, content: &str) -> Result<()> {
+        let url = self.build_url(
+            BilibiliApiDomain::Main,
+            "/x/polymer/web-dynamic/v1/door/post",
+        );
+        let dyn_req = serde_json::json!({
+            "content": {
+                "content": content,
+                "at_uids": [],
+                "ctrl": [],
+                "topic_id": 0
+            },
+            "up_choose_topic": false,
+            "up_choose_res": false,
+            "dynamic_type": 0,
+            "ext_info": {
+                "emoji_type": 0
+            }
+        });
+        let form_data = vec![
+            ("dyn_req", dyn_req.to_string()),
+            ("platform", "web".to_string()),
+        ];
+        let resp: ApiResponse<serde_json::Value> = self.post(&url, form_data).await?;
+        if resp.code != 0 {
+            return Err(anyhow!(
+                "发布动态失败 ({}): {}",
+                resp.code,
+                resp.message
+            ));
+        }
+        Ok(())
+    }
 
     /// Follow a user (关注).
     pub async fn follow_user(&self, mid: i64) -> Result<()> {

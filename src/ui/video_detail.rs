@@ -615,6 +615,7 @@ impl VideoDetailPage {
         for (idx, comment) in self.comments.iter().enumerate() {
             let is_selected = idx == self.comment_scroll;
             let is_expanded = self.expanded_comment == Some(comment.rpid);
+            let is_replying = self.input_mode && idx == self.comment_scroll;
 
             // Main comment
             let reply_indicator = if comment.reply_count() > 0 {
@@ -623,30 +624,67 @@ impl VideoDetailPage {
                 " "
             };
 
+            // 选中项和信息中心一致：selection_bg 背景 + 文字保留原色加粗
+            let bg = if is_selected {
+                theme.selection_bg
+            } else {
+                Color::Reset
+            };
+            let fg = if is_selected {
+                theme.fg_primary
+            } else {
+                theme.fg_primary
+            };
+            let sel = |fg_color: Color, bold: bool| -> Style {
+                let mut s = Style::default().bg(bg).fg(fg_color);
+                if bold {
+                    s = s.add_modifier(Modifier::BOLD);
+                }
+                s
+            };
+
             let lines = vec![
                 Line::from(vec![
                     Span::styled(
                         format!("{} ", reply_indicator),
-                        Style::default().fg(theme.fg_accent),
+                        Style::default().fg(theme.fg_accent).bg(bg),
                     ),
                     Span::styled(
                         comment.author_name(),
-                        Style::default()
-                            .fg(theme.bilibili_pink)
-                            .add_modifier(if is_selected {
+                        Style::default().bg(bg).fg(theme.bilibili_pink).add_modifier(
+                            if is_selected {
                                 Modifier::BOLD
                             } else {
                                 Modifier::empty()
-                            }),
+                            },
+                        ),
                     ),
                     Span::styled(
                         format!("  {}", comment.format_time()),
-                        Style::default().fg(theme.fg_secondary),
+                        sel(theme.fg_secondary, false),
                     ),
+                    if is_replying {
+                        Span::styled(
+                            "  ◀ 正在回复",
+                            Style::default()
+                                .bg(bg)
+                                .fg(theme.success)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        Span::styled("", Style::default().bg(bg))
+                    },
                 ]),
                 Line::from(vec![Span::styled(
-                    truncate_str(comment.message(), 60),
-                    Style::default().fg(theme.fg_primary),
+                    if is_replying {
+                        format!("→ {}", truncate_str(comment.message(), 55))
+                    } else {
+                        truncate_str(comment.message(), 60)
+                    },
+                    sel(
+                        if is_replying { theme.success } else { fg },
+                        is_selected && !is_replying,
+                    ),
                 )]),
                 Line::from(vec![Span::styled(
                     format!(
@@ -654,7 +692,7 @@ impl VideoDetailPage {
                         comment.format_like(),
                         comment.reply_count()
                     ),
-                    Style::default().fg(theme.fg_secondary),
+                    sel(theme.fg_secondary, false),
                 )]),
             ];
             all_items.push(ListItem::new(lines));
@@ -1046,11 +1084,18 @@ impl Component for VideoDetailPage {
                         let message = self.input_buffer.clone();
                         self.input_buffer.clear();
                         self.input_mode = false;
+                        let reply_root = if self.focus == DetailFocus::Comments
+                            && self.comment_scroll < self.comments.len()
+                        {
+                            Some(self.comments[self.comment_scroll].rpid)
+                        } else {
+                            self.expanded_comment
+                        };
                         return Some(AppAction::AddComment {
                             oid: self.aid,
                             comment_type: 1, // Video comment type
                             message,
-                            root: self.expanded_comment, // 回复展开的评论
+                            root: reply_root,
                         });
                     }
                     return Some(AppAction::None);
@@ -1142,6 +1187,14 @@ impl Component for VideoDetailPage {
             // Enter comment input mode
             self.input_mode = true;
             self.input_buffer.clear();
+            if self.focus == DetailFocus::Comments
+                && self.comment_scroll < self.comments.len()
+            {
+                let comment = &self.comments[self.comment_scroll];
+                if comment.reply_count() > 0 {
+                    self.expanded_comment = Some(comment.rpid);
+                }
+            }
             return Some(AppAction::None);
         }
         if keys.matches_toggle_replies(key) {
