@@ -15,6 +15,9 @@ impl App {
         // Initialize the first page
         self.init_current_page().await;
 
+        // Load the logged-in user profile for the sidebar (no-op when logged out).
+        self.refresh_current_user().await;
+
         // Store the last content area for mouse handling
         let mut last_content_area = Rect::default();
 
@@ -74,6 +77,23 @@ impl App {
         Ok(())
     }
 
+    /// Compute the sidebar width based on the logged-in user's name length.
+    fn sidebar_width(&self) -> u16 {
+        let name_w = self
+            .current_user
+            .as_ref()
+            .map(|u| {
+                u.uname
+                    .chars()
+                    .map(|c| if c.is_ascii() { 1 } else { 2 })
+                    .sum::<usize>() as u16
+            })
+            .unwrap_or(0);
+        // avatar(5) + gap(2) + padding(4) + name
+        let user_w = 5 + 2 + name_w + 4;
+        user_w.max(16).min(30)
+    }
+
     /// Get the content area excluding sidebar
     fn get_content_area(&self, area: Rect) -> Rect {
         // Login page, VideoDetail, DynamicDetail, and BangumiDetail use full area
@@ -94,7 +114,7 @@ impl App {
             Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
-                    Constraint::Length(16), // Sidebar
+                    Constraint::Length(self.sidebar_width()), // Sidebar
                     Constraint::Min(40),    // Content
                 ])
                 .split(area)[1]
@@ -134,7 +154,7 @@ impl App {
             Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([
-                    Constraint::Length(16), // Sidebar
+                    Constraint::Length(self.sidebar_width()), // Sidebar
                     Constraint::Min(40),    // Content
                 ])
                 .split(area)
@@ -146,7 +166,12 @@ impl App {
         };
 
         if self.show_sidebar && chunks.len() > 1 {
-            self.sidebar.draw(frame, chunks[0], &self.theme);
+            let user = self
+                .current_user
+                .as_ref()
+                .map(|u| (u, &mut self.user_avatar));
+            self.sidebar
+                .draw(frame, chunks[0], &self.theme, user);
             self.draw_page(frame, chunks[1]);
         } else {
             self.draw_page(frame, chunks[0]);
@@ -255,6 +280,7 @@ impl App {
 
     pub(super) async fn tick(&mut self) {
         self.drain_network_events();
+        self.poll_user_avatar();
         if let Some((items, source, start_index, order)) = self.pending_playlist.take() {
             self.start_playlist(items, source, start_index, order).await;
         }

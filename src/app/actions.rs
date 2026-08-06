@@ -244,6 +244,8 @@ impl App {
                     let client = self.api_client.clone();
                     client.set_credentials(&creds);
                 }
+                // Refresh the sidebar user profile after login.
+                self.refresh_current_user().await;
                 // Switch to home
                 self.current_page = Page::Home(HomePage::new());
                 self.init_current_page().await;

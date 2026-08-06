@@ -737,6 +737,17 @@ pub fn save_search_history(keyword: &str) {
     }
 }
 
+/// Remove every recorded search keyword. Used by the "clear history" action
+/// in the search picker.
+pub fn clear_search_history() {
+    let Ok(path) = get_search_history_path() else {
+        return;
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&Vec::<String>::new()) {
+        let _ = fs::write(path, json);
+    }
+}
+
 #[cfg(test)]
 mod config_tests {
     use super::*;

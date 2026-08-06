@@ -155,6 +155,19 @@ impl SearchPage {
         }
     }
 
+    /// 清空搜索历史：删除持久化文件，刷新内存列表，并把焦点切到热搜栏。
+    fn clear_history(&mut self) {
+        crate::storage::clear_search_history();
+        self.history.clear();
+        self.history_selected = None;
+        if self.picker_focus == PickerFocus::History {
+            if !self.hotwords.is_empty() {
+                self.picker_focus = PickerFocus::Hotwords;
+                self.hot_selected = Some(0);
+            }
+        }
+    }
+
     /// j/k 导航：历史栏在最底部按 j 切到热搜栏，热搜栏在最顶部按 k 切回历史栏。
     fn picker_nav(&mut self, delta: i32) {
         match self.picker_focus {
@@ -551,7 +564,11 @@ impl SearchPage {
                 theme.border_subtle
             }))
             .title(Span::styled(
-                " 搜索历史 ",
+                if focused {
+                    " 搜索历史 (x 清空) "
+                } else {
+                    " 搜索历史 "
+                },
                 Style::default().fg(if focused {
                     theme.bilibili_pink
                 } else {
@@ -986,6 +1003,12 @@ impl Component for SearchPage {
                             self.picker_nav(-1);
                             return Some(AppAction::None);
                         }
+                        if c == 'x' || c == 'X' {
+                            if self.picker_focus == PickerFocus::History && !self.history.is_empty() {
+                                self.clear_history();
+                                return Some(AppAction::None);
+                            }
+                        }
                     }
                     self.query.push(c);
                     self.show_hot_list = true;
@@ -1065,6 +1088,17 @@ impl Component for SearchPage {
                         Some(AppAction::None)
                     }
                 }
+                KeyCode::Delete => {
+                    if self.show_hot_list
+                        && self.query.is_empty()
+                        && self.picker_focus == PickerFocus::History
+                        && !self.history.is_empty()
+                    {
+                        self.clear_history();
+                        return Some(AppAction::None);
+                    }
+                    Some(AppAction::None)
+                }
                 KeyCode::Esc => {
                     self.input_mode = false;
                     Some(AppAction::None)
@@ -1084,6 +1118,15 @@ impl Component for SearchPage {
             }
             if keys.matches_confirm(key) {
                 return self.search_selected_picker();
+            }
+            if key == KeyCode::Char('x')
+                || key == KeyCode::Char('X')
+                || key == KeyCode::Delete
+            {
+                if self.picker_focus == PickerFocus::History && !self.history.is_empty() {
+                    self.clear_history();
+                    return Some(AppAction::None);
+                }
             }
             if keys.matches_search_focus(key) {
                 self.input_mode = true;

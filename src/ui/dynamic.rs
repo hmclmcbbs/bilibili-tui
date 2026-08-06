@@ -66,7 +66,9 @@ pub struct DynamicPage {
     last_click_time: Option<Instant>,
     last_click_index: Option<usize>,
     input_mode: bool,
+    input_is_search: bool,
     input_text: String,
+    filter_text: Option<String>,
     message: Option<String>,
 }
 
@@ -90,13 +92,117 @@ impl DynamicPage {
             last_click_time: None,
             last_click_index: None,
             input_mode: false,
+            input_is_search: false,
             input_text: String::new(),
+            filter_text: None,
             message: None,
         }
     }
 
     pub fn set_message(&mut self, msg: String) {
         self.message = Some(msg);
+    }
+
+    /// Build a VideoCard for a dynamic item, if it matches the current tab.
+    fn build_card_for_item(&self, item: &DynamicItem) -> Option<VideoCard> {
+        let should_include = match self.current_tab {
+            DynamicTab::All => item.is_video() || item.is_draw() || item.is_opus(),
+            DynamicTab::Videos => item.is_video(),
+            DynamicTab::Images => item.is_draw() || item.is_opus(),
+        };
+        if !should_include {
+            return None;
+        }
+
+        // Handle video dynamics
+        if item.is_video() {
+            if let Some(bvid) = item.video_bvid() {
+                return Some(VideoCard::new(
+                    Some(bvid.to_string()),
+                    None,
+                    item.video_title().unwrap_or("无标题").to_string(),
+                    item.author_name().to_string(),
+                    format!("▶ {}", item.video_play()),
+                    item.video_duration().to_string(),
+                    item.video_cover().map(|s| s.to_string()),
+                ));
+            }
+        }
+        // Handle image dynamics (带图动态)
+        else if item.is_draw() {
+            let images = item.draw_images();
+            let image_url = images.first().map(|s| s.to_string());
+            let desc = item.desc_text().unwrap_or("图片动态");
+            let image_count = if images.len() > 1 {
+                format!(" [{}P]", images.len())
+            } else {
+                String::new()
+            };
+            return Some(VideoCard::new(
+                None, // No bvid for images
+                None,
+                format!("{}{}", desc, image_count),
+                item.author_name().to_string(),
+                "📷 图片动态".to_string(),
+                "".to_string(),
+                image_url,
+            ));
+        }
+        // Handle text/opus dynamics (图文动态)
+        else if item.is_opus() {
+            let text = item.opus_text().unwrap_or("图文动态");
+            let images = item.opus_images();
+            let image_url = images.first().map(|s| s.to_string());
+            let image_count = if !images.is_empty() {
+                format!(" [{}P]", images.len())
+            } else {
+                String::new()
+            };
+            return Some(VideoCard::new(
+                None,
+                None,
+                format!("{}{}", text, image_count),
+                item.author_name().to_string(),
+                "📝 图文".to_string(),
+                "".to_string(),
+                image_url,
+            ));
+        }
+        None
+    }
+
+    /// Rebuild the grid from stored items, applying tab + filter.
+    pub fn apply_filter(&mut self) {
+        self.grid.clear();
+        for item in &self.dynamic_items {
+            if let Some(filter) = &self.filter_text {
+                if !filter.trim().is_empty() {
+                    let haystack = [
+                        item.video_title().unwrap_or("").to_string(),
+                        item.author_name().to_string(),
+                        item.desc_text().unwrap_or("").to_string(),
+                        item.opus_text().unwrap_or("").to_string(),
+                    ]
+                    .join(" ");
+                    if !haystack.to_lowercase().contains(&filter.to_lowercase()) {
+                        continue;
+                    }
+                }
+            }
+            if let Some(card) = self.build_card_for_item(item) {
+                self.grid.add_card(card);
+            }
+        }
+    }
+
+    pub fn set_filter(&mut self, filter: Option<String>) {
+        let filter = filter.map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
+        self.filter_text = filter;
+        self.apply_filter();
+    }
+
+    pub fn filter_text(&self) -> Option<&str> {
+        self.filter_text.as_deref()
     }
 
     pub fn set_up_list(&mut self, up_list: Vec<crate::api::dynamic::UpListItem>) {
@@ -158,76 +264,8 @@ impl DynamicPage {
 
         // Process items based on current tab filter
         for item in items.into_iter() {
-            let should_include = match self.current_tab {
-                DynamicTab::All => item.is_video() || item.is_draw() || item.is_opus(),
-                DynamicTab::Videos => item.is_video(),
-                DynamicTab::Images => item.is_draw() || item.is_opus(),
-            };
-
-            if !should_include {
-                continue;
-            }
-
-            // Store the item
             self.dynamic_items.push(item.clone());
-
-            // Handle video dynamics
-            if item.is_video() {
-                if let Some(bvid) = item.video_bvid() {
-                    let card = VideoCard::new(
-                        Some(bvid.to_string()),
-                        None,
-                        item.video_title().unwrap_or("无标题").to_string(),
-                        item.author_name().to_string(),
-                        format!("▶ {}", item.video_play()),
-                        item.video_duration().to_string(),
-                        item.video_cover().map(|s| s.to_string()),
-                    );
-                    self.grid.add_card(card);
-                }
-            }
-            // Handle image dynamics (带图动态)
-            else if item.is_draw() {
-                let images = item.draw_images();
-                let image_url = images.first().map(|s| s.to_string());
-                let desc = item.desc_text().unwrap_or("图片动态");
-                let image_count = if images.len() > 1 {
-                    format!(" [{}P]", images.len())
-                } else {
-                    String::new()
-                };
-
-                let card = VideoCard::new(
-                    None, // No bvid for images
-                    None,
-                    format!("{}{}", desc, image_count),
-                    item.author_name().to_string(),
-                    "📷 图片动态".to_string(),
-                    "".to_string(),
-                    image_url,
-                );
-                self.grid.add_card(card);
-            }
-            // Handle text/opus dynamics (图文动态)
-            else if item.is_opus() {
-                let text = item.opus_text().unwrap_or("图文动态");
-                let images = item.opus_images();
-                let image_url = images.first().map(|s| s.to_string());
-                let image_count = if !images.is_empty() {
-                    format!(" [{}P]", images.len())
-                } else {
-                    String::new()
-                };
-
-                let card = VideoCard::new(
-                    None,
-                    None,
-                    format!("{}{}", text, image_count),
-                    item.author_name().to_string(),
-                    "📝 图文".to_string(),
-                    "".to_string(),
-                    image_url,
-                );
+            if let Some(card) = self.build_card_for_item(&item) {
                 self.grid.add_card(card);
             }
         }
@@ -237,81 +275,14 @@ impl DynamicPage {
         self.offset = offset;
         self.has_more = has_more;
         self.loading = false;
+        self.apply_filter();
     }
 
     pub fn append_feed(&mut self, items: Vec<DynamicItem>, offset: Option<String>, has_more: bool) {
         // Process items based on current tab filter
         for item in items.into_iter() {
-            let should_include = match self.current_tab {
-                DynamicTab::All => item.is_video() || item.is_draw() || item.is_opus(),
-                DynamicTab::Videos => item.is_video(),
-                DynamicTab::Images => item.is_draw() || item.is_opus(),
-            };
-
-            if !should_include {
-                continue;
-            }
-
-            // Store the item
             self.dynamic_items.push(item.clone());
-
-            // Handle video dynamics
-            if item.is_video() {
-                if let Some(bvid) = item.video_bvid() {
-                    let card = VideoCard::new(
-                        Some(bvid.to_string()),
-                        None,
-                        item.video_title().unwrap_or("无标题").to_string(),
-                        item.author_name().to_string(),
-                        format!("▶ {}", item.video_play()),
-                        item.video_duration().to_string(),
-                        item.video_cover().map(|s| s.to_string()),
-                    );
-                    self.grid.add_card(card);
-                }
-            }
-            // Handle image dynamics
-            else if item.is_draw() {
-                let images = item.draw_images();
-                let image_url = images.first().map(|s| s.to_string());
-                let desc = item.desc_text().unwrap_or("图片动态");
-                let image_count = if images.len() > 1 {
-                    format!(" [{}P]", images.len())
-                } else {
-                    String::new()
-                };
-
-                let card = VideoCard::new(
-                    None,
-                    None,
-                    format!("{}{}", desc, image_count),
-                    item.author_name().to_string(),
-                    "📷 图片动态".to_string(),
-                    "".to_string(),
-                    image_url,
-                );
-                self.grid.add_card(card);
-            }
-            // Handle text/opus dynamics
-            else if item.is_opus() {
-                let text = item.opus_text().unwrap_or("图文动态");
-                let images = item.opus_images();
-                let image_url = images.first().map(|s| s.to_string());
-                let image_count = if !images.is_empty() {
-                    format!(" [{}P]", images.len())
-                } else {
-                    String::new()
-                };
-
-                let card = VideoCard::new(
-                    None,
-                    None,
-                    format!("{}{}", text, image_count),
-                    item.author_name().to_string(),
-                    "📝 图文".to_string(),
-                    "".to_string(),
-                    image_url,
-                );
+            if let Some(card) = self.build_card_for_item(&item) {
                 self.grid.add_card(card);
             }
         }
@@ -321,6 +292,7 @@ impl DynamicPage {
         self.offset = offset;
         self.has_more = has_more;
         self.loading_more = false;
+        self.apply_filter();
     }
 
     pub fn set_error(&mut self, msg: String) {
@@ -429,6 +401,14 @@ impl Component for DynamicPage {
                     .fg(theme.bilibili_pink)
                     .add_modifier(Modifier::BOLD),
             ),
+            if let Some(ref filter) = self.filter_text {
+                Span::styled(
+                    format!(" | 筛选: {filter}"),
+                    Style::default().fg(theme.warning),
+                )
+            } else {
+                Span::raw("")
+            },
             if self.loading_more {
                 Span::styled(" 加载中...", Style::default().fg(theme.warning))
             } else {
@@ -483,8 +463,13 @@ impl Component for DynamicPage {
                 chunks[1],
             );
         } else if self.grid.cards.is_empty() {
+            let empty_msg = if self.filter_text.is_some() {
+                "没有匹配的动态，按 / 修改筛选"
+            } else {
+                "暂无动态，请先登录并关注UP主"
+            };
             frame.render_widget(
-                Paragraph::new("暂无动态，请先登录并关注UP主")
+                Paragraph::new(empty_msg)
                     .style(Style::default().fg(theme.fg_secondary))
                     .alignment(Alignment::Center),
                 chunks[1],
@@ -495,12 +480,17 @@ impl Component for DynamicPage {
 
         // Bottom: input box (when active) or hints + feedback
         if self.input_mode {
+            let input_title = if self.input_is_search {
+                " 搜索动态 (Enter 筛选, Esc 取消) "
+            } else {
+                " 发布动态 (Enter 发布, Esc 取消) "
+            };
             let input_block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.bilibili_pink))
                 .title(Span::styled(
-                    " 发布动态 (Enter 发布, Esc 取消) ",
+                    input_title,
                     Style::default().fg(theme.fg_secondary),
                 ));
             let input_inner = input_block.inner(chunks[2]);
@@ -522,11 +512,15 @@ impl Component for DynamicPage {
                     theme.fg_accent,
                 ),
                 ("←/→".into(), "切换面板".into(), theme.fg_accent),
-                ("/".into(), "发布动态".into(), theme.bilibili_pink),
+                ("/".into(), "搜索".into(), theme.bilibili_pink),
+                ("w".into(), "发布动态".into(), theme.bilibili_pink),
                 (keys.tab_1.clone(), "切标签".into(), theme.info),
                 (keys.confirm.clone(), "详情".into(), theme.success),
                 (keys.refresh.clone(), "刷新".into(), theme.info),
             ];
+            if let Some(ref filter) = self.filter_text {
+                items.push(("".into(), format!(" | 筛选: {filter}"), theme.fg_secondary));
+            }
             if let Some(ref msg) = self.message {
                 items.push(("".into(), format!(" | {msg}"), theme.fg_accent));
             }
@@ -544,18 +538,26 @@ impl Component for DynamicPage {
         keys: &crate::storage::Keybindings,
     ) -> Option<AppAction> {
         let _ = modifiers;
-        // Input mode: / already pressed, typing dynamic content.
+        // Input mode: typing search term or dynamic content.
         if self.input_mode {
             match key {
                 KeyCode::Esc => {
                     self.input_mode = false;
+                    self.input_is_search = false;
                     self.input_text.clear();
                     return Some(AppAction::None);
                 }
                 KeyCode::Enter => {
                     let content = std::mem::take(&mut self.input_text);
                     self.input_mode = false;
+                    let is_search = self.input_is_search;
+                    self.input_is_search = false;
                     if content.trim().is_empty() {
+                        return Some(AppAction::None);
+                    }
+                    if is_search {
+                        self.set_filter(Some(content));
+                        self.message = Some("已筛选动态".to_string());
                         return Some(AppAction::None);
                     }
                     return Some(AppAction::PostDynamic { content });
@@ -570,6 +572,13 @@ impl Component for DynamicPage {
                 }
                 _ => return Some(AppAction::None),
             }
+        } else if key == KeyCode::Esc {
+            // 筛选已应用时按 Esc 取消筛选，回到完整列表
+            if self.filter_text.is_some() {
+                self.set_filter(None);
+                self.message = Some("已取消筛选".to_string());
+            }
+            return Some(AppAction::None);
         } else if keys.matches_quit(key) {
             return Some(AppAction::Quit);
         }
@@ -582,6 +591,13 @@ impl Component for DynamicPage {
 
         if key == KeyCode::Char('/') {
             self.input_mode = true;
+            self.input_is_search = true;
+            self.input_text.clear();
+            return Some(AppAction::None);
+        }
+        if key == KeyCode::Char('w') {
+            self.input_mode = true;
+            self.input_is_search = false;
             self.input_text.clear();
             return Some(AppAction::None);
         }
@@ -818,5 +834,56 @@ mod tests {
             Some(AppAction::None)
         ));
         assert!(!page.focus_up_list);
+    }
+
+    #[test]
+    fn dynamic_slash_enters_search_mode_and_enter_applies_filter() {
+        let mut page = DynamicPage::new();
+        let keys = Keybindings::default();
+
+        // Press '/' -> enter search input mode
+        let action = page.handle_input_with_modifiers(
+            KeyCode::Char('/'),
+            crossterm::event::KeyModifiers::NONE,
+            &keys,
+        );
+        assert!(matches!(action, Some(AppAction::None)));
+        assert!(page.input_mode);
+        assert!(page.input_is_search);
+
+        // Type a keyword
+        for ch in ['测', '试'] {
+            page.handle_input_with_modifiers(
+                KeyCode::Char(ch),
+                crossterm::event::KeyModifiers::NONE,
+                &keys,
+            );
+        }
+        assert_eq!(page.input_text, "测试");
+
+        // Press Enter -> apply filter
+        let action = page.handle_input_with_modifiers(
+            KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+            &keys,
+        );
+        assert!(matches!(action, Some(AppAction::None)));
+        assert!(!page.input_mode);
+        assert_eq!(page.filter_text(), Some("测试"));
+    }
+
+    #[test]
+    fn dynamic_w_enters_publish_mode() {
+        let mut page = DynamicPage::new();
+        let keys = Keybindings::default();
+
+        let action = page.handle_input_with_modifiers(
+            KeyCode::Char('w'),
+            crossterm::event::KeyModifiers::NONE,
+            &keys,
+        );
+        assert!(matches!(action, Some(AppAction::None)));
+        assert!(page.input_mode);
+        assert!(!page.input_is_search);
     }
 }

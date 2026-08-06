@@ -59,7 +59,13 @@ impl Sidebar {
         }
     }
 
-    pub fn draw(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    pub fn draw(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        theme: &Theme,
+        user: Option<(&crate::api::auth::CurrentUser, &mut Option<ratatui_image::protocol::StatefulProtocol>)>,
+    ) {
         // Main block with subtle right border
         let block = Block::default()
             .borders(Borders::RIGHT)
@@ -69,16 +75,36 @@ impl Sidebar {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // Split into header and nav items
+        // Split into header (brand + user info), separator, and nav items
+        let header_h = if user.is_some() { 9 } else { 4 };
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(4), // Header with branding
-                Constraint::Length(1), // Separator
-                Constraint::Min(5),    // Nav items
-                Constraint::Length(1), // Footer separator
+                Constraint::Length(header_h), // Header with branding + user info
+                Constraint::Length(1),        // Separator
+                Constraint::Min(5),           // Nav items
+                Constraint::Length(1),        // Footer separator
             ])
             .split(inner);
+
+        // Inner header split: brand (4) / divider (1) / user info (4)
+        let header_chunks = if user.is_some() {
+            let hc = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(4), // Brand
+                    Constraint::Length(1), // Divider between logo and user info
+                    Constraint::Length(4), // User info (avatar + name/level + exp bar)
+                ])
+                .split(chunks[0]);
+            Some(hc)
+        } else {
+            None
+        };
+        let brand_area = header_chunks
+            .as_ref()
+            .map(|c| c[0])
+            .unwrap_or(chunks[0]);
 
         // Bilibili branding header with modern styling
         let brand_lines = vec![
@@ -111,11 +137,64 @@ impl Sidebar {
             )]),
         ];
         let brand = Paragraph::new(brand_lines);
-        frame.render_widget(brand, chunks[0]);
+        frame.render_widget(brand, brand_area);
+
+        // Divider line between the logo and the user info
+        if let Some(hc) = &header_chunks {
+            let divider = Paragraph::new(Line::from(vec![Span::styled(
+                "─".repeat(area.width.saturating_sub(2) as usize),
+                Style::default().fg(theme.border_subtle),
+            )]));
+            frame.render_widget(divider, hc[1]);
+        }
+
+        // User info (avatar, name, level) below the brand when logged in
+        if let Some((user, avatar)) = user {
+            let area = header_chunks
+                .as_ref()
+                .map(|c| c[2])
+                .unwrap_or(chunks[0]);
+            let lines = user_lines(theme, user);
+            if let Some(protocol) = avatar.as_mut() {
+                // 5-column avatar on the left
+                let avatar_area = Rect {
+                    x: area.x + 1,
+                    y: area.y,
+                    width: 5,
+                    height: 3,
+                };
+                use ratatui_image::StatefulImage;
+                let image = StatefulImage::new();
+                frame.render_stateful_widget(image, avatar_area, protocol);
+                // Text to the right of the avatar
+                let text_area = Rect {
+                    x: area.x + 7,
+                    y: area.y,
+                    width: area.width.saturating_sub(8),
+                    height: 2,
+                };
+                let text = Paragraph::new(lines).style(Style::default());
+                frame.render_widget(text, text_area);
+            } else {
+                let text = Paragraph::new(lines).style(Style::default());
+                frame.render_widget(text, area);
+            }
+
+            // Exp progress bar below the avatar
+            let exp_area = Rect {
+                x: area.x + 1,
+                y: area.y + 3,
+                width: area.width.saturating_sub(2),
+                height: 1,
+            };
+            frame.render_widget(exp_bar(theme, user), exp_area);
+        }
 
         // Separator line with gradient effect
-        let separator =
-            Paragraph::new("  ────────────").style(Style::default().fg(theme.border_subtle));
+        let separator = Paragraph::new(Line::from(vec![Span::styled(
+            "─".repeat(area.width.saturating_sub(2) as usize),
+            Style::default().fg(theme.border_subtle),
+        )]));
         frame.render_widget(separator, chunks[1]);
 
         // Nav items with modern block selection indicator
@@ -165,6 +244,59 @@ impl Sidebar {
     pub fn select(&mut self, item: NavItem) {
         self.selected = item;
     }
+}
+
+/// Build the sidebar user-info text lines (name + level).
+fn user_lines(
+    theme: &Theme,
+    user: &crate::api::auth::CurrentUser,
+) -> Vec<Line<'static>> {
+    let name = if user.uname.is_empty() {
+        format!("用户{}", user.mid)
+    } else {
+        user.uname.clone()
+    };
+    vec![
+        Line::from(vec![Span::styled(
+            name,
+            Style::default()
+                .fg(theme.bilibili_pink)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(vec![Span::styled(
+            format!("Lv.{}", user.level),
+            Style::default().fg(theme.fg_muted),
+        )]),
+    ]
+}
+
+/// Build the exp progress bar line for the sidebar user card.
+fn exp_bar(theme: &Theme, user: &crate::api::auth::CurrentUser) -> Paragraph<'static> {
+    let total = (user.next_exp - user.current_min).max(1);
+    let cur = (user.current_exp - user.current_min).clamp(0, total);
+    let pct = cur as f64 / total as f64;
+    let width = 16usize;
+    let filled = ((pct * width as f64).round() as usize).min(width);
+    let mut spans = Vec::new();
+    spans.push(Span::styled(
+        "经验 ",
+        Style::default()
+            .fg(theme.bilibili_pink)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(
+        "█".repeat(filled),
+        Style::default().fg(theme.bilibili_pink),
+    ));
+    spans.push(Span::styled(
+        "░".repeat(width - filled),
+        Style::default().fg(theme.fg_muted),
+    ));
+    spans.push(Span::styled(
+        format!(" {}%", (pct * 100.0).round() as i64),
+        Style::default().fg(theme.fg_muted),
+    ));
+    Paragraph::new(Line::from(spans))
 }
 
 impl Default for Sidebar {

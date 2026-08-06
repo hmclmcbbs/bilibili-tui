@@ -2,6 +2,7 @@ mod actions;
 mod network_events;
 mod runtime;
 
+use crate::api::auth::CurrentUser;
 use crate::application::network;
 use crate::domain::playback::{PlaybackEvent, PlaybackState};
 use crate::infrastructure::{
@@ -9,6 +10,7 @@ use crate::infrastructure::{
     persistence::{self, AppConfig, Credentials, Keybindings},
 };
 use crate::presentation::tui::{BangumiPage, DEFAULT_THEME_ID, HomePage, Page, Sidebar, Theme};
+use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -54,6 +56,15 @@ pub struct App {
     pub credentials: Option<Credentials>,
     pub sidebar: Sidebar,
     pub show_sidebar: bool,
+
+    /// Currently logged-in user profile shown in the sidebar.
+    pub current_user: Option<CurrentUser>,
+    /// Terminal-graphics protocol for the user's avatar (rendered in sidebar).
+    pub user_avatar: Option<StatefulProtocol>,
+    user_avatar_pending: bool,
+    avatar_picker: Arc<Picker>,
+    avatar_tx: tokio::sync::mpsc::Sender<Option<StatefulProtocol>>,
+    avatar_rx: tokio::sync::mpsc::Receiver<Option<StatefulProtocol>>,
 
     pub previous_page: Option<PreviousPage>,
     /// Full page instances for nested detail navigation (list -> video -> UP).
@@ -113,6 +124,11 @@ impl App {
         // Always start from home. Login is now an optional flow.
         let current_page = Page::Home(HomePage::new());
 
+        let avatar_picker = Arc::new(
+            Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()),
+        );
+        let (avatar_tx, avatar_rx) = tokio::sync::mpsc::channel(4);
+
         Self {
             current_page,
             should_quit: false,
@@ -120,6 +136,12 @@ impl App {
             credentials,
             sidebar: Sidebar::new(),
             show_sidebar: true,
+            current_user: None,
+            user_avatar: None,
+            user_avatar_pending: false,
+            avatar_picker,
+            avatar_tx,
+            avatar_rx,
             previous_page: None,
             navigation_stack: Vec::new(),
             theme,
@@ -161,6 +183,80 @@ impl App {
         self.next_playback_session_id = self.next_playback_session_id.saturating_add(1);
         id
     }
+
+    /// Fetch the current user profile (if logged in) and refresh the sidebar.
+    pub async fn refresh_current_user(&mut self) {
+        if self.credentials.is_none() {
+            self.current_user = None;
+            self.user_avatar = None;
+            return;
+        }
+        match self.api_client.get_current_user().await {
+            Ok(Some(user)) => {
+                let changed = self
+                    .current_user
+                    .as_ref()
+                    .map(|u| u.mid != user.mid || u.face != user.face)
+                    .unwrap_or(true);
+                self.current_user = Some(user);
+                if changed {
+                    self.user_avatar = None;
+                    self.user_avatar_pending = false;
+                    self.start_avatar_download();
+                }
+            }
+            Ok(None) => {
+                self.current_user = None;
+                self.user_avatar = None;
+            }
+            Err(_) => {
+                // Keep the previous profile on transient failure.
+            }
+        }
+    }
+
+    /// Kick off a background avatar download if we have a face URL and no
+    /// avatar is in flight yet.
+    fn start_avatar_download(&mut self) {
+        if self.user_avatar_pending || self.user_avatar.is_some() {
+            return;
+        }
+        let Some(user) = self.current_user.clone() else {
+            return;
+        };
+        if user.face.is_empty() {
+            return;
+        }
+        self.user_avatar_pending = true;
+        let picker = Arc::clone(&self.avatar_picker);
+        let tx = self.avatar_tx.clone();
+        tokio::spawn(async move {
+            let protocol = download_avatar(&user.face, &picker).await;
+            let _ = tx.send(protocol).await;
+        });
+    }
+
+    /// Poll for a completed avatar download (called every tick).
+    pub fn poll_user_avatar(&mut self) {
+        while let Ok(protocol) = self.avatar_rx.try_recv() {
+            self.user_avatar = protocol;
+            self.user_avatar_pending = false;
+        }
+    }
+}
+
+/// Download a user avatar, crop it to a centered square and build a
+/// terminal-graphics protocol. Returns `None` on any failure.
+async fn download_avatar(url: &str, picker: &Picker) -> Option<StatefulProtocol> {
+    let response = reqwest::get(url).await.ok()?;
+    let bytes = response.bytes().await.ok()?;
+    let mut img: image::DynamicImage = image::load_from_memory(&bytes).ok()?;
+    let side = img.width().min(img.height());
+    let x = (img.width() - side) / 2;
+    let y = (img.height() - side) / 2;
+    img = img.crop_imm(x, y, side, side);
+    img = img.resize(96, 96, image::imageops::FilterType::Triangle);
+    Some(picker.new_resize_protocol(img))
 }
 
 impl Default for App {

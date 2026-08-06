@@ -454,6 +454,61 @@ impl ApiClient {
     }
 
     // Auth APIs
+
+    /// Fetch the currently logged-in user profile (mid, uname, face, level).
+    /// Returns `None` when the request succeeds but the account is not logged in.
+    pub async fn get_current_user(&self) -> Result<Option<super::auth::CurrentUser>> {
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/web-interface/nav");
+        let resp: ApiResponse<serde_json::Value> = self.get(&url).await?;
+        let Some(data) = resp.data else {
+            return Ok(None);
+        };
+        let is_login = data
+            .get("isLogin")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !is_login {
+            return Ok(None);
+        }
+        let mid = data.get("mid").and_then(|v| v.as_i64()).unwrap_or(0);
+        let uname = data
+            .get("uname")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let face = data
+            .get("face")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let level_info = data.get("level_info");
+        let level = level_info
+            .and_then(|v| v.get("current_level"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+        let current_min = level_info
+            .and_then(|v| v.get("current_min"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let current_exp = level_info
+            .and_then(|v| v.get("current_exp"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        let next_exp = level_info
+            .and_then(|v| v.get("next_exp"))
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        Ok(Some(super::auth::CurrentUser {
+            mid,
+            uname,
+            face,
+            level,
+            current_min,
+            current_exp,
+            next_exp,
+        }))
+    }
+
     pub async fn get_qrcode_data(&self) -> Result<super::auth::QrcodeData> {
         let url = self.build_url(
             BilibiliApiDomain::Passport,

@@ -48,3 +48,18 @@ pub struct QrcodePollResult {
     pub data: Option<QrcodePollData>,
     pub cookies: Vec<(String, String)>,
 }
+
+/// Currently logged-in user profile (from `/x/web-interface/nav`).
+#[derive(Debug, Clone)]
+pub struct CurrentUser {
+    pub mid: i64,
+    pub uname: String,
+    pub face: String,
+    pub level: i32,
+    /// Exp value at the start of the current level (`level_info.current_min`).
+    pub current_min: i64,
+    /// Current accumulated exp (`level_info.current_exp`).
+    pub current_exp: i64,
+    /// Exp needed to reach the next level (`level_info.next_exp`).
+    pub next_exp: i64,
+}
