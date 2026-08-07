@@ -420,16 +420,8 @@ impl SettingsPage {
     const DANMAKU_ROWS: usize = 9;
 
     fn adjust_playback(&mut self, direction: i32) -> AppAction {
-        match self.selected_playback_index {
-            0 => {
-                self.auto_play = !self.auto_play;
-                AppAction::SaveAutoPlay(self.auto_play)
-            }
-            _ => {
-                self.video_quality = self.video_quality.cycle(direction);
-                AppAction::SaveVideoQuality(self.video_quality)
-            }
-        }
+        self.auto_play = !self.auto_play;
+        AppAction::SaveAutoPlay(self.auto_play)
     }
 
     fn change_section(&mut self, direction: i32) {
@@ -625,13 +617,10 @@ impl SettingsPage {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let rows = [
-            format!(
-                "进入视频自动播放：{}",
-                if self.auto_play { "开启" } else { "关闭" }
-            ),
-            format!("默认视频画质：{}", self.video_quality.label()),
-        ];
+        let rows = [format!(
+            "进入视频自动播放：{}",
+            if self.auto_play { "开启" } else { "关闭" }
+        )];
 
         let chunks = Layout::vertical([
             Constraint::Length(2),
@@ -907,7 +896,7 @@ mod tests {
     }
 
     #[test]
-    fn playback_rows_save_auto_play_and_quality_immediately() {
+    fn playback_row_saves_auto_play_immediately() {
         let keys = Keybindings::default();
         let mut page = SettingsPage {
             current_section: SettingsSection::Playback,
@@ -917,13 +906,5 @@ mod tests {
 
         let action = page.handle_input(KeyCode::Enter, &keys);
         assert!(matches!(action, Some(AppAction::SaveAutoPlay(false))));
-
-        page.handle_input(KeyCode::Char('j'), &keys);
-        let action = page.handle_input(KeyCode::Char('l'), &keys);
-        assert_eq!(page.video_quality, VideoQuality::Q4k);
-        assert!(matches!(
-            action,
-            Some(AppAction::SaveVideoQuality(VideoQuality::Q4k))
-        ));
     }
 }

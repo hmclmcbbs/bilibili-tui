@@ -15,6 +15,7 @@ pub enum NavItem {
     Live,
     Bangumi,
     Notifications,
+    Mall,
     Settings,
 }
 impl NavItem {
@@ -29,6 +30,7 @@ impl NavItem {
             NavItem::Live => "📡 直播",
             NavItem::Bangumi => "🎬 番剧",
             NavItem::Notifications => "🔔 消息",
+            NavItem::Mall => "🛍️ 会员购",
             NavItem::Settings => "⚙️ 设置",
         }
     }
@@ -43,6 +45,7 @@ impl NavItem {
             NavItem::Live,
             NavItem::Bangumi,
             NavItem::Notifications,
+            NavItem::Mall,
             NavItem::Settings,
         ]
     }
@@ -256,6 +259,26 @@ fn user_lines(
     } else {
         user.uname.clone()
     };
+    let is_vip = user.vip_status == 1 && user.vip_type > 0;
+    // B 站网页版大会员的等级数字是粉色高亮，旁边还有粉色徽章；
+    // 非大会员等级是灰色。
+    let level_style = if is_vip {
+        Style::default()
+            .fg(theme.bilibili_pink)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg_muted)
+    };
+    // B 站网页版：有大会员时等级和徽章粉色高亮，非大会员灰色显示徽章。
+    let vip_style = if is_vip {
+        Style::default()
+            .fg(theme.bilibili_pink)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.fg_muted)
+    };
+    let mut level_spans = vec![Span::styled(format!("Lv.{}", user.level), level_style)];
+    level_spans.push(Span::styled(" ✦大会员", vip_style));
     vec![
         Line::from(vec![Span::styled(
             name,
@@ -263,10 +286,7 @@ fn user_lines(
                 .fg(theme.bilibili_pink)
                 .add_modifier(Modifier::BOLD),
         )]),
-        Line::from(vec![Span::styled(
-            format!("Lv.{}", user.level),
-            Style::default().fg(theme.fg_muted),
-        )]),
+        Line::from(level_spans),
     ]
 }
 
@@ -290,10 +310,6 @@ fn exp_bar(theme: &Theme, user: &crate::api::auth::CurrentUser) -> Paragraph<'st
     ));
     spans.push(Span::styled(
         "░".repeat(width - filled),
-        Style::default().fg(theme.fg_muted),
-    ));
-    spans.push(Span::styled(
-        format!(" {}%", (pct * 100.0).round() as i64),
         Style::default().fg(theme.fg_muted),
     ));
     Paragraph::new(Line::from(spans))

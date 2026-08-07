@@ -9,6 +9,7 @@ mod home;
 mod live;
 mod live_detail;
 mod login;
+mod mall;
 mod notifications;
 mod search;
 mod sections;
@@ -30,6 +31,7 @@ pub use home::HomePage;
 pub use live::LivePage;
 pub use live_detail::LiveDetailPage;
 pub use login::LoginPage;
+pub use mall::MallPage;
 pub use notifications::{NotifTab, NotificationsPage};
 pub use search::{SearchMode, SearchPage};
 pub use sections::SectionPage;
@@ -113,4 +115,5 @@ pub enum Page {
     Bangumi(Box<BangumiPage>),
     BangumiDetail(Box<BangumiDetailPage>),
     Notifications(NotificationsPage),
+    Mall(MallPage),
 }

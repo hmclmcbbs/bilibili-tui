@@ -62,4 +62,10 @@ pub struct CurrentUser {
     pub current_exp: i64,
     /// Exp needed to reach the next level (`level_info.next_exp`).
     pub next_exp: i64,
+    /// Big member (大会员) status: 0 = not a member, 1 = active.
+    pub vip_status: i32,
+    /// Big member type: 0 = none, 1 = monthly, 2 = annual.
+    pub vip_type: i32,
+    /// Big member due date (unix seconds); 0 when not a member.
+    pub vip_due_date: i64,
 }

@@ -246,6 +246,67 @@ impl App {
                     page.apply_chat_sent(ok, error);
                 }
             }
+            network::NetworkEvent::MallOrdersLoaded { req_id, orders } => {
+                if !self.is_latest_request("mall_orders", req_id) {
+                    return;
+                }
+                if let Page::Mall(page) = &mut self.current_page {
+                    page.apply_orders(orders);
+                    // Auto-load express for the first order so the user sees
+                    // logistics without pressing Enter first.
+                    if let Some(first) = page.selected_order().cloned() {
+                        let req_id = self.next_request_id("mall_express");
+                        self.send_network_command(network::NetworkCommand::LoadMallExpress {
+                            req_id,
+                            order_id: first.order_id,
+                        });
+                    }
+                }
+            }
+            network::NetworkEvent::MallOrdersFailed { req_id, error } => {
+                if !self.is_latest_request("mall_orders", req_id) {
+                    return;
+                }
+                if let Page::Mall(page) = &mut self.current_page {
+                    page.apply_orders_error(error);
+                }
+            }
+            network::NetworkEvent::MallExpressLoaded {
+                req_id: _,
+                order_id,
+                express,
+            } => {
+                if let Page::Mall(page) = &mut self.current_page {
+                    page.apply_express(order_id, express);
+                }
+            }
+            network::NetworkEvent::MallExpressFailed {
+                req_id: _,
+                order_id,
+                error,
+            } => {
+                if let Page::Mall(page) = &mut self.current_page {
+                    page.apply_express_error(order_id, error);
+                }
+            }
+            network::NetworkEvent::MallExpressTrackLoaded {
+                req_id: _,
+                order_id,
+                express,
+            } => {
+                if let Page::Mall(page) = &mut self.current_page {
+                    page.apply_track(order_id, express);
+                }
+            }
+            network::NetworkEvent::MallExpressTrackFailed {
+                req_id: _,
+                order_id,
+                error,
+            } => {
+                if let Page::Mall(page) = &mut self.current_page {
+                    page.apply_track_error(order_id, error);
+                }
+            }
             network::NetworkEvent::HistoryDeleted {
                 req_id,
                 successful,
@@ -732,6 +793,9 @@ impl App {
                     }
                     (Page::Notifications(page), "notifications_init") => {
                         page.apply_items_error(format!("加载消息失败: {error}"));
+                    }
+                    (Page::Mall(page), "mall_orders") => {
+                        page.apply_orders_error(format!("加载订单失败: {error}"));
                     }
                     _ => {}
                 }

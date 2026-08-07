@@ -203,6 +203,19 @@ pub enum NetworkCommand {
         talker_id: i64,
         content: String,
     },
+    LoadMallOrders {
+        req_id: u64,
+        /// true = 只加载工房（B站小店/GF_DZ）数字商品订单，false = 会员购全部订单。
+        gf_only: bool,
+    },
+    LoadMallExpress {
+        req_id: u64,
+        order_id: i64,
+    },
+    LoadMallExpressTrack {
+        req_id: u64,
+        order_id: i64,
+    },
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -419,6 +432,34 @@ pub enum NetworkEvent {
         keyword: String,
         items: Vec<crate::api::search::SearchBangumiItem>,
     },
+    MallOrdersLoaded {
+        req_id: u64,
+        orders: Vec<crate::api::mall::MallOrder>,
+    },
+    MallOrdersFailed {
+        req_id: u64,
+        error: String,
+    },
+    MallExpressLoaded {
+        req_id: u64,
+        order_id: i64,
+        express: Option<crate::api::mall::MallExpressSummary>,
+    },
+    MallExpressFailed {
+        req_id: u64,
+        order_id: i64,
+        error: String,
+    },
+    MallExpressTrackLoaded {
+        req_id: u64,
+        order_id: i64,
+        express: Option<crate::api::mall::MallExpress>,
+    },
+    MallExpressTrackFailed {
+        req_id: u64,
+        order_id: i64,
+        error: String,
+    },
     RequestFailed {
         req_id: u64,
         target: &'static str,
@@ -514,6 +555,9 @@ impl NetworkCommand {
             }
             Self::LoadChatSessions { .. } | Self::LoadChatDetail { .. } => "chat",
             Self::SendChatMessage { .. } => "chat_send",
+            Self::LoadMallOrders { .. } => "mall",
+            Self::LoadMallExpress { .. } => "mall_express",
+            Self::LoadMallExpressTrack { .. } => "mall_express_track",
         }
     }
 }
@@ -1043,6 +1087,60 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 error: Some(format!("{e:#}")),
             },
         },
+        NetworkCommand::LoadMallOrders { req_id, gf_only } => {
+            match api_client.get_mall_orders().await {
+                Ok(mut orders) => {
+                    if gf_only {
+                        // 工房页面只显示 B站小店/GF_DZ 数字商品订单（order_type=9），
+                        // 不显示会员购实体商品订单（order_type=2 等）。
+                        orders.retain(|o| o.order_type == 9);
+                    }
+                    NetworkEvent::MallOrdersLoaded { req_id, orders }
+                }
+                Err(e) => failed(req_id, "mall_orders", e),
+            }
+        }
+        NetworkCommand::LoadMallExpress { req_id, order_id } => {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                api_client.get_mall_express(order_id),
+            )
+            .await
+            {
+                Ok(Ok(express)) => NetworkEvent::MallExpressLoaded {
+                    req_id,
+                    order_id,
+                    express,
+                },
+                Ok(Err(e)) => failed(req_id, "mall_express", e),
+                Err(_) => failed(
+                    req_id,
+                    "mall_express",
+                    anyhow::anyhow!("物流查询超时(10s)，请重试"),
+                ),
+            }
+        }
+        NetworkCommand::LoadMallExpressTrack { req_id, order_id } => {
+            let timeout_dur = std::time::Duration::from_secs(10);
+            match tokio::time::timeout(timeout_dur, api_client.get_mall_express_track(order_id)).await
+            {
+                Ok(Ok(express)) => NetworkEvent::MallExpressTrackLoaded {
+                    req_id,
+                    order_id,
+                    express,
+                },
+                Ok(Err(e)) => NetworkEvent::MallExpressTrackFailed {
+                    req_id,
+                    order_id,
+                    error: redact_url_queries(&e.to_string()),
+                },
+                Err(_) => NetworkEvent::MallExpressTrackFailed {
+                    req_id,
+                    order_id,
+                    error: "物流轨迹查询超时(10s)，请重试".to_string(),
+                },
+            }
+        }
         NetworkCommand::LoadHistoryMore { req_id, cursor } => match api_client
             .get_history(
                 Some(cursor.max),

@@ -4,7 +4,7 @@ use crate::application::{AppAction, network};
 use crate::infrastructure::{media, persistence};
 use crate::presentation::tui::{
     ArticleDetailPage, BangumiDetailPage, BangumiPage, DynamicDetailPage, DynamicPage,
-    FavoritesPage, HistoryPage, HomePage, LiveDetailPage, LivePage, LoginPage, NavItem,
+    FavoritesPage, HistoryPage, HomePage, LiveDetailPage, LivePage, LoginPage, MallPage, NavItem,
     NotificationsPage, NotifTab, Page, SearchPage, SectionPage, SettingsPage, Theme, UpPage,
 };
 use std::sync::Arc;
@@ -261,53 +261,49 @@ impl App {
                 self.playback.session_id = None;
                 self.playback.status = crate::domain::playback::PlaybackStatus::Starting;
                 let api_client = self.api_client.clone();
-                let start_position = api_client
-                    .get_video_history_progress(&bvid)
-                    .await
-                    .ok()
-                    .flatten()
-                    .map(|p| p as f64);
-                match media::play_video(
-                    api_client,
-                    &bvid,
-                    aid,
-                    cid,
-                    duration,
-                    start_position,
-                    None,
-                    playback,
-                    self.credentials.as_ref(),
-                    self.config.danmaku.clone(),
-                    self.config.video_quality,
-                    self.playback_event_tx.clone(),
-                    session_id,
-                )
-                .await
-                {
-                    Ok(()) => {
-                        self.playback.begin_session(session_id);
-                    }
-                    Err(error) => {
-                        self.playback.status = crate::domain::playback::PlaybackStatus::Failed;
-                        self.playback.last_error = Some(format!("启动播放器失败: {error:#}"));
-                    }
-                }
-                // Refresh stream support info on the detail page after playback.
-                let mut probe = false;
-                if let Page::VideoDetail(detail_page) = &mut self.current_page
-                    && detail_page.bvid == bvid
-                {
-                    detail_page.streams_probing = true;
-                    probe = true;
-                }
-                if probe {
-                    let req_id = self.next_request_id("video_detail");
-                    self.send_network_command(network::NetworkCommand::ProbeVideoStreams {
-                        req_id,
-                        bvid: bvid.clone(),
+                let credentials = self.credentials.clone();
+                let danmaku = self.config.danmaku.clone();
+                let video_quality = self.config.video_quality;
+                let tx = self.playback_event_tx.clone();
+                let bvid2 = bvid.clone();
+                // Run the network startup (history progress + play URL +
+                // subtitles + danmaku) on a background task so the TUI keeps
+                // rendering while mpv is being prepared.
+                tokio::spawn(async move {
+                    let start_position = api_client
+                        .get_video_history_progress(&bvid2)
+                        .await
+                        .ok()
+                        .flatten()
+                        .map(|p| p as f64);
+                    let result = media::play_video(
+                        api_client,
+                        &bvid2,
+                        aid,
                         cid,
+                        duration,
+                        start_position,
+                        None,
+                        playback,
+                        credentials.as_ref(),
+                        danmaku,
+                        video_quality,
+                        tx.clone(),
+                        session_id,
+                    )
+                    .await;
+                    let (success, error) = match result {
+                        Ok(()) => (true, None),
+                        Err(error) => (false, Some(format!("启动播放器失败: {error:#}"))),
+                    };
+                    let _ = tx.send(crate::domain::playback::PlaybackEvent::Started {
+                        session_id,
+                        bvid: Some(bvid2),
+                        cid: Some(cid),
+                        success,
+                        error,
                     });
-                }
+                });
             }
             AppAction::PlayVideoWithPages {
                 bvid,
@@ -321,56 +317,56 @@ impl App {
                     let session_id = self.allocate_playback_session();
                     self.playback.session_id = None;
                     self.playback.status = crate::domain::playback::PlaybackStatus::Starting;
-                    let page = &pages[current_index];
+                    let page = pages[current_index].clone();
                     let api_client = self.api_client.clone();
-                    let start_position = api_client
-                        .get_video_history_progress(&bvid)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|p| p as f64);
-                    match media::play_video(
-                        api_client,
-                        &bvid,
-                        aid,
-                        page.cid,
-                        page.duration,
-                        start_position,
-                        Some(page.page),
-                        playback,
-                        self.credentials.as_ref(),
-                        self.config.danmaku.clone(),
-                        self.config.video_quality,
-                        self.playback_event_tx.clone(),
-                        session_id,
-                    )
-                    .await
-                    {
-                        Ok(()) => {
-                            self.playback.begin_session(session_id);
-                        }
-                        Err(error) => {
-                            self.playback.status = crate::domain::playback::PlaybackStatus::Failed;
-                            self.playback.last_error = Some(format!("启动播放器失败: {error:#}"));
-                        }
-                    }
+                    let credentials = self.credentials.clone();
+                    let danmaku = self.config.danmaku.clone();
+                    let video_quality = self.config.video_quality;
+                    let tx = self.playback_event_tx.clone();
+                    let bvid2 = bvid.clone();
                     // Update current page index in video detail page
-                    let mut probe = None;
                     if let Page::VideoDetail(detail_page) = &mut self.current_page
                         && detail_page.bvid == bvid
                     {
                         detail_page.current_page_index = current_index;
-                        detail_page.streams_probing = true;
-                        probe = Some(pages[current_index].cid);
                     }
-                    if let Some(cid) = probe {
-                        let req_id = self.next_request_id("video_detail");
-                        self.send_network_command(network::NetworkCommand::ProbeVideoStreams {
-                            req_id,
-                            bvid: bvid.clone(),
-                            cid,
+                    // Run the network startup on a background task so the TUI
+                    // keeps rendering while mpv is being prepared.
+                    tokio::spawn(async move {
+                        let start_position = api_client
+                            .get_video_history_progress(&bvid2)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|p| p as f64);
+                        let result = media::play_video(
+                            api_client,
+                            &bvid2,
+                            aid,
+                            page.cid,
+                            page.duration,
+                            start_position,
+                            Some(page.page),
+                            playback,
+                            credentials.as_ref(),
+                            danmaku,
+                            video_quality,
+                            tx.clone(),
+                            session_id,
+                        )
+                        .await;
+                        let (success, error) = match result {
+                            Ok(()) => (true, None),
+                            Err(error) => (false, Some(format!("启动播放器失败: {error:#}"))),
+                        };
+                        let _ = tx.send(crate::domain::playback::PlaybackEvent::Started {
+                            session_id,
+                            bvid: Some(bvid2),
+                            cid: Some(page.cid),
+                            success,
+                            error,
                         });
-                    }
+                    });
                 }
             }
             AppAction::PlayPlaylist {
@@ -1076,6 +1072,52 @@ impl App {
                 );
                 self.current_page = Page::Settings(Box::new(page));
             }
+            AppAction::OpenExternalUrl(url) => {
+                // Best-effort open with the system browser; failures are silent.
+                let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+            }
+            AppAction::SwitchToMall => {
+                self.sidebar.select(NavItem::Mall);
+                let fresh = !matches!(self.current_page, Page::Mall(_));
+                if fresh {
+                    self.current_page = Page::Mall(MallPage::new());
+                }
+                let req_id = self.next_request_id("mall_orders");
+                self.send_network_command(network::NetworkCommand::LoadMallOrders {
+                    req_id,
+                    gf_only: false,
+                });
+            }
+            AppAction::RefreshMall => {
+                if let Page::Mall(page) = &mut self.current_page {
+                    page.start_loading();
+                }
+                let req_id = self.next_request_id("mall_orders");
+                self.send_network_command(network::NetworkCommand::LoadMallOrders {
+                    req_id,
+                    gf_only: false,
+                });
+            }
+            AppAction::LoadMallExpress { order_id } => {
+                if let Page::Mall(page) = &mut self.current_page {
+                    page.start_express_loading(order_id);
+                }
+                let req_id = self.next_request_id("mall_express");
+                self.send_network_command(network::NetworkCommand::LoadMallExpress {
+                    req_id,
+                    order_id,
+                });
+            }
+            AppAction::LoadMallExpressTrack { order_id } => {
+                if let Page::Mall(page) = &mut self.current_page {
+                    page.start_track_loading(order_id);
+                }
+                let req_id = self.next_request_id("mall_express_track");
+                self.send_network_command(network::NetworkCommand::LoadMallExpressTrack {
+                    req_id,
+                    order_id,
+                });
+            }
             AppAction::Logout => {
                 let _ = persistence::delete_credentials();
                 self.credentials = None;
@@ -1486,60 +1528,70 @@ impl App {
                 }
             }
             AppAction::PlayLive { room_id, title: _ } => {
-                let start_result = tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    async {
-                        let existing_hub = self
-                            .live_danmaku_hub
-                            .as_ref()
-                            .filter(|hub| hub.room_id() == room_id)
-                            .cloned();
-                        let danmaku_hub = if existing_hub.is_some() {
-                            existing_hub
-                        } else {
-                            let uid = self
-                                .credentials
-                                .as_ref()
-                                .and_then(|credentials| credentials.dede_user_id.parse::<i64>().ok())
-                                .unwrap_or(0);
-                            match crate::api::LiveDanmakuHub::connect(&self.api_client, room_id, uid).await
-                            {
-                                Ok(hub) => {
-                                    self.live_danmaku_hub = Some(Arc::clone(&hub));
-                                    Some(hub)
-                                }
-                                Err(error) => {
-                                    if let Page::LiveDetail(page) = &mut self.current_page {
-                                        page.set_ws_error(format!("WS连接失败: {error}"));
+                let session_id = self.allocate_playback_session();
+                self.playback.session_id = None;
+                self.playback.status = crate::domain::playback::PlaybackStatus::Starting;
+                let api_client = self.api_client.clone();
+                let credentials = self.credentials.clone();
+                let danmaku_config_tx = self.danmaku_config_tx.clone();
+                let existing_hub = self
+                    .live_danmaku_hub
+                    .as_ref()
+                    .filter(|hub| hub.room_id() == room_id)
+                    .cloned();
+                let tx = self.playback_event_tx.clone();
+                // Run the live startup (hub connect + stream resolve) on a
+                // background task so the TUI keeps rendering.
+                tokio::spawn(async move {
+                    let start_result = tokio::time::timeout(
+                        std::time::Duration::from_secs(30),
+                        async {
+                            let danmaku_hub = if existing_hub.is_some() {
+                                existing_hub
+                            } else {
+                                let uid = credentials
+                                    .as_ref()
+                                    .and_then(|credentials| {
+                                        credentials.dede_user_id.parse::<i64>().ok()
+                                    })
+                                    .unwrap_or(0);
+                                match crate::api::LiveDanmakuHub::connect(
+                                    &api_client,
+                                    room_id,
+                                    uid,
+                                )
+                                .await
+                                {
+                                    Ok(hub) => Some(hub),
+                                    Err(error) => {
+                                        return Err(format!("WS连接失败: {error}"));
                                     }
-                                    None
                                 }
-                            }
-                        };
-                        match media::play_live(
-                            self.api_client.clone(),
-                            room_id,
-                            danmaku_hub,
-                            self.danmaku_config_tx.subscribe(),
-                        )
-                        .await
-                        {
-                            Ok(()) => {
-                                self.playback.status = crate::domain::playback::PlaybackStatus::Playing;
-                                self.playback.last_error = None;
-                            }
-                            Err(error) => {
-                                self.playback.status = crate::domain::playback::PlaybackStatus::Failed;
-                                self.playback.last_error = Some(format!("启动直播失败: {error:#}"));
-                            }
-                        }
-                    },
-                )
-                .await;
-                if start_result.is_err() {
-                    self.playback.status = crate::domain::playback::PlaybackStatus::Failed;
-                    self.playback.last_error = Some("直播启动超时".to_string());
-                }
+                            };
+                            media::play_live(
+                                api_client,
+                                room_id,
+                                danmaku_hub,
+                                danmaku_config_tx.subscribe(),
+                            )
+                            .await
+                            .map_err(|error| format!("启动直播失败: {error:#}"))
+                        },
+                    )
+                    .await;
+                    let (success, error) = match start_result {
+                        Ok(Ok(())) => (true, None),
+                        Ok(Err(error)) => (false, Some(error)),
+                        Err(_) => (false, Some("直播启动超时".to_string())),
+                    };
+                    let _ = tx.send(crate::domain::playback::PlaybackEvent::Started {
+                        session_id,
+                        bvid: None,
+                        cid: None,
+                        success,
+                        error,
+                    });
+                });
             }
             AppAction::SwitchToBangumi => {
                 self.sidebar.select(NavItem::Bangumi);
@@ -1702,6 +1754,34 @@ impl App {
                     }
                 }
             }
+            AppAction::RenameFavoriteFolder { media_id, title } => {
+                if self.credentials.is_none() {
+                    self.apply_login_required_hint();
+                    return;
+                }
+                let client = self.api_client.clone();
+                match client.rename_favorite_folder(media_id, &title).await {
+                    Ok(()) => {
+                        if let Page::Favorites(page) = &mut self.current_page {
+                            page.set_message(format!("已重命名: {title}"));
+                            page.loading = true;
+                            let mid = page.mid;
+                            let req_id = self.next_request_id("favorites_refresh");
+                            self.send_network_command(
+                                network::NetworkCommand::RefreshFavoriteFolders {
+                                    req_id,
+                                    mid,
+                                },
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        if let Page::Favorites(page) = &mut self.current_page {
+                            page.set_message(format!("重命名失败: {e}"));
+                        }
+                    }
+                }
+            }
             AppAction::FavoriteVideoInFolder { aid, media_id, add } => {
                 if self.credentials.is_none() {
                     self.apply_login_required_hint();
@@ -1763,26 +1843,35 @@ impl App {
         self.playback.order = order;
         let _ = self.playback.play_from(start_index);
         let session_id = self.allocate_playback_session();
-        match media::play_playlist(
-            self.api_client.clone(),
-            items,
-            order,
-            start_index,
-            self.credentials.as_ref(),
-            self.config.video_quality,
-            self.playback_event_tx.clone(),
-            session_id,
-        )
-        .await
-        {
-            Ok(()) => {
-                self.playback.begin_session(session_id);
-            }
-            Err(error) => {
-                self.playback.status = crate::domain::playback::PlaybackStatus::Failed;
-                self.playback.last_error = Some(format!("启动播放列表失败: {error:#}"));
-            }
-        }
+        let api_client = self.api_client.clone();
+        let video_quality = self.config.video_quality;
+        let tx = self.playback_event_tx.clone();
+        // Run the playlist startup (first item resolve + mpv spawn) on a
+        // background task so the TUI keeps rendering.
+        tokio::spawn(async move {
+            let result = media::play_playlist(
+                api_client,
+                items,
+                order,
+                start_index,
+                None,
+                video_quality,
+                tx.clone(),
+                session_id,
+            )
+            .await;
+            let (success, error) = match result {
+                Ok(()) => (true, None),
+                Err(error) => (false, Some(format!("启动播放列表失败: {error:#}"))),
+            };
+            let _ = tx.send(crate::domain::playback::PlaybackEvent::Started {
+                session_id,
+                bvid: None,
+                cid: None,
+                success,
+                error,
+            });
+        });
     }
 
     async fn switch_to_nav_page(&mut self) {
@@ -1851,6 +1940,16 @@ impl App {
                         self.config.video_quality,
                     )));
                 }
+            }
+            NavItem::Mall => {
+                if !matches!(self.current_page, Page::Mall(_)) {
+                    self.current_page = Page::Mall(MallPage::new());
+                }
+                let req_id = self.next_request_id("mall_orders");
+                self.send_network_command(network::NetworkCommand::LoadMallOrders {
+                    req_id,
+                    gf_only: false,
+                });
             }
             NavItem::Settings => {
                 if !matches!(self.current_page, Page::Settings(_)) {
@@ -2018,6 +2117,9 @@ impl App {
             }
             Page::Up(_) => {
                 // UpPage is initialized by OpenUpPage with an identity-bound request.
+            }
+            Page::Mall(_) => {
+                // Static pages; no async initialization needed.
             }
         }
     }

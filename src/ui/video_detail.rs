@@ -386,17 +386,24 @@ impl VideoDetailPage {
         frame.render_widget(block, area);
 
         if let Some(ref info) = self.video_info {
+            let main_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([
+                    Constraint::Percentage(68), // Left: title/author/stats/interaction/desc
+                    Constraint::Percentage(32), // Top-right: playback options
+                ])
+                .split(inner);
+
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
                     Constraint::Length(1), // Title
                     Constraint::Length(1), // Author
                     Constraint::Length(1), // Stats
-                    Constraint::Length(1), // Playback options
                     Constraint::Length(1), // Interaction (三连)
                     Constraint::Min(1),    // Description
                 ])
-                .split(inner);
+                .split(main_chunks[0]);
 
             // Title
             let title = Paragraph::new(info.title.clone()).style(
@@ -441,83 +448,6 @@ impl VideoDetailPage {
             ]));
             frame.render_widget(stats, chunks[2]);
 
-            // Playback options
-            let quality_label = PlaybackOptions::quality_label(self.playback.quality);
-            let hdr_label = if self.playback.prefer_hdr { "开" } else { "关" };
-            let hires_label = if self.playback.prefer_hires { "开" } else { "关" };
-            let hdr_sup = match self.hdr_supported {
-                Some(true) => Some("HDR✓"),
-                _ => None,
-            };
-            let hires_sup = match self.hires_supported {
-                Some(true) => Some("Hi-Res✓"),
-                _ => None,
-            };
-            let probing = if self.streams_probing { "检测中..." } else { "" };
-            let mut support_spans: Vec<Span> = Vec::new();
-            if let Some(h) = hdr_sup {
-                support_spans.push(Span::styled(
-                    h,
-                    Style::default()
-                        .fg(theme.fg_secondary)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                support_spans.push(Span::styled(" ", Style::default().fg(theme.fg_secondary)));
-            }
-            if let Some(h) = hires_sup {
-                support_spans.push(Span::styled(
-                    h,
-                    Style::default()
-                        .fg(theme.fg_secondary)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                support_spans.push(Span::styled(" ", Style::default().fg(theme.fg_secondary)));
-            }
-            let mut options = vec![
-                Span::styled("画质:", Style::default().fg(theme.fg_primary)),
-                Span::styled(
-                    format!(" {quality_label} "),
-                    Style::default()
-                        .fg(theme.bilibili_pink)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled("[m] ", Style::default().fg(theme.fg_secondary)),
-            ];
-            // Hide a toggle when the probe says the video has no such stream.
-            // While probing or when the probe failed (None), keep it visible
-            // to avoid hiding it by mistake.
-            let show_hdr = self.hdr_supported != Some(false);
-            let show_hires = self.hires_supported != Some(false);
-            if show_hdr {
-                options.push(Span::styled("HDR:", Style::default().fg(theme.fg_primary)));
-                options.push(Span::styled(
-                    format!(" {hdr_label} "),
-                    Style::default()
-                        .fg(theme.bilibili_pink)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                options.push(Span::styled("[d] ", Style::default().fg(theme.fg_secondary)));
-            }
-            if show_hires {
-                options.push(Span::styled("Hi-Res:", Style::default().fg(theme.fg_primary)));
-                options.push(Span::styled(
-                    format!(" {hires_label} "),
-                    Style::default()
-                        .fg(theme.bilibili_pink)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                options.push(Span::styled("[f]", Style::default().fg(theme.fg_secondary)));
-            }
-            if !support_spans.is_empty() {
-                options.push(Span::styled(" 支持: ", Style::default().fg(theme.fg_primary)));
-                options.extend(support_spans);
-            }
-            if !probing.is_empty() {
-                options.push(Span::styled(probing, Style::default().fg(theme.warning)));
-            }
-            let options = Paragraph::new(Line::from(options));
-            frame.render_widget(options, chunks[3]);
-
             // Interaction status (三连)
             let like_mark = if self.liked { "✓" } else { "✗" };
             let fav_mark = if self.favorited { "✓" } else { "✗" };
@@ -553,7 +483,7 @@ impl VideoDetailPage {
                 ));
             }
             let interaction = Paragraph::new(Line::from(interaction_spans));
-            frame.render_widget(interaction, chunks[4]);
+            frame.render_widget(interaction, chunks[3]);
 
             // Description
             if let Some(desc) = &info.desc {
@@ -566,14 +496,106 @@ impl VideoDetailPage {
                 let description = Paragraph::new(desc_text)
                     .style(Style::default().fg(theme.fg_secondary))
                     .wrap(Wrap { trim: true });
-                frame.render_widget(description, chunks[5]);
+                frame.render_widget(description, chunks[4]);
             }
+
+            // Playback options (top-right corner panel)
+            self.render_playback_options(frame, main_chunks[1], theme);
         } else {
             let loading = Paragraph::new("加载中...")
                 .style(Style::default().fg(theme.warning))
                 .alignment(Alignment::Center);
             frame.render_widget(loading, inner);
         }
+    }
+
+    fn render_playback_options(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme.border_subtle))
+            .title(Span::styled(
+                " ▶ 播放选项 ",
+                Style::default().fg(theme.bilibili_pink),
+            ));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let quality_label = PlaybackOptions::quality_label(self.playback.quality);
+        let hdr_label = if self.playback.prefer_hdr { "开" } else { "关" };
+        let hires_label = if self.playback.prefer_hires { "开" } else { "关" };
+        let hdr_sup = match self.hdr_supported {
+            Some(true) => Some("HDR✓"),
+            _ => None,
+        };
+        let hires_sup = match self.hires_supported {
+            Some(true) => Some("Hi-Res✓"),
+            _ => None,
+        };
+
+        let mut lines = vec![Line::from(vec![
+            Span::styled("画质:", Style::default().fg(theme.fg_primary)),
+            Span::styled(
+                format!(" {quality_label} "),
+                Style::default()
+                    .fg(theme.bilibili_pink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("[m]", Style::default().fg(theme.fg_secondary)),
+        ])];
+
+        // Hide a toggle when the probe says the video has no such stream.
+        // While probing or when the probe failed (None), keep it visible
+        // to avoid hiding it by mistake.
+        let show_hdr = self.hdr_supported != Some(false);
+        let show_hires = self.hires_supported != Some(false);
+        if show_hdr {
+            let mut spans = vec![
+                Span::styled("HDR:", Style::default().fg(theme.fg_primary)),
+                Span::styled(
+                    format!(" {hdr_label} "),
+                    Style::default()
+                        .fg(theme.bilibili_pink)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("[d]", Style::default().fg(theme.fg_secondary)),
+            ];
+            if let Some(h) = hdr_sup {
+                spans.push(Span::styled(
+                    format!(" {h}"),
+                    Style::default().fg(theme.fg_secondary),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+        if show_hires {
+            let mut spans = vec![
+                Span::styled("Hi-Res:", Style::default().fg(theme.fg_primary)),
+                Span::styled(
+                    format!(" {hires_label} "),
+                    Style::default()
+                        .fg(theme.bilibili_pink)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("[f]", Style::default().fg(theme.fg_secondary)),
+            ];
+            if let Some(h) = hires_sup {
+                spans.push(Span::styled(
+                    format!(" {h}"),
+                    Style::default().fg(theme.fg_secondary),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+        if self.streams_probing {
+            lines.push(Line::from(Span::styled(
+                "检测中...",
+                Style::default().fg(theme.warning),
+            )));
+        }
+
+        let options = Paragraph::new(lines);
+        frame.render_widget(options, inner);
     }
 
     fn render_comments(&self, frame: &mut Frame, area: Rect, theme: &Theme) {

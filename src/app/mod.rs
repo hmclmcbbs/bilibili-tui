@@ -256,7 +256,69 @@ async fn download_avatar(url: &str, picker: &Picker) -> Option<StatefulProtocol>
     let y = (img.height() - side) / 2;
     img = img.crop_imm(x, y, side, side);
     img = img.resize(96, 96, image::imageops::FilterType::Triangle);
+    // B 站很多头像 jpg 是白底，在深色终端里渲染出来像一块突兀的白色色块。
+    // 如果图片本身不带透明通道（jpg），把接近纯白的背景像素转成透明，
+    // 这样头像边缘以外不再有不透明的实色块。
+    if !has_alpha(&img) {
+        img = make_white_transparent(img);
+    }
     Some(picker.new_resize_protocol(img))
+}
+
+/// Check whether the image carries an alpha channel with any transparency.
+fn has_alpha(img: &image::DynamicImage) -> bool {
+    match img.color() {
+        image::ColorType::Rgba8 => {
+            let rgba = img.to_rgba8();
+            rgba.pixels().any(|p| p.0[3] < 250)
+        }
+        _ => false,
+    }
+}
+
+/// Turn near-white background pixels transparent while keeping the subject.
+fn make_white_transparent(img: image::DynamicImage) -> image::DynamicImage {
+    let mut rgba = img.to_rgba8();
+    let (w, h) = (rgba.width(), rgba.height());
+    // 边缘像素往往是纯背景；用它们估一个背景阈值，避免误伤内容里的白色。
+    let mut bg_sample = 0u64;
+    let mut bg_count = 0u64;
+    for x in 0..w {
+        for y in [0u32, h - 1] {
+            let p = rgba.get_pixel(x, y);
+            bg_sample += p.0[0] as u64 + p.0[1] as u64 + p.0[2] as u64;
+            bg_count += 3;
+        }
+    }
+    for y in 0..h {
+        for x in [0u32, w - 1] {
+            let p = rgba.get_pixel(x, y);
+            bg_sample += p.0[0] as u64 + p.0[1] as u64 + p.0[2] as u64;
+            bg_count += 3;
+        }
+    }
+    let avg = if bg_count > 0 {
+        bg_sample / bg_count
+    } else {
+        255
+    };
+    // 背景平均亮度低于 220 就当作深色背景（深色主题下不明显），只处理浅色背景。
+    if avg < 220 {
+        return image::DynamicImage::ImageRgba8(rgba);
+    }
+    // 白底：RGB 三个通道都接近背景色（宽松一点），alpha 置 0。
+    let threshold = (avg as i32 - 28).max(210) as u8;
+    for p in rgba.pixels_mut() {
+        let r = p.0[0] as i32;
+        let g = p.0[1] as i32;
+        let b = p.0[2] as i32;
+        let min_c = r.min(g).min(b);
+        let max_c = r.max(g).max(b);
+        if min_c >= threshold as i32 && (max_c - min_c) <= 24 {
+            p.0[3] = 0;
+        }
+    }
+    image::DynamicImage::ImageRgba8(rgba)
 }
 
 impl Default for App {

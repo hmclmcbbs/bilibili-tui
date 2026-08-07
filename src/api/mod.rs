@@ -13,6 +13,7 @@ pub mod live;
 pub mod live_client;
 pub mod live_danmaku_hub;
 pub mod live_ws;
+pub mod mall;
 pub mod msg;
 pub mod recommend;
 pub mod search;

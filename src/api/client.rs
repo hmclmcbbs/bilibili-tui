@@ -136,10 +136,18 @@ impl ApiClient {
     }
 
     pub fn set_credentials(&self, credentials: &Credentials) {
-        let cookie_str = format!(
+        let mut cookie_str = format!(
             "SESSDATA={}; bili_jct={}; DedeUserID={}",
             credentials.sessdata, credentials.bili_jct, credentials.dede_user_id
         );
+        // DedeUserID__ckMd5 是 mall / 会员购 等部分服务校验登录态必需的
+        // cookie（md5 校验）。缺少时 mall.bilibili.com 接口会返回
+        // "登陆错误" (83001002)。登录时拿到了就一并带上。
+        if let Some(ckmd5) = credentials.dede_user_id_ckmd5.as_ref() {
+            if !ckmd5.trim().is_empty() {
+                cookie_str.push_str(&format!("; DedeUserID__ckMd5={}", ckmd5.trim()));
+            }
+        }
         *self.cookies.write().expect("cookies lock poisoned") = Some(cookie_str);
     }
 
@@ -498,6 +506,18 @@ impl ApiClient {
             .and_then(|v| v.get("next_exp"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
+        let vip_status = data
+            .get("vipStatus")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+        let vip_type = data
+            .get("vipType")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0) as i32;
+        let vip_due_date = data
+            .get("vipDueDate")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
         Ok(Some(super::auth::CurrentUser {
             mid,
             uname,
@@ -506,6 +526,9 @@ impl ApiClient {
             current_min,
             current_exp,
             next_exp,
+            vip_status,
+            vip_type,
+            vip_due_date,
         }))
     }
 
@@ -1098,6 +1121,107 @@ impl ApiClient {
         }
         resp.data
             .ok_or_else(|| anyhow!("watch later response has no data"))
+    }
+
+    /// Fetch the current user's 会员购 (mall) order list.
+    ///
+    /// The mall ordercenter API does not use the standard `{code,message,data}`
+    /// envelope: it returns `{"success":bool,"data":{...}}` without a top-level
+    /// `code` field. Parse the raw JSON instead of going through `ApiResponse`.
+    pub async fn get_mall_orders(&self) -> Result<Vec<super::mall::MallOrder>> {
+        let url = "https://show.bilibili.com/api/ticket/ordercenter/list?page=1&pageSize=20&status=0";
+        #[derive(Debug, Deserialize)]
+        struct MallOrderListEnvelope {
+            #[serde(default)]
+            success: bool,
+            #[serde(default)]
+            data: Option<super::mall::MallOrderListResp>,
+        }
+        let json = self.get_json(url).await?;
+        let env: MallOrderListEnvelope = serde_json::from_value(json)?;
+        // 注意：该接口的 success 字段不可靠——实测未登录也返回 success=false，
+        // 但 data 里有完整订单列表。只有 data 完全缺失才视为失败。
+        if env.data.is_none() {
+            return Err(anyhow!(
+                "会员购接口未返回订单数据，可能未登录或登录已过期"
+            ));
+        }
+        Ok(env.data.map(|d| d.list.unwrap_or_default()).unwrap_or_default())
+    }
+
+    /// POST a JSON body with cookies attached (no csrf/form handling).
+    /// Used for APIs that accept a JSON body, e.g. the mall express-info
+    /// endpoint (`/mall-dayu/mall-trade/order/express/info`).
+    pub async fn post_json<T: for<'de> Deserialize<'de>>(
+        &self,
+        url: &str,
+        json_body: serde_json::Value,
+    ) -> Result<T> {
+        self.ensure_buvid_cookies().await?;
+        self.ensure_lsid_cookies();
+        let mut req = self.client.post(url);
+        {
+            let cookies = self.cookies.read().expect("cookies lock poisoned");
+            if let Some(ref cookie_str) = *cookies {
+                req = req.header(COOKIE, cookie_str.as_str());
+            }
+        }
+        req = req
+            .header(REFERER, "https://mall.bilibili.com/orderdetail.html")
+            .header(ORIGIN, "https://mall.bilibili.com")
+            .json(&json_body);
+        let resp = req.send().await?.error_for_status()?;
+        let api_resp: ApiResponse<T> = resp.json().await?;
+        if api_resp.code != 0 {
+            return Err(anyhow!(
+                "API error ({}): {}",
+                api_resp.code,
+                api_resp.message
+            ));
+        }
+        api_resp
+            .data
+            .ok_or_else(|| anyhow!("No data in JSON POST response"))
+    }
+
+    /// Fetch express summary (快递公司/单号/状态) for a 会员购 order.
+    ///
+    /// The H5 order-detail page calls `POST /mall-dayu/mall-trade/order/express/info`
+    /// with a JSON body `{"orderId": ...}`. The old GET endpoints either return
+    /// an HTML shell (express/info) or "登陆错误" (express/detail), so we use
+    /// the POST JSON call for both summary and trace.
+    pub async fn get_mall_express(
+        &self,
+        order_id: i64,
+    ) -> Result<Option<super::mall::MallExpressSummary>> {
+        let url = "https://mall.bilibili.com/mall-dayu/mall-trade/order/express/info";
+        let items: Vec<super::mall::MallExpressTrackItem> = self
+            .post_json(&url, serde_json::json!({ "orderId": order_id }))
+            .await?;
+        Ok(items.into_iter().next().map(|it| super::mall::MallExpressSummary {
+            com_v: it.com_v,
+            sno: it.sno,
+            state_v: it.state_v,
+            status_v: it.status_v,
+        }))
+    }
+
+    /// Fetch express trace (物流轨迹) for a 会员购 order.
+    pub async fn get_mall_express_track(
+        &self,
+        order_id: i64,
+    ) -> Result<Option<super::mall::MallExpress>> {
+        let url = "https://mall.bilibili.com/mall-dayu/mall-trade/order/express/info";
+        let items: Vec<super::mall::MallExpressTrackItem> = self
+            .post_json(&url, serde_json::json!({ "orderId": order_id }))
+            .await?;
+        Ok(items.into_iter().next().map(|it| super::mall::MallExpress {
+            com_v: it.com_v,
+            sno: it.sno,
+            state_v: it.state_v,
+            status_v: it.status_v,
+            traces: it.detail,
+        }))
     }
 
     /// Add a video (by aid) to the user's watch-later list.
@@ -2639,6 +2763,25 @@ impl ApiClient {
         Ok(())
     }
 
+    /// Rename a favorite folder by its `media_id`.
+    pub async fn rename_favorite_folder(&self, media_id: i64, title: &str) -> Result<()> {
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/v3/fav/folder/edit");
+        let form_data: Vec<(&str, String)> = vec![
+            ("media_id", media_id.to_string()),
+            ("title", title.to_string()),
+        ];
+        let resp: ApiResponse<serde_json::Value> =
+            self.post_with_wbi(&url, form_data).await?;
+        if resp.code != 0 {
+            return Err(anyhow!(
+                "重命名收藏夹失败 {}: {}",
+                resp.code,
+                resp.message
+            ));
+        }
+        Ok(())
+    }
+
     // ========== Danmaku Send API ==========
 
     /// Send a danmaku (弹幕) to a video.
@@ -3125,8 +3268,7 @@ mod live_contract_tests {
         }
 
         let watch_later = client.get_watch_later(1, 2).await.expect("watch later");
-        assert!(watch_later.count >= watch_later.list.len() as i64);
-        let collected = client
+        assert!(watch_later.count >= watch_later.list.len() as i64);        let collected = client
             .get_collected_folders(mid, 1, 2)
             .await
             .expect("collected folders");

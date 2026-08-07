@@ -32,19 +32,13 @@ impl App {
                 self.draw(frame);
             })?;
 
-            if self.playback.is_active() {
-                // While mpv is playing it owns the terminal input (it inherits
-                // our stdin). Do not poll/read keys so `q`, `Space` etc. reach
-                // mpv only. Background tasks (heartbeat, danmaku, playback
-                // events) still run below in tick().
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                self.tick().await;
-                continue;
-            }
-
             if event::poll(std::time::Duration::from_millis(100))? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        // mpv runs as an external window with --input-terminal=no,
+                        // so it never reads our stdin. The TUI can keep handling
+                        // keys normally even while playback is active; draining
+                        // keys here made the TUI feel frozen during playback.
                         self.handle_input(key.code, key.modifiers).await;
                     }
                     Event::Mouse(mouse) => match mouse.kind {
@@ -91,7 +85,8 @@ impl App {
             .unwrap_or(0);
         // avatar(5) + gap(2) + padding(4) + name
         let user_w = 5 + 2 + name_w + 4;
-        user_w.max(16).min(30)
+        // exp bar needs "经验 " + 16 blocks + " 100%" ≈ 24; add padding
+        user_w.max(26).min(30)
     }
 
     /// Get the content area excluding sidebar
@@ -219,6 +214,7 @@ impl App {
             Page::BangumiDetail(page) => page.draw(frame, area, &self.theme, &self.keybindings),
             Page::Notifications(page) => page.draw(frame, area, &self.theme, &self.keybindings),
             Page::Up(page) => page.draw(frame, area, &self.theme, &self.keybindings),
+            Page::Mall(page) => page.draw(frame, area, &self.theme, &self.keybindings),
         }
     }
 
@@ -245,6 +241,7 @@ impl App {
             Page::BangumiDetail(page) => page.handle_input(key, keys),
             Page::Up(page) => page.handle_input(key, keys),
             Page::Notifications(page) => page.handle_input(key, keys),
+            Page::Mall(page) => page.handle_input_with_modifiers(key, modifiers, keys),
         };
 
         if let Some(action) = action {
@@ -271,6 +268,7 @@ impl App {
             Page::BangumiDetail(page) => page.handle_mouse(event, area),
             Page::Up(page) => page.handle_mouse(event, area),
             Page::Notifications(page) => page.handle_mouse(event, area),
+            Page::Mall(page) => page.handle_mouse(event, area),
         };
 
         if let Some(action) = action {
@@ -315,6 +313,31 @@ impl App {
                             .is_some_and(|(id, _)| *id == session_id) =>
                 {
                     self.auto_return_after_playback = None;
+                }
+                crate::domain::playback::PlaybackEvent::Started {
+                    session_id,
+                    bvid,
+                    cid,
+                    success,
+                    error,
+                } if accepted => {
+                    if !success {
+                        self.playback.last_error = error;
+                    }
+                    // Refresh stream support info on the detail page once the
+                    // player has started (mirrors the old inline behaviour).
+                    if let (Some(bvid), Some(cid)) = (bvid, cid)
+                        && matches!(&self.current_page, Page::VideoDetail(page) if page.bvid == bvid)
+                    {
+                        let req_id = self.next_request_id("video_detail");
+                        self.send_network_command(
+                            crate::application::network::NetworkCommand::ProbeVideoStreams {
+                                req_id,
+                                bvid,
+                                cid,
+                            },
+                        );
+                    }
                 }
                 _ => {}
             }

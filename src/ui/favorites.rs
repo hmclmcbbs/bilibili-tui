@@ -46,6 +46,7 @@ pub struct FavoritesPage {
 
 pub enum InputMode {
     CreateFolder,
+    RenameFolder,
 }
 
 impl FavoritesPage {
@@ -427,8 +428,11 @@ impl Component for FavoritesPage {
             .split(chunks[1]);
         let header_title = if self.filter_input_mode {
             format!("筛选收藏: {}_", self.filter_input)
-        } else if self.input_mode.is_some() {
-            format!("输入收藏夹名称: {}_", self.input_text)
+        } else if let Some(mode) = &self.input_mode {
+            match mode {
+                InputMode::CreateFolder => format!("输入收藏夹名称: {}_", self.input_text),
+                InputMode::RenameFolder => format!("重命名收藏夹: {}_", self.input_text),
+            }
         } else if let Some(ref msg) = self.message {
             msg.clone()
         } else {
@@ -554,6 +558,21 @@ impl Component for FavoritesPage {
                                 privacy: 0,
                             });
                         }
+                    } else if let Some(InputMode::RenameFolder) = &self.input_mode {
+                        let title = self.input_text.trim().to_string();
+                        self.input_mode = None;
+                        self.input_text.clear();
+                        if !title.is_empty() {
+                            let sources = self.sources();
+                            if let Some(source) = sources.get(self.selected_source) {
+                                if let FavoriteSource::Created { media_id, .. } = source {
+                                    return Some(AppAction::RenameFavoriteFolder {
+                                        media_id: *media_id,
+                                        title,
+                                    });
+                                }
+                            }
+                        }
                     }
                     return Some(AppAction::None);
                 }
@@ -614,6 +633,16 @@ impl Component for FavoritesPage {
             } else if key == KeyCode::Char('n') {
                 self.input_mode = Some(InputMode::CreateFolder);
                 self.input_text.clear();
+                return Some(AppAction::None);
+            } else if key == KeyCode::Char('r') {
+                // Rename the selected created folder
+                if let Some(source) = sources.get(self.selected_source) {
+                    if let FavoriteSource::Created { title, .. } = source {
+                        self.input_mode = Some(InputMode::RenameFolder);
+                        self.input_text = title.clone();
+                        return Some(AppAction::None);
+                    }
+                }
                 return Some(AppAction::None);
         } else if key == KeyCode::Char('x') {
             // Delete the selected created folder

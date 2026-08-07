@@ -97,6 +97,13 @@ pub enum PlaybackEvent {
         index: usize,
         bvid: String,
     },
+    Started {
+        session_id: u64,
+        bvid: Option<String>,
+        cid: Option<i64>,
+        success: bool,
+        error: Option<String>,
+    },
     Finished {
         session_id: u64,
         bvid: Option<String>,
@@ -149,6 +156,7 @@ impl PlaybackState {
     pub fn apply_event(&mut self, event: &PlaybackEvent) -> bool {
         let session_id = match event {
             PlaybackEvent::ItemChanged { session_id, .. }
+            | PlaybackEvent::Started { session_id, .. }
             | PlaybackEvent::Finished { session_id, .. }
             | PlaybackEvent::Failed { session_id, .. } => *session_id,
         };
@@ -166,6 +174,16 @@ impl PlaybackState {
                 } else {
                     self.queue.iter().position(|item| item.bvid == *bvid)
                 };
+            }
+            PlaybackEvent::Started { success, error, .. } => {
+                if *success {
+                    self.status = PlaybackStatus::Playing;
+                    self.last_error = None;
+                } else {
+                    self.status = PlaybackStatus::Failed;
+                    self.last_error = error.clone();
+                    self.session_id = None;
+                }
             }
             PlaybackEvent::Finished { .. } => {
                 self.status = PlaybackStatus::Finished;

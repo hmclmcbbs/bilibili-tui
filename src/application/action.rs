@@ -47,6 +47,20 @@ pub enum AppAction {
     SwitchToLogin,
     /// Switch to settings page
     SwitchToSettings,
+    /// Open an external URL with the system browser (xdg-open).
+    OpenExternalUrl(String),
+    /// Switch to the 会员购 (Bilibili mall) page.
+    SwitchToMall,
+    /// Refresh the mall order list.
+    RefreshMall,
+    /// Load express info for a mall order.
+    LoadMallExpress {
+        order_id: i64,
+    },
+    /// Load express trace (物流轨迹) for a mall order.
+    LoadMallExpressTrack {
+        order_id: i64,
+    },
     /// Switch to history page
     SwitchToHistory,
     /// Login was successful with credentials
@@ -237,6 +251,11 @@ pub enum AppAction {
     },
     /// Delete a favorite folder by media_id
     DeleteFavoriteFolder(i64),
+    /// Rename a favorite folder (media_id, new title)
+    RenameFavoriteFolder {
+        media_id: i64,
+        title: String,
+    },
     /// Add or remove a video from a specific favorite folder (aid, media_id, add)
     FavoriteVideoInFolder {
         aid: i64,

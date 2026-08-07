@@ -205,6 +205,9 @@ pub async fn play_video(
     };
 
     cmd.arg("--force-window=immediate");
+    // The TUI owns the terminal; mpv's window receives keyboard via the
+    // display server. Never let mpv read our stdin.
+    cmd.arg("--input-terminal=no");
     // Use MPV's low-latency profile for Bilibili VOD playback.
     cmd.arg("--profile=low-latency");
     // Resume from the last watch position when the user has a saved progress.
@@ -802,6 +805,8 @@ pub async fn play_playlist(
     cmd.stderr(Stdio::piped());
     cmd.arg("--idle=yes");
     cmd.arg("--force-window=immediate");
+    cmd.arg("--input-terminal=no");
+    cmd.arg("--input-terminal=no");
     apply_mpv_hwdec(&mut cmd);
     cmd.arg("--msg-level=ffmpeg=error,vd=warn");
     cmd.arg("--ytdl=no");
@@ -1330,6 +1335,7 @@ pub async fn play_bangumi_episode(
     };
 
     cmd.arg("--force-window=immediate");
+    cmd.arg("--input-terminal=no");
     apply_mpv_hwdec(&mut cmd);
     cmd.arg("--script-opts-append=double_video_fps=no");
     cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
