@@ -1503,9 +1503,9 @@ fn format_count(count: i64) -> String {
 /// terminal-graphics protocol. Returns `None` on any failure (the caller
 /// falls back to a placeholder).
 async fn download_avatar(url: &str, picker: &Arc<Picker>) -> Option<StatefulProtocol> {
-    let response = reqwest::get(url).await.ok()?;
-    let bytes = response.bytes().await.ok()?;
-    let mut img: DynamicImage = image::load_from_memory(&bytes).ok()?;
+    let mut img: DynamicImage = crate::infrastructure::image_cache::instance()
+        .get(url)
+        .await?;
     let side = img.width().min(img.height());
     let x = (img.width() - side) / 2;
     let y = (img.height() - side) / 2;
@@ -1517,9 +1517,9 @@ async fn download_avatar(url: &str, picker: &Arc<Picker>) -> Option<StatefulProt
 /// Download a video-share cover, keeping the original aspect ratio but
 /// capping the longest side so the terminal protocol stays small.
 async fn download_cover(url: &str, picker: &Arc<Picker>) -> Option<StatefulProtocol> {
-    let response = reqwest::get(url).await.ok()?;
-    let bytes = response.bytes().await.ok()?;
-    let img: DynamicImage = image::load_from_memory(&bytes).ok()?;
+    let img: DynamicImage = crate::infrastructure::image_cache::instance()
+        .get(url)
+        .await?;
     let max_side = 256u32;
     let (w, h) = (img.width(), img.height());
     let scale = max_side as f32 / w.max(h).max(1) as f32;

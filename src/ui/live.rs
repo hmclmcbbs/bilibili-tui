@@ -48,10 +48,10 @@ pub struct LivePage {
 }
 
 impl LivePage {
-    /// 默认列数
-    const DEFAULT_COLUMNS: usize = 3;
-    /// 卡片高度
-    const CARD_HEIGHT: u16 = 10;
+    /// 默认列数（列表布局，单列）
+    const DEFAULT_COLUMNS: usize = 1;
+    /// 卡片高度（列表卡片比网格卡片更高）
+    const CARD_HEIGHT: u16 = 12;
     /// 预取缓冲行数（可见区域之外额外下载）
     const PREFETCH_BUFFER_ROWS: usize = 4;
     /// 初始可见行数回退值（首次渲染前使用）
@@ -259,9 +259,7 @@ impl LivePage {
     }
 
     async fn download_image(url: &str) -> Option<DynamicImage> {
-        let response = reqwest::get(url).await.ok()?;
-        let bytes = response.bytes().await.ok()?;
-        image::load_from_memory(&bytes).ok()
+        crate::infrastructure::image_cache::instance().get(url).await
     }
 
     fn visible_rows(&self, height: u16) -> usize {
@@ -610,13 +608,11 @@ impl LivePage {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // Split into cover and info
+        // List layout: cover on the left (24 wide, like collection cards),
+        // info on the right.
         let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(4), // Cover
-                Constraint::Min(2),    // Info
-            ])
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(24), Constraint::Min(20)])
             .split(inner);
 
         // Render cover image or placeholder
@@ -631,7 +627,15 @@ impl LivePage {
         }
 
         // Info section
-        let title = room.title.chars().take(20).collect::<String>();
+        let max_w = chunks[1].width.saturating_sub(1) as usize;
+        let truncate = |s: &str| -> String {
+            if s.chars().count() > max_w {
+                s.chars().take(max_w.saturating_sub(1)).collect::<String>() + "…"
+            } else {
+                s.to_string()
+            }
+        };
+        let title = truncate(&room.title);
         let title_style = if is_selected {
             Style::default()
                 .fg(theme.bilibili_pink)
@@ -640,26 +644,28 @@ impl LivePage {
             Style::default().fg(theme.fg_primary)
         };
 
-        // Format online count
-        let online_text = if room.online >= 10000 {
-            format!("👁 {:.1}万", room.online as f64 / 10000.0)
-        } else {
-            format!("👁 {}", room.online)
-        };
+        // 短横线分隔的元信息（类似合集卡片）
+        let meta = format!(
+            "{} | {} | {}",
+            room.uname,
+            room.area_v2_name,
+            if room.online >= 10000 {
+                format!("{:.1}万人在线", room.online as f64 / 10000.0)
+            } else {
+                format!("{}人在线", room.online)
+            }
+        );
 
         let info_lines = vec![
             Line::from(Span::styled(title, title_style)),
             Line::from(vec![Span::styled(
-                &room.uname,
+                truncate(&room.uname),
                 Style::default().fg(theme.fg_secondary),
             )]),
-            Line::from(vec![
-                Span::styled(
-                    format!("{} | ", room.area_v2_name),
-                    Style::default().fg(theme.fg_muted),
-                ),
-                Span::styled(online_text, Style::default().fg(theme.fg_accent)),
-            ]),
+            Line::from(vec![Span::styled(
+                meta,
+                Style::default().fg(theme.fg_muted),
+            )]),
         ];
 
         let info = Paragraph::new(info_lines).wrap(Wrap { trim: true });

@@ -12,6 +12,7 @@ use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::io::Write;
 use std::sync::RwLock;
+use std::time::{Duration, Instant};
 
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
@@ -51,6 +52,10 @@ pub struct ApiClient {
     client: Client,
     cookies: RwLock<Option<String>>,
     wbi_keys: RwLock<Option<WbiKeys>>,
+    /// Short-TTL cache for read-only public endpoints (hotwords, popular feed,
+    /// ranking). Keyed by URL so the same screen loaded repeatedly (e.g. after
+    /// returning from a video) does not re-hit the network.
+    api_cache: RwLock<HashMap<String, (Instant, serde_json::Value)>>,
 }
 
 impl ApiClient {
@@ -116,6 +121,7 @@ impl ApiClient {
                 .expect("Failed to create HTTP client"),
             cookies: RwLock::new(None),
             wbi_keys: RwLock::new(None),
+            api_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -153,6 +159,13 @@ impl ApiClient {
 
     pub fn clear_credentials(&self) {
         *self.cookies.write().expect("cookies lock poisoned") = None;
+        self.clear_api_cache();
+    }
+
+    /// Drop every cached API response. Called when the login state changes so
+    /// a cached response for a previous account is never reused.
+    pub fn clear_api_cache(&self) {
+        self.api_cache.write().expect("api cache lock poisoned").clear();
     }
 
     fn build_url(&self, domain: BilibiliApiDomain, endpoint: &str) -> String {
@@ -236,6 +249,34 @@ impl ApiClient {
         }
         let resp = req.send().await?.error_for_status()?;
         let value: serde_json::Value = resp.json().await?;
+        Ok(value)
+    }
+
+    /// GET raw JSON with a short in-memory TTL cache. Intended for read-only
+    /// public endpoints (hotwords, popular feed, ranking) whose payload does
+    /// not change within a minute and which are re-requested whenever the user
+    /// navigates back to the same screen. A cache hit skips the network round
+    /// trip entirely; the value is shared by reference until it expires.
+    pub async fn get_json_cached(
+        &self,
+        url: &str,
+        ttl: Duration,
+    ) -> Result<serde_json::Value> {
+        let now = Instant::now();
+        {
+            let cache = self.api_cache.read().expect("api cache lock poisoned");
+            if let Some((at, value)) = cache.get(url) {
+                if now.duration_since(*at) < ttl {
+                    return Ok(value.clone());
+                }
+            }
+        }
+
+        let value = self.get_json(url).await?;
+        self.api_cache
+            .write()
+            .expect("api cache lock poisoned")
+            .insert(url.to_string(), (now, value.clone()));
         Ok(value)
     }
 
@@ -605,13 +646,11 @@ impl ApiClient {
             page.max(1),
             page_size.max(1)
         );
-
-        let mut req = self.client.get(&url);
-        if let Some(ref cookies) = *self.cookies.read().expect("cookies lock poisoned") {
-            req = req.header(COOKIE, cookies.as_str());
-        }
-
-        let value: serde_json::Value = req.send().await?.error_for_status()?.json().await?;
+        // Popular feed is stable for a minute; cache it so browsing back and
+        // forth between home and a video does not re-fetch the same list.
+        let value = self
+            .get_json_cached(&url, Duration::from_secs(60))
+            .await?;
         let code = value
             .get("code")
             .and_then(|v| v.as_i64())
@@ -696,11 +735,15 @@ impl ApiClient {
             HomeFeed::MustWatch => "/x/web-interface/popular/precious".to_string(),
         };
         let url = format!("{}{}", BilibiliApiDomain::Main.as_str(), path);
-        let value: ApiResponse<serde_json::Value> = self.get(&url).await?;
+        // Ranking / must-watch lists are stable for a minute; cache them so
+        // switching between sections does not re-fetch the same list.
+        let value = self
+            .get_json_cached(&url, Duration::from_secs(60))
+            .await?;
+        Self::check_code(&value)?;
         let list = value
-            .data
-            .as_ref()
-            .and_then(|data| data.get("list"))
+            .get("data")
+            .and_then(|d| d.get("list"))
             .and_then(|list| list.as_array())
             .cloned()
             .unwrap_or_default();
@@ -1380,15 +1423,12 @@ impl ApiClient {
     /// Fetch hot search keywords (web)
     pub async fn get_hot_search(&self) -> Result<Vec<super::search::HotwordItem>> {
         const HOTWORD_URL: &str = "https://s.search.bilibili.com/main/hotword";
-
-        let mut req = self.client.get(HOTWORD_URL);
-
-        if let Some(ref cookies) = *self.cookies.read().expect("cookies lock poisoned") {
-            req = req.header(COOKIE, cookies.as_str());
-        }
-
-        let resp = req.send().await?.error_for_status()?;
-        let data: super::search::HotwordResponse = resp.json().await?;
+        // Hotwords only change every few minutes; a 5-minute TTL prevents the
+        // search page from hammering this endpoint on every open/close.
+        let value = self
+            .get_json_cached(HOTWORD_URL, Duration::from_secs(300))
+            .await?;
+        let data: super::search::HotwordResponse = serde_json::from_value(value)?;
 
         if let Some(code) = data.code
             && code != 0

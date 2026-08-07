@@ -248,9 +248,9 @@ impl App {
 /// Download a user avatar, crop it to a centered square and build a
 /// terminal-graphics protocol. Returns `None` on any failure.
 async fn download_avatar(url: &str, picker: &Picker) -> Option<StatefulProtocol> {
-    let response = reqwest::get(url).await.ok()?;
-    let bytes = response.bytes().await.ok()?;
-    let mut img: image::DynamicImage = image::load_from_memory(&bytes).ok()?;
+    let mut img: image::DynamicImage = crate::infrastructure::image_cache::instance()
+        .get(url)
+        .await?;
     let side = img.width().min(img.height());
     let x = (img.width() - side) / 2;
     let y = (img.height() - side) / 2;

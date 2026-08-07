@@ -332,9 +332,7 @@ impl HistoryPage {
     }
 
     async fn download_image(url: &str) -> Option<DynamicImage> {
-        let response = reqwest::get(url).await.ok()?;
-        let bytes = response.bytes().await.ok()?;
-        image::load_from_memory(&bytes).ok()
+        crate::infrastructure::image_cache::instance().get(url).await
     }
 
     fn visible_rows(&self, height: u16) -> usize {

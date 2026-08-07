@@ -218,9 +218,9 @@ impl MallPage {
         } else {
             url.to_string()
         };
-        let response = reqwest::get(&full_url).await.ok()?;
-        let bytes = response.bytes().await.ok()?;
-        let img: DynamicImage = image::load_from_memory(&bytes).ok()?;
+        let img: DynamicImage = crate::infrastructure::image_cache::instance()
+            .get(&full_url)
+            .await?;
         let max_side = 256u32;
         let (w, h) = (img.width(), img.height());
         let scale = max_side as f32 / w.max(h).max(1) as f32;
