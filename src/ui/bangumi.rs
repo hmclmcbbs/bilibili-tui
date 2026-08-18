@@ -253,6 +253,8 @@ impl BangumiPage {
                 ),
                 (keys.confirm.clone(), "详情".into(), theme.success),
                 (keys.refresh.clone(), "刷新".into(), theme.info),
+                (keys.next_theme.clone(), "主题".into(), theme.info),
+                (keys.open_settings.clone(), "设置".into(), theme.info),
             ],
         );
         if !self.follow_mode {

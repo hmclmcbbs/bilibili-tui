@@ -131,6 +131,7 @@ pub enum NetworkCommand {
         req_id: u64,
         mid: i64,
         series_id: i64,
+        is_series: bool,
         page: i32,
     },
     BuildUpPlaylist {
@@ -362,6 +363,7 @@ pub enum NetworkEvent {
         req_id: u64,
         mid: i64,
         series_id: i64,
+        is_series: bool,
         page: i32,
         data: crate::api::space::SeriesArchivesData,
     },
@@ -756,22 +758,24 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 Err(error) => failed(req_id, "series_list", error),
             }
         }
-        NetworkCommand::LoadSeriesArchives {
-            req_id,
-            mid,
-            series_id,
-            page,
-        } => match api_client
-            .get_series_archives(mid, series_id, page, 30)
-            .await
-        {
-            Ok(data) => NetworkEvent::SeriesArchivesLoaded {
+            NetworkCommand::LoadSeriesArchives {
                 req_id,
                 mid,
                 series_id,
+                is_series,
                 page,
-                data,
-            },
+            } => match api_client
+                .get_series_archives(mid, series_id, is_series, page, 30)
+                .await
+            {
+                Ok(data) => NetworkEvent::SeriesArchivesLoaded {
+                    req_id,
+                    mid,
+                    series_id,
+                    is_series,
+                    page,
+                    data,
+                },
             Err(error) => failed(req_id, "series_archives", error),
         },
         NetworkCommand::BuildUpPlaylist {

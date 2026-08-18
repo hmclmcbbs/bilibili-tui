@@ -678,12 +678,14 @@ impl App {
                     } else {
                         // 打开具体合集
                         let mid = page.mid;
+                        let is_series = page.pending_series_is_series;
                         let req_id = self.next_request_id("series_archives");
                         self.send_network_command(
                             network::NetworkCommand::LoadSeriesArchives {
                                 req_id,
                                 mid,
                                 series_id,
+                                is_series,
                                 page: 1,
                             },
                         );
@@ -697,12 +699,14 @@ impl App {
                     let next_page = page.series_page + 1;
                     page.loading_more = true;
                     let mid = page.mid;
+                    let is_series = page.active_series_is_series;
                     let req_id = self.next_request_id("series_archives");
                     self.send_network_command(
                         network::NetworkCommand::LoadSeriesArchives {
                             req_id,
                             mid,
                             series_id,
+                            is_series,
                             page: next_page,
                         },
                     );

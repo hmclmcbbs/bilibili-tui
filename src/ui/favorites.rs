@@ -489,6 +489,7 @@ impl Component for FavoritesPage {
                     ("←/→".into(), "收藏/视频".into(), theme.fg_accent),
                     (keys.confirm.clone(), "打开".into(), theme.success),
                     ("n".into(), "新建收藏夹".into(), theme.info),
+                    ("r".into(), "重命名".into(), theme.info),
                     ("x".into(), "删除收藏夹".into(), theme.error),
                     ("Del".into(), "移除视频".into(), theme.warning),
                     ("/".into(), "搜索".into(), theme.info),

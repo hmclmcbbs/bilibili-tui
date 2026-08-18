@@ -430,6 +430,7 @@ impl LiveDetailPage {
                     "返回".into(),
                     theme.info,
                 ),
+                (keys.next_theme.clone(), "主题".into(), theme.info),
             ];
             if let Some(ref fb) = self.feedback {
                 hint_items.push(("".to_string(), format!(" | {fb}"), theme.fg_accent));

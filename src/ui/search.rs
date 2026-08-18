@@ -211,7 +211,15 @@ impl SearchPage {
     pub fn wants_left_to_sidebar(&self) -> bool {
         // 输入模式但还没有任何字符时（正在浏览搜索历史/热搜下拉栏），
         // h 键应该回到侧边栏而不是当作字符输入。
-        if self.input_mode && !self.query.is_empty() {
+        // 输入模式：有字符时 h 永远作为字符；无字符时仅当下拉栏有可选项才回侧边栏，
+        // 否则 h 作为普通字符输入（方便输入含 h 的搜索词）。
+        if self.input_mode {
+            if !self.query.is_empty() {
+                return false;
+            }
+            if self.show_hot_list && self.picker_has_items() {
+                return true;
+            }
             return false;
         }
         if self.show_hot_list {
@@ -224,6 +232,14 @@ impl SearchPage {
         }
     }
 
+    /// 下拉栏当前是否有可导航的项（历史或热搜）。
+    fn picker_has_items(&self) -> bool {
+        if self.picker_focus == PickerFocus::History {
+            !self.history.is_empty()
+        } else {
+            !self.hotwords.is_empty()
+        }
+    }
     pub fn set_results(&mut self, results: Vec<SearchVideoItem>, total: i32) {
         self.grid.clear();
         for item in results {
@@ -941,20 +957,19 @@ impl Component for SearchPage {
                 [
                     (
                         format!(
-                            "{}/{}",
+                            "{}/{}, {}/{}",
                             keys.get_arrow_keys_display(),
-                            keys.get_nav_keys_display()
+                            keys.get_nav_keys_display(),
+                            keys.page_up,
+                            keys.page_down
                         ),
-                        "导航".into(),
-                        theme.fg_accent,
-                    ),
-                    (
-                        format!("{}/{}", keys.page_up, keys.page_down),
-                        "翻页".into(),
+                        "导航/翻页".into(),
                         theme.fg_accent,
                     ),
                     (keys.confirm.clone(), "详情".into(), theme.success),
                     (keys.search_focus.clone(), "搜索".into(), theme.info),
+                    ("1/2".into(), "视频/UP".into(), theme.fg_accent),
+                    ("x".into(), "清历史".into(), theme.fg_accent),
                     (keys.nav_next_page.clone(), "切换".into(), theme.info),
                 ],
             )
@@ -993,8 +1008,8 @@ impl Component for SearchPage {
         if self.input_mode {
             match key {
                 KeyCode::Char(c) => {
-                    // 下拉栏可见且还没输入任何字符时，j/k 作为导航键
-                    if self.show_hot_list && self.query.is_empty() {
+                    // 下拉栏可见且还没输入任何字符时，j/k 作为导航键（仅当下拉栏有可选项）
+                    if self.show_hot_list && self.query.is_empty() && self.picker_has_items() {
                         if c == 'j' {
                             self.picker_nav(1);
                             return Some(AppAction::None);

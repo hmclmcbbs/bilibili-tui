@@ -49,7 +49,9 @@ pub struct UpPage {
     pub series_selected: usize,
     pub series_list_loaded: bool,
     pub pending_series: Option<i64>,
+    pub pending_series_is_series: bool,
     pub active_series: Option<i64>,
+    pub active_series_is_series: bool,
     pub series_videos: VideoCardGrid,
     pub series_page: i32,
     pub series_has_more: bool,
@@ -89,7 +91,9 @@ impl UpPage {
             series_selected: 0,
             series_list_loaded: false,
             pending_series: None,
+            pending_series_is_series: false,
             active_series: None,
+            active_series_is_series: false,
             series_videos: VideoCardGrid::new(),
             series_page: 1,
             series_has_more: false,
@@ -242,11 +246,18 @@ impl UpPage {
         self.error = None;
     }
 
-    pub fn apply_series_archives(&mut self, series_id: i64, page: i32, data: SeriesArchivesData) {
+    pub fn apply_series_archives(
+        &mut self,
+        series_id: i64,
+        is_series: bool,
+        page: i32,
+        data: SeriesArchivesData,
+    ) {
         if page == 1 || self.active_series != Some(series_id) {
             self.series_videos.clear();
         }
         self.active_series = Some(series_id);
+        self.active_series_is_series = is_series;
         self.pending_series = None;
         self.series_page = page;
         let total: i64 = data
@@ -618,9 +629,24 @@ impl Component for UpPage {
                 && self.series_cards.selected_index < self.series_list.len()
             {
                 if let Some(series) = self.series_list.get(self.series_cards.selected_index) {
-                    if let Some(id) = series.meta.as_ref().and_then(|m| m.season_id) {
+                    // Season-style collections use meta.season_id; user-created
+                    // series use meta.series_id (fall back to the plain id).
+                    let season_id = series.meta.as_ref().and_then(|m| m.season_id);
+                    let series_id = series
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.series_id)
+                        .or(series.id);
+                    if let Some(id) = season_id {
                         self.loading = true;
                         self.pending_series = Some(id);
+                        self.pending_series_is_series = false;
+                        return Some(AppAction::OpenSeriesFolder(id));
+                    }
+                    if let Some(id) = series_id {
+                        self.loading = true;
+                        self.pending_series = Some(id);
+                        self.pending_series_is_series = true;
                         return Some(AppAction::OpenSeriesFolder(id));
                     }
                 }

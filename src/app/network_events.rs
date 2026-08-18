@@ -508,6 +508,7 @@ impl App {
                 req_id,
                 mid,
                 series_id,
+                is_series,
                 page: loaded_page,
                 data,
             } => {
@@ -519,7 +520,7 @@ impl App {
                     && (page.pending_series == Some(series_id)
                         || page.active_series == Some(series_id))
                 {
-                    page.apply_series_archives(series_id, loaded_page, data);
+                    page.apply_series_archives(series_id, is_series, loaded_page, data);
                 }
             }
             network::NetworkEvent::PlaylistLoaded {

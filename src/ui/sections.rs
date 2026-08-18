@@ -218,11 +218,16 @@ impl Component for SectionPage {
                 theme,
                 [
                     (
-                        format!("{}/{}", keys.nav_up, keys.nav_down),
-                        "选择".into(),
+                        format!("{}/{}, {}/{}", keys.nav_up, keys.nav_down, keys.page_up, keys.page_down),
+                        "选择/翻页".into(),
                         theme.fg_accent,
                     ),
                     (keys.confirm.clone(), "打开/切换".into(), theme.success),
+                    (
+                        format!("{} / {}", keys.nav_next_page, keys.nav_prev_page),
+                        "切侧边栏".into(),
+                        theme.fg_accent,
+                    ),
                     (keys.back.clone(), "返回".into(), theme.info),
                     (keys.refresh.clone(), "刷新".into(), theme.info),
                 ],

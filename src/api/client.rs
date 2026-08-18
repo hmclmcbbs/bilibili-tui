@@ -1116,14 +1116,24 @@ impl ApiClient {
     pub async fn get_series_archives(
         &self,
         mid: i64,
-        season_id: i64,
+        folder_id: i64,
+        is_series: bool,
         page: i32,
         page_size: i32,
     ) -> Result<super::space::SeriesArchivesData> {
-        let url = format!(
-            "{}/x/polymer/web-space/seasons_archives_list?mid={mid}&season_id={season_id}&page_num={page}&page_size={page_size}",
-            BilibiliApiDomain::Main.as_str()
-        );
+        let url = if is_series {
+            // User-created series (用户自建系列)
+            format!(
+                "{}/x/series/archives?mid={mid}&series_id={folder_id}&page_num={page}&page_size={page_size}",
+                BilibiliApiDomain::Main.as_str()
+            )
+        } else {
+            // Season collection (合集)
+            format!(
+                "{}/x/polymer/web-space/seasons_archives_list?mid={mid}&season_id={folder_id}&page_num={page}&page_size={page_size}",
+                BilibiliApiDomain::Main.as_str()
+            )
+        };
         let resp: ApiResponse<super::space::SeriesArchivesData> = self.get(&url).await?;
         if resp.code != 0 {
             return Err(anyhow!(
@@ -3051,6 +3061,7 @@ impl ApiClient {
                 id: None,
                 meta: Some(super::space::SeriesMeta {
                     season_id: Some(season_id),
+                    series_id: None,
                     name: Some(title.clone()),
                     title: Some(title),
                     description,

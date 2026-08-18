@@ -119,6 +119,8 @@ pub struct SeriesInfo {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SeriesMeta {
     pub season_id: Option<i64>,
+    #[serde(default)]
+    pub series_id: Option<i64>,
     pub name: Option<String>,
     pub title: Option<String>,
     pub description: Option<String>,

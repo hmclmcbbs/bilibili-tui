@@ -392,6 +392,12 @@ impl Component for BangumiDetailPage {
                     "滚动".into(),
                     theme.fg_accent,
                 ),
+                (
+                    format!("{} / {}", keys.nav_next_page, keys.nav_prev_page),
+                    "切侧边栏".into(),
+                    theme.fg_accent,
+                ),
+                ("f".into(), "追番/取消".into(), theme.info),
                 (keys.confirm.clone(), "播放".into(), theme.success),
                 (keys.back.clone(), "返回".into(), theme.info),
             ],
@@ -444,58 +450,6 @@ impl Component for BangumiDetailPage {
         }
 
         Some(AppAction::None)
-    }
-
-    fn handle_mouse(&mut self, event: MouseEvent, area: Rect) -> Option<AppAction> {
-        let MouseEvent { kind, row, .. } = event;
-
-        // Only process in episode list area (lower chunk)
-        let info_height = 6;
-        let list_top = area.y + info_height + 1; // +1 for border
-        if row < list_top {
-            return None;
-        }
-
-        let rel_row = (row - list_top) as usize + self.episode_scroll;
-
-        // Map list row to episode index (skip section headers)
-        let mut list_idx = 0;
-        let mut last_section = String::new();
-        let mut target_ep_idx = None;
-
-        for (ep_idx, fe) in self.flat_episodes.iter().enumerate() {
-            if fe.section_title != last_section {
-                last_section = fe.section_title.clone();
-                list_idx += 1;
-            }
-            if list_idx == rel_row {
-                target_ep_idx = Some(ep_idx);
-                break;
-            }
-            list_idx += 1;
-        }
-
-        if let Some(idx) = target_ep_idx {
-            self.selected_episode = idx;
-
-            if kind == MouseEventKind::Down(MouseButton::Left) {
-                let now = Instant::now();
-                let is_double = self
-                    .last_click_time
-                    .and_then(|t| now.duration_since(t).as_millis().le(&500).then_some(()))
-                    .is_some()
-                    && self.last_click_index == Some(idx);
-
-                self.last_click_time = Some(now);
-                self.last_click_index = Some(idx);
-
-                if is_double {
-                    return self.selected_action();
-                }
-            }
-        }
-
-        None
     }
 }
 

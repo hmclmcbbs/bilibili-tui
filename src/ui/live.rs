@@ -401,6 +401,7 @@ impl Component for LivePage {
                 ),
                 (keys.refresh.clone(), "刷新".into(), theme.info),
                 (keys.next_theme.clone(), "切换主题".into(), theme.info),
+                (keys.open_settings.clone(), "设置".into(), theme.info),
             ],
         ))
         .alignment(Alignment::Center);

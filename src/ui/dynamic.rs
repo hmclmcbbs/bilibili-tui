@@ -503,7 +503,6 @@ impl Component for DynamicPage {
                 }),
                 input_inner,
             );
-        } else {
             let mut items: Vec<(String, String, Color)> = vec![
                 ("↑/↓".into(), "选择动态".into(), theme.fg_accent),
                 (
@@ -514,6 +513,7 @@ impl Component for DynamicPage {
                 ("←/→".into(), "切换面板".into(), theme.fg_accent),
                 ("/".into(), "搜索".into(), theme.bilibili_pink),
                 ("w".into(), "发布动态".into(), theme.bilibili_pink),
+                ("u".into(), "UP主页".into(), theme.fg_accent),
                 (keys.tab_1.clone(), "切标签".into(), theme.info),
                 (keys.confirm.clone(), "详情".into(), theme.success),
                 (keys.refresh.clone(), "刷新".into(), theme.info),

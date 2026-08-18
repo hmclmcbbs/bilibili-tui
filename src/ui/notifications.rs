@@ -843,9 +843,9 @@ impl Component for NotificationsPage {
             theme,
             [
                 ("↑/↓".to_string(), "移动".to_string(), theme.info),
+                ("/".to_string(), "输入".to_string(), theme.bilibili_pink),
+                ("o".to_string(), "打开视频".to_string(), theme.success),
                 ("1-4".to_string(), "切换标签".to_string(), theme.info),
-                ("Tab".to_string(), "切换侧边栏".to_string(), theme.info),
-                ("Enter".to_string(), "打开".to_string(), theme.success),
                 ("R".to_string(), "刷新".to_string(), theme.info),
                 (keys.back.to_string(), "返回".to_string(), theme.warning),
             ],

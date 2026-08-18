@@ -1010,6 +1010,8 @@ impl HistoryPage {
                     format!("取消 · 已选 {}", self.selected_keys.len()),
                     theme.fg_accent,
                 ),
+                ("u".into(), "UP主页".into(), theme.fg_accent),
+                (keys.next_theme.clone(), "主题".into(), theme.fg_accent),
             ],
         );
         frame.render_widget(Paragraph::new(help).alignment(Alignment::Center), area);

@@ -180,6 +180,14 @@ impl HomePage {
                 ("←/→".into(), "切换面板".into(), theme.fg_accent),
                 (keys.confirm.clone(), "播放".into(), theme.success),
                 (keys.search_focus.clone(), "搜索".into(), theme.info),
+                ("u".into(), "UP主页".into(), theme.fg_accent),
+                (
+                    format!("{} / {}", keys.section_prev, keys.section_next),
+                    "分区".into(),
+                    theme.fg_accent,
+                ),
+                (keys.next_theme.clone(), "主题".into(), theme.fg_accent),
+                (keys.open_settings.clone(), "设置".into(), theme.info),
                 (keys.refresh.clone(), "刷新".into(), theme.info),
             ],
         );
@@ -192,7 +200,6 @@ impl HomePage {
         frame.render_widget(Paragraph::new(help).alignment(Alignment::Center), chunks[2]);
     }
 }
-
 impl HomePage {
     /// 默认列数
     const DEFAULT_COLUMNS: usize = 1;
