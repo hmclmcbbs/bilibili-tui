@@ -95,6 +95,20 @@ impl MediaProxy {
         })
     }
 
+    /// Given a speed-ranked candidate list (from `rank_streams`), find the
+    /// index of its best-scoring video candidate *within this proxy's own
+    /// candidate ordering* (built by `RankedStreams::from_unranked`). The two
+    /// orderings differ (primary-first vs score-sorted), so an index from the
+    /// ranked list cannot be used directly as a generation number. Returns
+    /// `None` when the best candidate is not present.
+    pub fn best_ranked_index(&self, ranked: &crate::api::cdn::RankedStreams) -> Option<usize> {
+        let best = ranked
+            .video
+            .iter()
+            .max_by(|a, b| a.score.total_cmp(&b.score))?;
+        self.state.video.iter().position(|c| c.url == best.url)
+    }
+
     pub fn commit_video_cdn(&mut self, next: usize) -> bool {
         let current = self.state.video_index.load(Ordering::Acquire);
         if next <= current || next >= self.state.video.len() {

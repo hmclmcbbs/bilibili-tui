@@ -625,6 +625,50 @@ fn pick_audio<'a>(
     audio.into_iter().max_by_key(|stream| stream.bandwidth)
 }
 
+
+fn candidate_from_url(url: &str) -> CdnCandidate {
+    CdnCandidate {
+        url: url.to_string(),
+        host: host(url).unwrap_or_default(),
+        score: 0.0,
+    }
+}
+
+impl RankedStreams {
+    /// Build candidates WITHOUT probing the CDN: the primary address is first
+    /// (Bilibili returns the best edge first), backups follow. This lets the
+    /// player start instantly on the primary edge; `rank_streams` can then run
+    /// in the background and `MediaProxy::commit_video_cdn` switches to the
+    /// measured-optimal candidate mid-playback (see play_video).
+    pub fn from_unranked(
+        data: &PlayUrlData,
+        options: crate::domain::playback::PlaybackOptions,
+    ) -> Result<Self> {
+        let video_stream = pick_video(&data.dash.video, options)
+            .ok_or_else(|| anyhow!("播放地址没有视频流"))?;
+        let audio_stream = pick_audio(&data.dash, options)
+            .ok_or_else(|| anyhow!("播放地址没有音频流"))?;
+        let mut video: Vec<CdnCandidate> = Vec::new();
+        if let Some(primary) = video_stream.primary_url() {
+            video.push(candidate_from_url(primary));
+        }
+        for backup in video_stream.backup_urls() {
+            video.push(candidate_from_url(backup));
+        }
+        let mut audio: Vec<CdnCandidate> = Vec::new();
+        if let Some(primary) = audio_stream.primary_url() {
+            audio.push(candidate_from_url(primary));
+        }
+        for backup in audio_stream.backup_urls() {
+            audio.push(candidate_from_url(backup));
+        }
+        if video.is_empty() || audio.is_empty() {
+            return Err(anyhow!("CDN 候选地址为空"));
+        }
+        Ok(RankedStreams { video, audio })
+    }
+}
+
 pub async fn rank_streams(
     data: &PlayUrlData,
     options: crate::domain::playback::PlaybackOptions,

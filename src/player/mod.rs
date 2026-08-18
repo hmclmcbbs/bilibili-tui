@@ -143,47 +143,30 @@ pub async fn play_video(
     // the media stream to start; danmaku is streamed to the Lua script over
     // IPC after playback begins, so waiting for the full history here would
     // only add latency.
-    let (mut media_proxy, danmaku, subtitle_paths) = tokio::join!(
-        async {
-            match api_client.get_play_url(bvid, cid, playback).await {
-                Ok(play_url) => match crate::api::cdn::rank_streams(&play_url, playback).await {
+    // Only stream endpoint selection blocks the first frame. The (large)
+    // danmaku history and the subtitle downloads used to stall playback
+    // start while they were fetched up front; they now run inside the
+    // background task after mpv is already playing (subtitles are attached
+    // over IPC). This is the single biggest reduction in load latency.
+    // Level-3 fast start: pick the primary edge without any CDN probing and
+    // start playback immediately. The (expensive) speed-ranked candidate
+    // selection runs in the background task and, if it finds a better edge,
+    // seamlessly switches mid-playback via replace_mpv_stream.
+    let (mut media_proxy, play_url_for_rerank) = (async {
+        match api_client.get_play_url(bvid, cid, playback).await {
+            Ok(play_url) => {
+                let rerank = play_url.clone();
+                let streams = crate::api::cdn::RankedStreams::from_unranked(&play_url, playback);
+                let proxy = match streams {
                     Ok(streams) => proxy::MediaProxy::start(streams).await.ok(),
                     Err(_) => None,
-                },
-                Err(_) => None,
+                };
+                (proxy, Some(rerank))
             }
-        },
-        async { api_client.get_video_danmaku(cid, duration).await.unwrap_or_default() },
-        async {
-            // Fetch AI subtitles concurrently and render them to SRT files.
-            // Chinese tracks are sorted first so mpv picks them as the
-            // default subtitle track; the rest stay selectable with `j`.
-            match api_client.get_video_subtitles(bvid, cid).await {
-                Ok(tracks) => {
-                    let mut entries: Vec<(bool, std::path::PathBuf)> = Vec::new();
-                    for (index, track) in tracks.iter().take(8).enumerate() {
-                        if let Ok(cues) =
-                            api_client.fetch_subtitle_cues(&track.subtitle_url).await
-                            && !cues.is_empty()
-                        {
-                            let srt = crate::api::subtitle::render_srt(&cues);
-                            let path = std::env::temp_dir()
-                                .join(format!("bilibili-tui-sub-{cid}-{index}.srt"));
-                            if tokio::fs::write(&path, srt).await.is_ok() {
-                                entries.push((
-                                    track.lan.to_lowercase().contains("zh"),
-                                    path,
-                                ));
-                            }
-                        }
-                    }
-                    entries.sort_by(|left, right| right.0.cmp(&left.0));
-                    entries.into_iter().map(|(_, path)| path).collect()
-                }
-                Err(_) => Vec::new(),
-            }
-        },
-    );
+            Err(_) => (None, None),
+        }
+    })
+    .await;
     let ipc_path = mpv_ipc_path("bilibili-tui-mpv", &cid.to_string());
     remove_stale_mpv_ipc(&ipc_path);
     let danmaku_script_path = create_live_danmaku_script()?;
@@ -223,9 +206,6 @@ pub async fn play_video(
     cmd.arg(format!("--referrer={webpage_url}"));
     cmd.arg(format!("--http-header-fields=Referer: {webpage_url}"));
     cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
-    for path in &subtitle_paths {
-        cmd.arg(format!("--sub-file={}", path.display()));
-    }
     cmd.arg(format!("--script={}", danmaku_script_path.display()));
     cmd.arg("--script-opts-append=double_video_fps=no");
     cmd.arg("--msg-level=ffmpeg=error,vd=warn");
@@ -246,9 +226,6 @@ pub async fn play_video(
                 let _ = crate::storage::remove_cookie_export(path);
             }
             let _ = std::fs::remove_file(&danmaku_script_path);
-            for path in &subtitle_paths {
-                let _ = std::fs::remove_file(path);
-            }
             return Err(error.into());
         }
     };
@@ -283,9 +260,72 @@ pub async fn play_video(
         let mut last_danmaku_position = 0.0;
         let mut danmaku_interval = tokio::time::interval(Duration::from_millis(50));
         let mut danmaku_ready = false;
+        // Fetch the (large) danmaku history and the subtitle tracks here,
+        // inside the background task, so they never delay the first frame.
+        // Danmaku is fed to mpv position-by-position below; subtitles are
+        // attached over IPC once the player socket is up (a spawned child
+        // retries until the socket answers).
+        let danmaku = api_client.get_video_danmaku(cid, duration).await.unwrap_or_default();
+        let subtitle_paths = fetch_and_render_subtitles(&api_client, &bvid, cid).await;
+        let subtitle_for_attach = subtitle_paths.clone();
+        let attach_ipc = ipc_path.clone();
+        tokio::spawn(async move {
+            attach_subtitle_files(&attach_ipc, &subtitle_for_attach).await;
+        });
+
+
+        // Level-3 fast start: probe the CDN in the background and, if a
+        // better edge than the primary is found, seamlessly switch to it
+        // mid-playback. The primary edge is already playing, so this only
+        // adds a brief reload when the switch actually happens.
+        let (rerank_tx, rerank_rx) = tokio::sync::oneshot::channel::<
+            Option<crate::api::cdn::RankedStreams>,
+        >();
+        let mut rerank_rx = Some(rerank_rx);
+        let mut rerank_applied = false;
+        if let Some(play_url) = play_url_for_rerank.clone() {
+            tokio::spawn(async move {
+                let ranked = crate::api::cdn::rank_streams(&play_url, playback).await.ok();
+                let _ = rerank_tx.send(ranked);
+            });
+        }
 
         loop {
             tokio::select! {
+                rerank_result = async {
+                    match rerank_rx.take() {
+                        Some(rx) => rx.await.ok(),
+                        None => std::future::pending().await,
+                    }
+                }, if rerank_rx.is_some() => {
+                    rerank_applied = true;
+                    if let Some(proxy) = &mut media_proxy {
+                        if let Some(Some(ranked)) = rerank_result {
+                            if let Some(idx) = proxy.best_ranked_index(&ranked)
+                                && idx != 0
+                            {
+                                let base = proxy
+                                    .video_url
+                                    .split('?')
+                                    .next()
+                                    .unwrap_or(&proxy.video_url);
+                                let switched_url =
+                                    format!("{base}?generation={idx}");
+                                if let Some(pos) = mpv_time_pos(&ipc_path).await {
+                                    let _ = replace_mpv_stream(
+                                        &ipc_path,
+                                        &switched_url,
+                                        &proxy.audio_url,
+                                        pos,
+                                    )
+                                    .await;
+                                    proxy.commit_video_cdn(idx);
+                                    attach_subtitle_files(&ipc_path, &subtitle_paths).await;
+                                }
+                            }
+                        }
+                    }
+                }
                 _ = heartbeat_interval.tick() => {
                     let real_played_time = start_time.elapsed().as_secs() as i64;
 
@@ -395,7 +435,7 @@ pub async fn play_video(
                                 &video_url,
                                 &proxy.audio_url,
                                 position,
-                            ).await.is_ok() || mpv_path(&ipc_path).await.as_deref() == Some(video_url.as_str());
+                            ).await.is_ok() || mpv_path(&ipc_path).await.as_deref() == Some(&*video_url);
                             if switched {
                                 proxy.commit_video_cdn(next);
                                 current_cdn_corrupted = false;
@@ -476,6 +516,71 @@ async fn send_video_danmaku_batch(
     )
     .await
     .map(|_| ())
+}
+
+/// Fetch every subtitle track and render it to a temporary SRT, downloading
+/// the tracks **concurrently** (the old loop fetched them one at a time).
+/// Returns the paths to the rendered files, Chinese tracks first so they
+/// become the default. Called from the background task so it never blocks
+/// the first frame.
+async fn fetch_and_render_subtitles(
+    api: &ApiClient,
+    bvid: &str,
+    cid: i64,
+) -> Vec<std::path::PathBuf> {
+    let tracks = match api.get_video_subtitles(bvid, cid).await {
+        Ok(tracks) => tracks,
+        Err(_) => return Vec::new(),
+    };
+    let tasks: Vec<_> = tracks
+        .iter()
+        .take(8)
+        .enumerate()
+        .map(|(index, track)| {
+            let api = api.clone();
+            let url = track.subtitle_url.clone();
+            let zh = track.lan.to_lowercase().contains("zh");
+            async move {
+                if let Ok(cues) = api.fetch_subtitle_cues(&url).await
+                    && !cues.is_empty()
+                {
+                    let srt = crate::api::subtitle::render_srt(&cues);
+                    let path = std::env::temp_dir()
+                        .join(format!("bilibili-tui-sub-{cid}-{index}.srt"));
+                    if tokio::fs::write(&path, srt).await.is_ok() {
+                        return Some((zh, path));
+                    }
+                }
+                None
+            }
+        })
+        .collect();
+    let mut entries: Vec<(bool, std::path::PathBuf)> =
+        futures_util::future::join_all(tasks).await.into_iter().flatten().collect();
+    entries.sort_by(|left, right| right.0.cmp(&left.0));
+    entries.into_iter().map(|(_, path)| path).collect()
+}
+
+/// Attach already-rendered subtitle files to a running mpv instance over its
+/// IPC socket. Retries briefly because the socket may not be up yet right
+/// after spawn. Failures are ignored: subtitles are optional.
+async fn attach_subtitle_files(
+    ipc_path: &std::path::Path,
+    paths: &[std::path::PathBuf],
+) {
+    for path in paths {
+        for _ in 0..10 {
+            match mpv_ipc(
+                ipc_path,
+                serde_json::json!(["sub-add", path.display().to_string(), "select"]),
+            )
+            .await
+            {
+                Ok(_) => break,
+                Err(_) => tokio::time::sleep(Duration::from_millis(200)).await,
+            }
+        }
+    }
 }
 
 fn is_corrupt_video_log(line: &str) -> bool {

@@ -242,8 +242,24 @@ local function render()
                 local bord = message.border == false and 0 or config.stroke_width
                 local rot = (message.rotation and math.floor(message.rotation) ~= 0)
                     and string.format("\\frz%d", math.floor(message.rotation)) or ""
-                local px_raw = tonumber(message.x) or 0
-                local py_raw = tonumber(message.y) or 0
+                -- Positioned (mode 7/8) danmaku normally carry normalized
+                -- 0-1 coordinates in x/y. But Bilibili also ships "paired"
+                -- comments (e.g. cherry-pop 去死: "去\u3000" + "\u3000死", same
+                -- anchor, each with one full-width space that pushes its glyph
+                -- to one side) whose text is a plain string, NOT a BAS
+                -- [x,y,...] array. The Rust parser only resolves coordinates
+                -- for the array form, so x/y arrive as nil here. The old code
+                -- mapped nil -> 0, pinning both comments at the top-left
+                -- corner where they overlapped. Instead, treat a missing
+                -- coordinate as "centered" (0.5) so the shared-anchor +
+                -- space trick works and the pair reads as one phrase.
+                local has_coord = message.x ~= nil and message.y ~= nil
+                local px_raw = tonumber(message.x) or 0.5
+                local py_raw = tonumber(message.y) or 0.5
+                if not has_coord then
+                    px_raw = 0.5
+                    py_raw = 0.5
+                end
                 local px2_raw = tonumber(message.x2) or px_raw
                 local py2_raw = tonumber(message.y2) or py_raw
                 -- Advanced danmaku coordinates are official-player percentages
@@ -258,6 +274,15 @@ local function render()
                 local map_y = function(v) return math.floor(v * height * scale + cy * (1 - scale) + off_y) end
                 local px, py = map_x(px_raw), map_y(py_raw)
                 local px2, py2 = map_x(px2_raw), map_y(py2_raw)
+                -- Bilibili pairs two mode-7/8 comments that share one anchor
+                -- and read as a single phrase (e.g. "去\u3000" + "\u3000死" =>
+                -- 去死) by giving each a single full-width space that pushes
+                -- its glyph to one side. The official player centers them on
+                -- the shared point (an5); this renderer used an7 (top-left),
+                -- so both glyphs were drawn from the same origin and
+                -- overlapped. Only switch the anchor for space-padded text so
+                -- every other advanced comment keeps its original alignment.
+                local render_anchor = message.text:find("\227\128\128", 1, true) and "\an5" or "\an7"
                 local pos_tag
                 if message.x2 ~= nil and message.y2 ~= nil
                     and (message.x2 ~= message.x or message.y2 ~= message.y) then
@@ -268,8 +293,8 @@ local function render()
                     pos_tag = string.format("\\pos(%d,%d)", px, py)
                 end
                 tags = string.format(
-                    "{\\an7%s%s\\fn%s\\b1\\fs%d\\bord%.1f\\shad1\\alpha&H%02X&\\c&H%s&}",
-                    pos_tag, rot, font, fs, bord, msg_alpha, ass_color(message.color)
+                    "{%s%s%s\\fn%s\\b1\\fs%d\\bord%.1f\\shad1\\alpha&H%02X&\\c&H%s&}",
+                    render_anchor, pos_tag, rot, font, fs, bord, msg_alpha, ass_color(message.color)
                 )
                 lines[#lines + 1] = tags .. to_ass_text(message.text)
             end
