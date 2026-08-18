@@ -157,6 +157,19 @@ pub async fn play_video(
             Ok(play_url) => {
                 let rerank = play_url.clone();
                 let streams = crate::api::cdn::RankedStreams::from_unranked(&play_url, playback);
+                // Warm cache: start directly on the fastest cached CDN edge so
+                // we never buffer on the slow primary and then switch mid-
+                // playback (which reloads the stream and stutters). The best
+                // candidate is moved to index 0, so MediaProxy's generation=0
+                // URL already points at the fast edge. A cold start (no cached
+                // scores yet) leaves the primary at index 0 and lets the
+                // background probe switch later, as before.
+                let streams = streams.map(|mut s| {
+                    if let Some(best) = s.best_cached_index() {
+                        s.video.swap(0, best);
+                    }
+                    s
+                });
                 let proxy = match streams {
                     Ok(streams) => proxy::MediaProxy::start(streams).await.ok(),
                     Err(_) => None,
@@ -357,9 +370,6 @@ pub async fn play_video(
                             if !danmaku_ready {
                                 continue;
                             }
-                        }
-                        if position + 0.25 < last_danmaku_position {
-                            next_danmaku = danmaku.partition_point(|message| message.time < position);
                         }
                         last_danmaku_position = position;
                         let mut due_messages = Vec::new();
@@ -612,13 +622,15 @@ fn create_live_danmaku_script() -> Result<std::path::PathBuf> {
 }
 
 fn live_danmaku_value(message: &LiveMessage) -> Option<serde_json::Value> {
-    let LiveMessage::Danmaku { content, color, .. } = message else {
+    let LiveMessage::Danmaku { uid, content, color, .. } = message else {
         return None;
     };
 
     Some(serde_json::json!({
         "text": content,
         "color": color,
+        "uid": *uid,
+        "mode": 1,
     }))
 }
 
@@ -1498,9 +1510,6 @@ pub async fn play_bangumi_episode(
                                 continue;
                             }
                         }
-                        if position + 0.25 < last_danmaku_position {
-                            next_danmaku = danmaku.partition_point(|message| message.time < position);
-                        }
                         last_danmaku_position = position;
                         let mut due_messages = Vec::new();
                         while let Some(message) = danmaku.get(next_danmaku)
@@ -1629,7 +1638,8 @@ pub async fn play_live(
         let mut consecutive_failures = 0usize;
         let mut loaded_at = Instant::now();
         let mut danmaku_config_open = true;
-        let mut danmaku_flush = tokio::time::interval(Duration::from_millis(16));
+        let mut danmaku_flush =
+            tokio::time::interval(Duration::from_millis(initial_danmaku_config.live_batch_ms.clamp(16, 1000)));
         let mut pending_danmaku = Vec::new();
         'playback: loop {
             tokio::select! {
@@ -1745,6 +1755,10 @@ pub async fn play_live(
                         {
                             write_live_diagnostic(room_id, &format!("live danmaku config IPC error: {error}"));
                         }
+                        // Rebuild the flush timer so the batch window takes
+                        // effect immediately without restarting mpv.
+                        danmaku_flush =
+                            tokio::time::interval(Duration::from_millis(config.live_batch_ms.clamp(16, 1000)));
                     } else {
                         danmaku_config_open = false;
                     }

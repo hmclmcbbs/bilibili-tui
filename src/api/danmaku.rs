@@ -144,18 +144,28 @@ fn parse_positioned_payload(
     let duration: i64 = if per_mille {
         fields[9].parse().unwrap_or(5000)
     } else {
-        fields[9]
+        // Both field 3 (seconds) and field 9 (milliseconds) can carry the
+        // display duration in modern BAS; they usually agree (e.g. 2.28s vs
+        // 2280ms). But some payloads set field 9 to a wrong/short value while
+        // field 3 holds the true duration (cherry pop "第一名": field 3 = 1.85s
+        // but field 9 = 650ms). Taking field 9 alone truncates the comment to
+        // a blink. Use the LARGER of the two so a malformed field 9 cannot
+        // shorten the on-screen lifetime below the official value.
+        let from_f9 = fields[9]
             .parse::<i64>()
             .ok()
-            .filter(|&ms| ms > 0)
-            .or_else(|| {
-                fields
-                    .get(3)
-                    .and_then(|value| value.parse::<f64>().ok())
-                    .map(|seconds| (seconds * 1000.0) as i64)
-            })
-            .filter(|&ms| ms > 0)
-            .unwrap_or(5000)
+            .filter(|&ms| ms > 0);
+        let from_f3 = fields
+            .get(3)
+            .and_then(|value| value.parse::<f64>().ok())
+            .map(|seconds| (seconds * 1000.0) as i64)
+            .filter(|&ms| ms > 0);
+        match (from_f3, from_f9) {
+            (Some(a), Some(b)) => a.max(b),
+            (Some(a), None) => a,
+            (None, Some(b)) => b,
+            (None, None) => 5000,
+        }
     };
     // Modern payloads carry the duration seconds in field 3 (matching field
     // 9 ms, e.g. 2.35 vs 2350), so field 3 is never a font size there. The

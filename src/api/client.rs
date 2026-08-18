@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Read;
 use std::io::Write;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -56,6 +56,9 @@ pub struct ApiClient {
     /// ranking). Keyed by URL so the same screen loaded repeatedly (e.g. after
     /// returning from a video) does not re-hit the network.
     api_cache: RwLock<HashMap<String, (Instant, serde_json::Value)>>,
+    /// Deduplicates concurrent identical cached GETs so rapid navigation back
+    /// and forth to the same screen only hits the network once.
+    api_inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<serde_json::Value>>>>>,
 }
 
 impl ApiClient {
@@ -117,11 +120,15 @@ impl ApiClient {
                 .default_headers(Self::default_headers())
                 .connect_timeout(std::time::Duration::from_secs(5))
                 .timeout(std::time::Duration::from_secs(20))
+                .tcp_keepalive(std::time::Duration::from_secs(60))
+                .pool_max_idle_per_host(16)
+                .pool_idle_timeout(std::time::Duration::from_secs(30))
                 .build()
                 .expect("Failed to create HTTP client"),
             cookies: RwLock::new(None),
             wbi_keys: RwLock::new(None),
             api_cache: RwLock::new(HashMap::new()),
+            api_inflight: Mutex::new(HashMap::new()),
         }
     }
 
@@ -190,7 +197,7 @@ impl ApiClient {
         // response body is being read. Retrying a read-only GET once prevents a
         // transient truncated body from surfacing as a dynamic-page failure.
         let safe_url = Self::safe_url(url);
-        for attempt in 0..2 {
+        for attempt in 0..3 {
             let mut req = self.client.get(url);
             if let Some(ref cookies) = *self.cookies.read().expect("cookies lock poisoned") {
                 req = req.header(COOKIE, cookies.as_str());
@@ -198,8 +205,9 @@ impl ApiClient {
 
             let resp = match req.send().await {
                 Ok(resp) => resp,
-                Err(_) if attempt == 0 => {
-                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                Err(_) if attempt < 2 => {
+                    let backoff = 150 * (attempt as u64 + 1);
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
                     continue;
                 }
                 Err(error) => {
@@ -209,7 +217,10 @@ impl ApiClient {
             let status = resp.status();
             let body = match resp.bytes().await {
                 Ok(body) => body,
-                Err(_) if attempt == 0 => continue,
+                Err(_) if attempt < 2 => {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    continue;
+                }
                 Err(error) => {
                     return Err(error)
                         .with_context(|| format!("failed to read response body from {safe_url}"));
@@ -217,8 +228,9 @@ impl ApiClient {
             };
 
             if !status.is_success() {
-                if attempt == 0 && (status.is_server_error() || status.as_u16() == 429) {
-                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                if attempt < 2 && (status.is_server_error() || status.as_u16() == 429) {
+                    let backoff = if status.as_u16() == 429 { 1000 } else { 150 * (attempt as u64 + 1) };
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
                     continue;
                 }
                 return Err(anyhow!("HTTP {status} from {safe_url}"));
@@ -272,11 +284,54 @@ impl ApiClient {
             }
         }
 
+        // Deduplicate concurrent requests for the same URL: the first arrival
+        // performs the network fetch, the rest wait for and reuse its result
+        // instead of each hitting the API (e.g. flipping between two tabs).
+        let holder = {
+            let mut inflight = self.api_inflight.lock().expect("inflight lock poisoned");
+            if let Some(h) = inflight.get(url) {
+                h.clone()
+            } else {
+                let h: Arc<tokio::sync::Mutex<Option<serde_json::Value>>> =
+                    Arc::new(tokio::sync::Mutex::new(None));
+                inflight.insert(url.to_string(), h.clone());
+                h
+            }
+        };
+        {
+            let guard = holder.lock().await;
+            if let Some(value) = guard.as_ref() {
+                return Ok(value.clone());
+            }
+        }
+
         let value = self.get_json(url).await?;
-        self.api_cache
-            .write()
-            .expect("api cache lock poisoned")
-            .insert(url.to_string(), (now, value.clone()));
+        {
+            let mut g = holder.lock().await;
+            *g = Some(value.clone());
+        }
+        self.api_inflight.lock().expect("inflight lock poisoned").remove(url);
+
+        {
+            let mut cache = self.api_cache.write().expect("api cache lock poisoned");
+            cache.insert(url.to_string(), (now, value.clone()));
+            // Bound memory: drop expired entries first, then the oldest if we
+            // still exceed the cap. Without this the cache only grows.
+            const MAX_ENTRIES: usize = 400;
+            if cache.len() > MAX_ENTRIES {
+                cache.retain(|_, (at, _)| now.duration_since(*at) < ttl);
+                if cache.len() > MAX_ENTRIES {
+                    let mut entries: Vec<(String, Instant)> = cache
+                        .iter()
+                        .map(|(k, (at, _))| (k.clone(), *at))
+                        .collect();
+                    entries.sort_by_key(|(_, at)| *at);
+                    for (k, _) in entries.into_iter().take(cache.len() - MAX_ENTRIES) {
+                        cache.remove(&k);
+                    }
+                }
+            }
+        }
         Ok(value)
     }
 
@@ -907,9 +962,25 @@ impl ApiClient {
             };
             if let Ok(xml_items) = super::danmaku::parse_xml(&body) {
                 for item in xml_items {
-                    let duplicate = all.iter().any(|existing| {
-                        (existing.time - item.time).abs() < 0.5 && existing.text == item.text
-                    });
+                    // Positioned (mode 7/8) danmaku are returned by BOTH the
+                    // segmented protobuf and the XML endpoint, frequently with
+                    // mismatched timestamps/durations (the XML copy is usually a
+                    // truncated or offset replica -- e.g. the same comment shows
+                    // up again at a different time with its duration clamped).
+                    // De-duplicate by text+mode so the richer segmented copy
+                    // (kept first) wins, instead of emitting the comment twice
+                    // and letting the shorter replica erase the longer one mid-
+                    // show ("第一名" vanishing while the others stay).
+                    // Regular (mode 1/4/5) comments keep the time+text rule.
+                    let duplicate = if matches!(item.mode, 7 | 8) {
+                        all.iter().any(|existing| {
+                            existing.mode == item.mode && existing.text == item.text
+                        })
+                    } else {
+                        all.iter().any(|existing| {
+                            (existing.time - item.time).abs() < 0.5 && existing.text == item.text
+                        })
+                    };
                     if !duplicate {
                         all.push(item);
                     }

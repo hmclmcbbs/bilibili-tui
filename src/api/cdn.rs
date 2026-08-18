@@ -667,6 +667,32 @@ impl RankedStreams {
         }
         Ok(RankedStreams { video, audio })
     }
+
+    /// Pick the fastest CDN edge WITHOUT probing the network, by reusing the
+    /// on-disk probe history (`cdn-history.json`). This lets the player start
+    /// directly on the best edge instead of buffering on the slow primary and
+    /// switching mid-playback (which reloads the stream and stutters).
+    ///
+    /// Returns `None` when nothing is cached yet, so the caller falls back to
+    /// the primary edge and lets the background `rank_streams` probe switch
+    /// later — the same cold-start behaviour as before.
+    pub fn best_cached_index(&self) -> Option<usize> {
+        let mut best: Option<(usize, f64)> = None;
+        for (i, candidate) in self.video.iter().enumerate() {
+            let Some(score) = cached_score(&candidate.url) else {
+                continue;
+            };
+            let latency = latency_score(score.latency);
+            let throughput = (score.throughput_bps / 8_000_000.0).clamp(0.0, 1.0);
+            let composite =
+                0.55 * reliability(&candidate.host) + 0.35 * latency + 0.10 * throughput;
+            match best {
+                Some((_, prev)) if composite <= prev => {}
+                _ => best = Some((i, composite)),
+            }
+        }
+        best.map(|(i, _)| i)
+    }
 }
 
 pub async fn rank_streams(

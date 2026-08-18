@@ -453,6 +453,35 @@ pub struct DanmakuConfig {
     /// 1.0 = official size/position, 0.9 pulls everything toward the center.
     #[serde(default = "default_one")]
     pub advanced_scale: f64,
+    /// Text fragments (case-insensitive) that hide a danmaku entirely.
+    /// Works for both video and live danmaku.
+    #[serde(default)]
+    pub blocked_keywords: Vec<String>,
+    /// Sender UIDs to hide (live danmaku only — Bilibili's video danmaku
+    /// feed does not carry a sender id).
+    #[serde(default)]
+    pub blocked_users: Vec<i64>,
+    /// Live danmaku batch window in milliseconds. Higher values coalesce more
+    /// messages per IPC write (less overhead under heavy chat), at the cost of
+    /// slightly higher display latency. Range clamped to 16-1000 ms.
+    #[serde(default = "default_sixteen")]
+    pub live_batch_ms: u64,
+    /// Per-type visibility toggles. None of these disable the renderer; they
+    /// just skip enqueueing a given mode (1/4/5/6 scroll+top+bottom, 7/8
+    /// advanced). All default to on.
+    #[serde(default = "default_true")]
+    pub show_roll: bool,
+    #[serde(default = "default_true")]
+    pub show_top: bool,
+    #[serde(default = "default_true")]
+    pub show_bottom: bool,
+    #[serde(default = "default_true")]
+    pub show_advanced: bool,
+    /// Edge fade for rolling/top/bottom danmaku: 0 = off, 1 = full fade so
+    /// comments are dim at the screen edges and brightest mid-flight. Pure
+    /// cosmetic, applied on the Lua side.
+    #[serde(default)]
+    pub fade_edges: f64,
 }
 
 impl Default for DanmakuConfig {
@@ -477,6 +506,14 @@ impl Default for DanmakuConfig {
             advanced_offset_x: 0.0,
             advanced_offset_y: 0.0,
             advanced_scale: 1.0,
+            blocked_keywords: Vec::new(),
+            blocked_users: Vec::new(),
+            live_batch_ms: 16,
+            show_roll: true,
+            show_top: true,
+            show_bottom: true,
+            show_advanced: true,
+            fade_edges: 0.0,
         }
     }
 }
@@ -592,9 +629,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_sixteen() -> u64 {
+    16
+}
+
 fn default_one() -> f64 {
     1.0
 }
+
 
 /// Get the config directory path
 fn get_config_dir() -> Result<PathBuf> {

@@ -419,7 +419,7 @@ impl Component for SettingsPage {
 impl SettingsPage {
     const DANMAKU_ROWS: usize = 9;
 
-    fn adjust_playback(&mut self, direction: i32) -> AppAction {
+    fn adjust_playback(&mut self, _direction: i32) -> AppAction {
         self.auto_play = !self.auto_play;
         AppAction::SaveAutoPlay(self.auto_play)
     }

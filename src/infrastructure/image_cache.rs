@@ -65,6 +65,9 @@ pub struct ImageCache {
     meta: Mutex<HashMap<String, MetaEntry>>,
     /// monotonically increasing recency counter for memory LRU
     seq: AtomicU64,
+    /// counter of pending meta changes; we batch disk meta writes instead of
+    /// rewriting meta.json on every single image download (cheap under load).
+    meta_dirty: AtomicU64,
 }
 
 static INSTANCE: OnceLock<ImageCache> = OnceLock::new();
@@ -95,6 +98,7 @@ pub fn instance() -> &'static ImageCache {
             inflight: Mutex::new(HashMap::new()),
             meta: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(0),
+            meta_dirty: AtomicU64::new(0),
         };
         cache.load_meta();
         cache.evict_disk_if_needed();
@@ -124,6 +128,16 @@ impl ImageCache {
         let _ = std::fs::create_dir_all(&self.dir);
         if let Ok(text) = serde_json::to_string(&entries) {
             let _ = std::fs::write(&self.meta_path, text);
+        }
+    }
+
+    /// Record a meta change and flush to disk only after a batch accumulates.
+    /// A single image fetch used to rewrite the whole meta.json synchronously;
+    /// with dense grids that is needless file I/O, so we coalesce it.
+    fn mark_meta_dirty(&self) {
+        if self.meta_dirty.fetch_add(1, Ordering::Relaxed) + 1 >= 8 {
+            self.save_meta();
+            self.meta_dirty.store(0, Ordering::Relaxed);
         }
     }
 
@@ -274,7 +288,7 @@ async fn fetch_and_store(cache: &ImageCache, url: &str) -> Option<DynamicImage> 
         );
     }
     cache.evict_disk_if_needed();
-    cache.save_meta();
+    cache.mark_meta_dirty();
     Some(img)
 }
 
@@ -319,6 +333,7 @@ mod tests {
             inflight: Mutex::new(HashMap::new()),
             meta: Mutex::new(HashMap::new()),
             seq: AtomicU64::new(1000),
+            meta_dirty: AtomicU64::new(0),
         };
         let img = image::RgbaImage::new(4, 4);
         let dynimg = DynamicImage::ImageRgba8(img);

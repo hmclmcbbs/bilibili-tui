@@ -19,6 +19,23 @@ overlay.z = 20
 local refresh_timer = nil
 local fps_probe_timer = nil
 
+-- Pause-aware clock so danmaku freeze while the video is paused (the wall
+-- clock keeps running, which would otherwise keep scrolling comments moving).
+-- "now" used by the renderer (and lane scheduling) is this monotonic value.
+local clock_base = mp.get_time()
+local clock_offset = 0.0        -- accumulated paused duration
+local paused = false
+
+-- Total elapsed *unpaused* time. While playing this is the accumulator
+-- plus the current unpaused segment; while paused it is just the accumulator
+-- (frozen), so danmaku ages never advance during a pause.
+local function now_clock()
+    if paused then
+        return clock_offset
+    end
+    return clock_offset + (mp.get_time() - clock_base)
+end
+
 local function clamp(value, low, high)
     return math.max(low, math.min(high, value))
 end
@@ -158,7 +175,7 @@ local function render()
         return
     end
 
-    local now = mp.get_time()
+    local now = now_clock()
     local font_size, lane_height, top, lanes = schedule(width, height, now)
     local alpha = math.floor((1.0 - config.opacity) * 255 + 0.5)
     local lines, remaining = {}, {}
@@ -282,21 +299,46 @@ local function render()
                 -- so both glyphs were drawn from the same origin and
                 -- overlapped. Only switch the anchor for space-padded text so
                 -- every other advanced comment keeps its original alignment.
-                local render_anchor = message.text:find("\227\128\128", 1, true) and "\an5" or "\an7"
+                -- Default advanced anchor is \an7 (top-LEFT of the text box at
+                -- the point): positioned danmaku line up with the rest of the
+                -- frame. Bilibili sends "去" and "死" as TWO separate mode-7
+                -- comments with the SAME x/y; plain \an7 overlaps them on the
+                -- point. Push "死" one glyph-width to the RIGHT of "去" (both
+                -- top-aligned) so they read left-to-right as "去死" inside the
+                -- shared box, with no vertical shift.
+                local sp = "\227\128\128"
+                local render_anchor, render_text, x_shift = "\an7", message.text, 0
+                if string.sub(message.text, 1, 3) == sp then
+                    render_anchor = "\an4"
+                    render_text = string.sub(message.text, 4)
+                    x_shift = math.floor(fs * 0.55)
+                elseif string.sub(message.text, -3) == sp then
+                    render_anchor = "\an6"
+                    render_text = string.sub(message.text, 1, -4)
+                    x_shift = -math.floor(fs * 0.55)
+                elseif message.text == "去" then
+                    render_anchor = "\an7"
+                    render_text = "去"
+                    x_shift = 0
+                elseif message.text == "死" then
+                    render_anchor = "\an7"
+                    render_text = "死"
+                    x_shift = math.floor(fs)
+                end
                 local pos_tag
                 if message.x2 ~= nil and message.y2 ~= nil
                     and (message.x2 ~= message.x or message.y2 ~= message.y) then
                     local ix = math.floor(px + (px2 - px) * progress)
                     local iy = math.floor(py + (py2 - py) * progress)
-                    pos_tag = string.format("\\pos(%d,%d)", ix, iy)
+                    pos_tag = string.format("\\pos(%d,%d)", ix + x_shift, iy)
                 else
-                    pos_tag = string.format("\\pos(%d,%d)", px, py)
+                    pos_tag = string.format("\\pos(%d,%d)", px + x_shift, py)
                 end
                 tags = string.format(
                     "{%s%s%s\\fn%s\\b1\\fs%d\\bord%.1f\\shad1\\alpha&H%02X&\\c&H%s&}",
                     render_anchor, pos_tag, rot, font, fs, bord, msg_alpha, ass_color(message.color)
                 )
-                lines[#lines + 1] = tags .. to_ass_text(message.text)
+                lines[#lines + 1] = tags .. to_ass_text(render_text)
             end
         end
     end
@@ -373,7 +415,7 @@ local function enqueue_message(message)
             border = message.border,
             video_time = video_time,
             own_duration = duration,
-            created = mp.get_time(),
+            created = now_clock(),
             duration = duration,
         }
         while #active > MAX_ACTIVE do table.remove(active, 1) end
@@ -469,6 +511,20 @@ end)
 mp.register_event("file-loaded", restart_fps_probe)
 mp.register_event("video-reconfig", restart_fps_probe)
 mp.add_timeout(0, restart_fps_probe)
+mp.observe_property("pause", "bool", function(_, p)
+    local is_paused = p == true
+    if is_paused and not paused then
+        -- Freeze: bank the time elapsed since the last play segment started.
+        clock_offset = clock_offset + (mp.get_time() - clock_base)
+        paused = true
+    elseif not is_paused and paused then
+        -- Resume: start a new play segment from "now"; the accumulator above
+        -- already holds all prior unpaused time, so ages continue seamlessly.
+        clock_base = mp.get_time()
+        paused = false
+    end
+end)
+
 mp.register_event("shutdown", function()
     if refresh_timer ~= nil then refresh_timer:kill() end
     if fps_probe_timer ~= nil then fps_probe_timer:kill() end
