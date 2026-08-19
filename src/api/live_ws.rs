@@ -218,6 +218,8 @@ pub enum LiveMessage {
         uname: String,
         content: String,
         color: u32,
+        /// Bilibili danmaku mode (1=scroll, 4=top, 5=bottom, 6=reverse, 7/8=positioned).
+        mode: i32,
     },
     /// User entered room
     Enter { uid: i64, uname: String },
@@ -321,7 +323,13 @@ fn parse_danmu_msg(info: &serde_json::Value) -> Option<LiveMessage> {
     let uid = user_arr.first()?.as_i64().unwrap_or(0);
     let uname = user_arr.get(1)?.as_str().unwrap_or("").to_string();
 
-    // info[0][3] = color (decimal)
+    // info[0][1] = mode; info[0][3] = color (decimal)
+    let mode = info_arr
+        .first()?
+        .as_array()?
+        .get(1)?
+        .as_i64()
+        .unwrap_or(1) as i32;
     let color = info_arr
         .first()?
         .as_array()?
@@ -334,6 +342,7 @@ fn parse_danmu_msg(info: &serde_json::Value) -> Option<LiveMessage> {
         uname,
         content,
         color,
+        mode,
     })
 }
 

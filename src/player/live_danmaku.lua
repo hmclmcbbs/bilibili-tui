@@ -16,6 +16,20 @@ local active, pending, lane_ready = {}, {}, {}
 local next_lane = 1
 local overlay = mp.create_osd_overlay("ass-events")
 overlay.z = 20
+
+-- [TEMP DEBUG] version probe: confirms which build is actually executing.
+local DBG_VER = "20260819c"
+local dbg_f = io.open("/tmp/bili_danmaku_dbg.log", "a")
+if dbg_f then
+    dbg_f:write(string.format("[load] ver=%s t=%.0f\n", DBG_VER, mp.get_time()))
+    dbg_f:flush()
+end
+local function dbg(...)
+    if dbg_f then
+        dbg_f:write(string.format(...))
+        dbg_f:flush()
+    end
+end
 local refresh_timer = nil
 local fps_probe_timer = nil
 
@@ -88,12 +102,24 @@ local function layout(width, height)
     local lane_height = math.max(font_size + 4, math.floor(font_size * config.line_height))
     local top = math.floor(height * 0.04)
     local usable = math.max(lane_height, math.floor(height * config.display_area) - top)
-    return font_size, lane_height, top, math.max(1, math.floor(usable / lane_height))
+    -- mode 4/5 (top/bottom fixed) use FULL-SCREEN lanes, independent of
+    -- display_area: top half of the screen for mode 4, bottom half for mode 5.
+    -- This makes them behave like advanced (mode 7/8) danmaku that ignore the
+    -- scrolling-band cap entirely.
+    local top_lanes = math.max(1, math.floor((height * 0.5 - top) / lane_height))
+    local bot_lanes = math.max(1, math.floor((height * 0.5) / lane_height))
+    return font_size, lane_height, top, math.max(1, math.floor(usable / lane_height)), top_lanes, bot_lanes
 end
 
-local function select_lane(now, lanes)
-    for lane = 1, lanes do
-        if (lane_ready[lane] or 0) <= now then return lane end
+local function select_lane(now, lanes, from_top)
+    if from_top == false then
+        for lane = lanes, 1, -1 do
+            if (lane_ready[lane] or 0) <= now then return lane end
+        end
+    else
+        for lane = 1, lanes do
+            if (lane_ready[lane] or 0) <= now then return lane end
+        end
     end
     if config.massive_mode then
         local lane = ((next_lane - 1) % lanes) + 1
@@ -111,7 +137,7 @@ end
 local SCHEDULE_BUDGET = 24
 
 local function schedule(width, height, now)
-    local font_size, lane_height, top, lanes = layout(width, height)
+    local font_size, lane_height, top, lanes, top_lanes, bot_lanes = layout(width, height)
     local pixels_per_second = width / config.duration
     local safety_gap = math.max(40, font_size * 2)
     local pos = mp.get_property_number("time-pos", 0) or 0
@@ -129,7 +155,13 @@ local function schedule(width, height, now)
             -- Expired while queued (backward seek replay); drop it.
             table.remove(pending, 1)
         else
-            local lane = select_lane(now, lanes)
+            local head_mode = head.mode or 1
+            local lane
+            if head_mode == 5 then
+                lane = select_lane(now, bot_lanes, false)
+            else
+                lane = select_lane(now, top_lanes, true)
+            end
             if lane == nil then break end
             local message = table.remove(pending, 1)
             local characters = math.max(1, utf8_count(message.text))
@@ -140,12 +172,19 @@ local function schedule(width, height, now)
             message.created = now
             message.lane = lane
             message.text_width = text_width
-            message.duration = (width + text_width + safety_gap) / pixels_per_second
-            lane_ready[lane] = now + (text_width + safety_gap) / pixels_per_second
+            if head_mode == 4 or head_mode == 5 then
+                -- Top/bottom fixed: hold in place ~4s (Bilibili default for
+                -- fixed danmaku), independent of the scroll-duration setting.
+                message.duration = 4.0
+                lane_ready[lane] = now + 4.0
+            else
+                message.duration = (width + text_width + safety_gap) / pixels_per_second
+                lane_ready[lane] = now + (text_width + safety_gap) / pixels_per_second
+            end
             active[#active + 1] = message
         end
     end
-    return font_size, lane_height, top, lanes
+    return font_size, lane_height, top, lanes, top_lanes, bot_lanes
 end
 
 
@@ -156,8 +195,13 @@ end
 -- 45 fps below 160, 30 fps beyond that. Danmaku animation does not need
 -- panel-rate updates, and the frame budget is where the stutter comes from.
 local function target_fps(active_count)
-    if active_count >= 160 then return 30 end
-    if active_count >= 80 then return 45 end
+    -- Advanced (mode 7/8) danmaku animate by re-computing their position
+    -- every frame, so animation smoothness is capped by this rate. Keep the
+    -- floor high enough that moving/scaling BAS comments stay fluid; the OSD
+    -- is a GPU-shared layer in windowed (vo=gpu) playback, so the extra
+    -- rebuilds are cheap (the earlier kitty-terminal stutter is gone).
+    if active_count >= 160 then return 45 end
+    if active_count >= 80 then return 55 end
     return 60
 end
 
@@ -175,8 +219,12 @@ local function render()
         return
     end
 
+    -- Fixed (mode 4/5) danmaku are anchored to the scrolling band computed by
+    -- schedule() below (top..top+(lanes-1)*lane_height), the same on-screen
+    -- region the rolling danmaku use; that is far safer than the full OSD
+    -- height, which can exceed the real visible frame.
     local now = now_clock()
-    local font_size, lane_height, top, lanes = schedule(width, height, now)
+    local font_size, lane_height, top, lanes, top_lanes, bot_lanes = schedule(width, height, now)
     local alpha = math.floor((1.0 - config.opacity) * 255 + 0.5)
     local lines, remaining = {}, {}
     local pos = mp.get_property_number("time-pos", 0) or 0
@@ -188,18 +236,52 @@ local function render()
         if not message.positioned then
             local age = now - message.created
             if age < message.duration then
-                local progress = clamp(age / message.duration, 0, 1)
-                local safety_gap = math.max(40, font_size * 2)
-                local x = math.floor(width - (width + message.text_width + safety_gap) * progress)
-                local lane = ((message.lane - 1) % lanes) + 1
-                local y = top + (lane - 1) * lane_height
+                local mm = message.mode or 1
+                local lane, y
+                if mm == 4 then
+                    lane = ((message.lane - 1) % top_lanes) + 1
+                    y = math.floor(height * 0.02) + (lane - 1) * lane_height
+                elseif mm == 5 then
+                    lane = ((message.lane - 1) % bot_lanes) + 1
+                    y = math.floor(height * 0.98) - (lane - 1) * lane_height - font_size
+                else
+                    lane = ((message.lane - 1) % lanes) + 1
+                    y = top + (lane - 1) * lane_height
+                end
+                local x, progress
+                local m = message.mode or 1
+                local anchor = "\\an7"
+                if m == 4 or m == 5 then
+                    -- Top/bottom fixed: keep the per-message LANE (y already
+                    -- computed above as top + (lane-1)*lane_height) so multiple
+                    -- simultaneous fixed comments get separate lanes instead of
+                    -- piling on the same spot. Only override the horizontal
+                    -- position to center and use a real ASS alignment anchor
+                    -- (\an8 top-center / \an2 bottom-center) so it reads as a
+                    -- top/bottom pinned comment; the lane y stays on-screen
+                    -- (same band the scrolling danmaku use).
+                    anchor = (m == 4) and "\\an8" or "\\an2"
+                    x = math.floor(width / 2)
+                else
+                    progress = clamp(age / message.duration, 0, 1)
+                    local safety_gap = math.max(40, font_size * 2)
+                    if m == 6 then
+                        -- Reverse scroll: left -> right.
+                        x = math.floor((width + message.text_width + safety_gap) * progress - message.text_width)
+                    else
+                        -- Mode 1 scroll: right -> left.
+                        x = math.floor(width - (width + message.text_width + safety_gap) * progress)
+                    end
+                end
                 local tags = string.format(
-                    "{\\an7\\pos(%d,%d)\\fn%s\\b1\\fs%d\\bord%.1f\\shad1\\alpha&H%02X&\\c&H%s&}",
-                    x, y, safe_font_name(config.font_family), font_size,
+                    "{%s\\pos(%d,%d)\\fn%s\\b1\\fs%d\\bord%.1f\\shad1\\alpha&H%02X&\\c&H%s&}",
+                    anchor, x, y, safe_font_name(config.font_family), font_size,
                     config.stroke_width, alpha, ass_color(message.color)
                 )
                 lines[#lines + 1] = tags .. to_ass_text(message.text)
                 remaining[#remaining + 1] = message
+                dbg("RENDER mode=%d x=%d y=%d anchor=%s txt=%s\n",
+                    m, x, y, anchor, tostring(message.text):sub(1, 10))
             end
         end
     end
@@ -361,6 +443,7 @@ local function enqueue_message(message)
     local text = message.text:gsub("[\r\n]", " ")
     if text == "" then return end
     local mode = tonumber(message.mode)
+    dbg("ENQ mode=%s time=%s\n", tostring(mode), tostring(message.time))
     -- The Rust side sends each danmaku at roughly its video timestamp, but
     -- IPC delays, seeks and send-retries can shift arrival by up to a second.
     -- Carry the true video time so rendering can gate on the playback clock

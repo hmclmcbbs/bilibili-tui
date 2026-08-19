@@ -49,7 +49,7 @@ pub struct LivePage {
 
 impl LivePage {
     /// 默认列数（列表布局，单列）
-    const DEFAULT_COLUMNS: usize = 1;
+    const DEFAULT_COLUMNS: usize = 4;
     /// 卡片高度（列表卡片比网格卡片更高）
     const CARD_HEIGHT: u16 = 12;
     /// 预取缓冲行数（可见区域之外额外下载）
@@ -609,11 +609,12 @@ impl LivePage {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // List layout: cover on the left (24 wide, like collection cards),
-        // info on the right.
+        // Vertical card layout matching the watch-history grid:
+        // cover on top, info below (title 2 lines / up / online count).
+        let cover_height = 6u16.min(inner.height.saturating_sub(3));
         let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(24), Constraint::Min(20)])
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(cover_height), Constraint::Min(3)])
             .split(inner);
 
         // Render cover image or placeholder
@@ -623,7 +624,7 @@ impl LivePage {
         } else {
             let placeholder = Paragraph::new("🎬")
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(theme.fg_muted));
+                .style(Style::default().fg(theme.fg_muted).bg(theme.bg_secondary));
             frame.render_widget(placeholder, chunks[0]);
         }
 
@@ -645,9 +646,9 @@ impl LivePage {
             Style::default().fg(theme.fg_primary)
         };
 
-        // 短横线分隔的元信息（类似合集卡片）
+        // Up + area + online count (single muted line, like history cards)
         let meta = format!(
-            "{} | {} | {}",
+            "{} · {} · {}",
             room.uname,
             room.area_v2_name,
             if room.online >= 10000 {
@@ -660,15 +661,12 @@ impl LivePage {
         let info_lines = vec![
             Line::from(Span::styled(title, title_style)),
             Line::from(vec![Span::styled(
-                truncate(&room.uname),
-                Style::default().fg(theme.fg_secondary),
-            )]),
-            Line::from(vec![Span::styled(
                 meta,
                 Style::default().fg(theme.fg_muted),
             )]),
         ];
 
+        // Title gets 2 lines (wrap), meta gets 1 line; render stacked.
         let info = Paragraph::new(info_lines).wrap(Wrap { trim: true });
         frame.render_widget(info, chunks[1]);
     }

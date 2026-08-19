@@ -81,6 +81,9 @@ pub struct App {
     playback_event_rx: mpsc::Receiver<PlaybackEvent>,
     auto_return_after_playback: Option<(u64, String)>,
     next_playback_session_id: u64,
+    /// Pre-warmed media proxy for the video currently being previewed, so
+    /// playback reuses an already-cached first segment (faster first frame).
+    pub preheat: crate::application::network::PreheatStore,
     pending_playlist: Option<(
         Vec<crate::domain::playback::PlaylistItem>,
         crate::domain::playback::PlaylistSource,
@@ -106,7 +109,8 @@ impl App {
             ApiClient::new()
         };
         let api_client = Arc::new(api_client);
-        let bridge = network::start_network_worker(api_client.clone());
+        let preheat_store = std::sync::Arc::new(tokio::sync::Mutex::new(Option::<(String, i64, crate::player::proxy::MediaProxy, crate::api::cdn::PlayUrlData)>::None));
+        let bridge = network::start_network_worker(api_client.clone(), preheat_store.clone());
         let (playback_event_tx, playback_event_rx) = mpsc::channel();
 
         // Load config and apply saved theme
@@ -157,6 +161,7 @@ impl App {
             playback_event_rx,
             auto_return_after_playback: None,
             next_playback_session_id: 1,
+            preheat: preheat_store,
             pending_playlist: None,
             cached_home: None,
             cached_bangumi: None,

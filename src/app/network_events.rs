@@ -370,6 +370,16 @@ impl App {
                 if !self.is_latest_request("video_detail", req_id) {
                     return;
                 }
+                let (preheat_cid, preheat_aid, preheat_bvid, preheat_playback) = {
+                    let mut t = (0i64, 0i64, String::new(), crate::domain::playback::PlaybackOptions::default());
+                    if let Page::VideoDetail(page) = &self.current_page {
+                        t.0 = page.video_info.as_ref().map(|v| v.cid).unwrap_or(0);
+                        t.1 = page.aid;
+                        t.2 = page.bvid.clone();
+                        t.3 = page.playback;
+                    }
+                    t
+                };
                 if let Page::VideoDetail(page) = &mut self.current_page {
                     if page.bvid != bvid {
                         return;
@@ -408,6 +418,15 @@ impl App {
                             page.set_interaction_msg(err);
                         }
                     }
+                }
+                if preheat_cid != 0 {
+                    self.send_network_command(network::NetworkCommand::PreheatStream {
+                        bvid: preheat_bvid,
+                        aid: 0,
+                        cid: preheat_cid,
+                        duration: 0,
+                        playback: preheat_playback,
+                    });
                 }
             }
             network::NetworkEvent::VideoStreamSupportLoaded {

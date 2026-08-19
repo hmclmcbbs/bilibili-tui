@@ -18,11 +18,20 @@ use crate::api::{
     video::RelatedVideoItem,
     video::VideoInfo,
 };
-use crate::domain::playback::{PlayOrder, PlaylistItem, PlaylistSource};
+use crate::domain::playback::{PlayOrder, PlaybackOptions, PlaylistItem, PlaylistSource};
+use crate::player::proxy::MediaProxy;
+use crate::api::cdn::{PlayUrlData, RankedStreams, rank_streams};
 use crate::presentation::tui::DynamicTab;
 use futures_util::{StreamExt, stream};
 use std::collections::HashMap;
 use std::sync::{Arc, mpsc};
+
+/// Shared slot holding a pre-warmed media proxy (and its play URL) for the
+/// video the user is currently previewing. Opening a detail page fires
+/// `PreheatStream`, so by the time the user hits play the proxy is ready and
+/// its first segment is already cached locally -> no cold first-frame wait.
+pub type PreheatStore =
+    std::sync::Arc<tokio::sync::Mutex<Option<(String, i64, MediaProxy, PlayUrlData)>>>;
 
 #[derive(Debug)]
 pub enum NetworkCommand {
@@ -216,6 +225,17 @@ pub enum NetworkCommand {
     LoadMallExpressTrack {
         req_id: u64,
         order_id: i64,
+    },
+    /// Pre-warm the media proxy for a video being previewed, so playback can
+    /// start from an already-cached first segment (eliminates cold-start
+    /// first-frame latency). Handled inline in the worker loop, not via
+    /// `handle_command`.
+    PreheatStream {
+        bvid: String,
+        aid: i64,
+        cid: i64,
+        duration: i64,
+        playback: PlaybackOptions,
     },
 }
 
@@ -474,7 +494,7 @@ pub struct NetworkBridge {
     pub event_rx: mpsc::Receiver<NetworkEvent>,
 }
 
-pub fn start_network_worker(api_client: Arc<ApiClient>) -> NetworkBridge {
+pub fn start_network_worker(api_client: Arc<ApiClient>, preheat_store: PreheatStore) -> NetworkBridge {
     let (command_tx, command_rx) = mpsc::channel::<NetworkCommand>();
     let (event_tx, event_rx) = mpsc::channel::<NetworkEvent>();
 
@@ -497,6 +517,14 @@ pub fn start_network_worker(api_client: Arc<ApiClient>) -> NetworkBridge {
                     for (_, token) in cancellations.drain() {
                         token.cancel();
                     }
+                    continue;
+                }
+                if let NetworkCommand::PreheatStream { bvid, aid, cid, duration, playback } = command {
+                    let store = preheat_store.clone();
+                    let api = api_client.clone();
+                    runtime.spawn(async move {
+                        do_preheat(api, bvid, aid, cid, duration, playback, store).await;
+                    });
                     continue;
                 }
                 let key = command.cancel_key();
@@ -543,7 +571,7 @@ impl NetworkCommand {
             Self::DeleteHistory { .. } => "history_delete",
             Self::LoadArticle { .. } => "article_detail",
             Self::LoadLiveInit { .. } | Self::LoadLiveMore { .. } => "live",
-            Self::LoadVideoDetail { .. } | Self::ProbeVideoStreams { .. } => "video_detail",
+            Self::LoadVideoDetail { .. } | Self::ProbeVideoStreams { .. } | Self::PreheatStream { .. } => "video_detail",
             Self::LoadUpPage { .. }
             | Self::LoadUpVideos { .. }
             | Self::LoadSeriesList { .. }
@@ -562,6 +590,61 @@ impl NetworkCommand {
             Self::LoadMallExpressTrack { .. } => "mall_express_track",
         }
     }
+}
+
+/// Build the ranked streams (warm cache picks the fastest edge instantly;
+/// cold start probes once with a short timeout and picks the fastest edge),
+/// mirroring `play_video`'s selection so a preheated proxy is never a slower
+/// edge than what `play_video` would have used.
+async fn build_streams(
+    api: &ApiClient,
+    bvid: &str,
+    cid: i64,
+    playback: PlaybackOptions,
+) -> Option<(RankedStreams, PlayUrlData)> {
+    let play_url = api.get_play_url(bvid, cid, playback).await.ok()?;
+    let streams = RankedStreams::from_unranked(&play_url, playback).ok()?;
+    let mut s = streams;
+    if let Some(best) = s.best_cached_index() {
+        s.video.swap(0, best);
+    } else if let Ok(Ok(ranked)) = tokio::time::timeout(
+        std::time::Duration::from_millis(1500),
+        rank_streams(&play_url, playback),
+    )
+    .await
+    {
+        if !ranked.video.is_empty() {
+            s.video = ranked.video;
+        }
+        if !ranked.audio.is_empty() {
+            s.audio = ranked.audio;
+        }
+    }
+    Some((s, play_url))
+}
+
+/// Pre-warm a media proxy for the previewed video and stash it in `store`.
+/// `MediaProxy::start` already caches the primary first segment locally
+/// (stage-1), so a subsequent `play_video` that takes this slot gets an
+/// instant first-frame hit.
+async fn do_preheat(
+    api: Arc<ApiClient>,
+    bvid: String,
+    _aid: i64,
+    cid: i64,
+    _duration: i64,
+    playback: PlaybackOptions,
+    store: PreheatStore,
+) {
+    let hit = build_streams(&api, &bvid, cid, playback).await;
+    let mut guard = store.lock().await;
+    if let Some((streams, play_url)) = hit {
+        if let Ok(proxy) = MediaProxy::start(streams).await {
+            *guard = Some((bvid, cid, proxy, play_url));
+            return;
+        }
+    }
+    *guard = None;
 }
 
 /// Probe a video's stream list and report whether HDR and Hi-Res are
@@ -588,6 +671,9 @@ async fn probe_stream_support(
 async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> NetworkEvent {
     match command {
         NetworkCommand::CancelPending => unreachable!("handled by worker"),
+        // Intercepted and handled inline in the worker loop (spawns do_preheat
+        // and then `continue`s); it never reaches handle_command.
+        NetworkCommand::PreheatStream { .. } => unreachable!("handled by worker loop"),
         NetworkCommand::LoadHome {
             req_id,
             feed,

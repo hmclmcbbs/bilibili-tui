@@ -488,7 +488,7 @@ impl Default for DanmakuConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            display_area: 0.5,
+            display_area: 0.85,
             opacity: 1.0,
             font_scale: 1.0,
             duration: 7.0,

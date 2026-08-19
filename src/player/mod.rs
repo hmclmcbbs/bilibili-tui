@@ -23,7 +23,7 @@ use tokio::net::windows::named_pipe::{
 use tokio::process::Command;
 use tokio::time::{Instant, interval_at, timeout};
 
-mod proxy;
+pub mod proxy;
 
 static LIVE_SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static MPV_IPC_SEQUENCE: AtomicU64 = AtomicU64::new(1);
@@ -121,11 +121,26 @@ pub async fn play_video(
     video_quality: VideoQuality,
     playback_event_tx: Sender<PlaybackEvent>,
     session_id: u64,
+    preheat: crate::application::network::PreheatStore,
 ) -> Result<()> {
     let webpage_url = match page_num {
         Some(p) if p > 1 => format!("https://www.bilibili.com/video/{}?p={}", bvid, p),
         _ => format!("https://www.bilibili.com/video/{}", bvid),
     };
+    let load_t0 = std::time::Instant::now();
+    log_load("entry", load_t0);
+
+    // If a pre-warmed proxy for THIS video exists (opened-while-previewing),
+    // reuse it directly: its first segment is already cached locally, so the
+    // first frame is instant. This skips the get_play_url + MediaProxy::start
+    // round-trip below and keeps the background rerank intact.
+    let preheated = {
+        let mut g = preheat.lock().await;
+        g.take().filter(|(b, c, _, _)| *b == bvid && *c == cid)
+    };
+    if preheated.is_some() {
+        log_load("preheat_hit", load_t0);
+    }
 
     // Report watch start in the background: it is a fire-and-forget
     // network call and must not delay mpv startup.
@@ -152,34 +167,61 @@ pub async fn play_video(
     // start playback immediately. The (expensive) speed-ranked candidate
     // selection runs in the background task and, if it finds a better edge,
     // seamlessly switches mid-playback via replace_mpv_stream.
-    let (mut media_proxy, play_url_for_rerank) = (async {
+
+    // Resolve the play URL + direct stream up front. Warm cache picks the
+    // fastest edge instantly (best_cached_index); cold start probes once with
+    // a short timeout and starts DIRECTLY on the fastest edge, so we never do
+    // a mid-playback loadfile reload (which stutters). Worst case the probe is
+    // slow -> keep the primary edge. No yt-dlp parse on this path.
+    let (mut media_proxy, play_url_for_rerank) = if let Some((_, _, p_proxy, p_url)) = preheated {
+        (Some(p_proxy), Some(p_url))
+    } else {
+        (async {
+        let t0 = load_t0;
+        log_load("pur_req", t0);
         match api_client.get_play_url(bvid, cid, playback).await {
             Ok(play_url) => {
+                log_load("pur_resp", t0);
                 let rerank = play_url.clone();
                 let streams = crate::api::cdn::RankedStreams::from_unranked(&play_url, playback);
-                // Warm cache: start directly on the fastest cached CDN edge so
-                // we never buffer on the slow primary and then switch mid-
-                // playback (which reloads the stream and stutters). The best
-                // candidate is moved to index 0, so MediaProxy's generation=0
-                // URL already points at the fast edge. A cold start (no cached
-                // scores yet) leaves the primary at index 0 and lets the
-                // background probe switch later, as before.
-                let streams = streams.map(|mut s| {
-                    if let Some(best) = s.best_cached_index() {
-                        s.video.swap(0, best);
+                let streams = match streams {
+                    Ok(mut s) => {
+                        if let Some(best) = s.best_cached_index() {
+                            s.video.swap(0, best);
+                        } else {
+                            log_load("cold_start", t0);
+                            if let Ok(Ok(ranked)) = tokio::time::timeout(
+                                Duration::from_millis(1500),
+                                crate::api::cdn::rank_streams(&play_url, playback),
+                            )
+                            .await
+                            {
+                                if !ranked.video.is_empty() {
+                                    s.video = ranked.video;
+                                }
+                                if !ranked.audio.is_empty() {
+                                    s.audio = ranked.audio;
+                                }
+                            }
+                            log_load("cold_done", t0);
+                        }
+                        Ok(s)
                     }
-                    s
-                });
+                    Err(e) => Err(e),
+                };
+                log_load("proxy_start", t0);
                 let proxy = match streams {
                     Ok(streams) => proxy::MediaProxy::start(streams).await.ok(),
                     Err(_) => None,
                 };
+                log_load("proxy_done", t0);
                 (proxy, Some(rerank))
             }
             Err(_) => (None, None),
         }
     })
-    .await;
+    .await
+    };
     let ipc_path = mpv_ipc_path("bilibili-tui-mpv", &cid.to_string());
     remove_stale_mpv_ipc(&ipc_path);
     let danmaku_script_path = create_live_danmaku_script()?;
@@ -206,6 +248,22 @@ pub async fn play_video(
     cmd.arg("--input-terminal=no");
     // Use MPV's low-latency profile for Bilibili VOD playback.
     cmd.arg("--profile=low-latency");
+    // The low-latency profile is tuned for real-time/live streams, and two of
+    // its settings are actively harmful when mpv plays through the local
+    // loopback MediaProxy:
+    //   * stream-buffer-size=4k  -> mpv drains the proxy's cached 1MB prefix
+    //     in ~256 tiny 4KB reads; because the proxy responds with
+    //     "Connection: close", every read is a brand-new TCP connect + HTTP
+    //     round-trip. That churn is the dominant cause of the multi-second
+    //     first-frame stall over the local proxy. A multi-MB buffer pulls the
+    //     prefix in a handful of connections.
+    //   * vd-lavc-threads=1      -> single-threaded software decode when no
+    //     hardware decoder path is active, which is far slower to yield the
+    //     first decoded frame. 0 = let lavc auto-pick per CPU.
+    // We keep the profile's fast-probe / no-deep-analysis options and override
+    // only the two pathological ones.
+    cmd.arg("--stream-buffer-size=4M");
+    cmd.arg("--vd-lavc-threads=0");
     // Resume from the last watch position when the user has a saved progress.
     // Only resume when the video is mostly unwatched (progress < 95%).
     if let Some(start) = start_position
@@ -222,6 +280,8 @@ pub async fn play_video(
     cmd.arg(format!("--script={}", danmaku_script_path.display()));
     cmd.arg("--script-opts-append=double_video_fps=no");
     cmd.arg("--msg-level=ffmpeg=error,vd=warn");
+    // Start directly on the resolved (warm-cache or primary) stream. This
+    // avoids the slow yt-dlp page parse that --ytdl-format would trigger.
     if let Some(proxy) = &media_proxy {
         cmd.arg("--ytdl=no");
         cmd.arg(format!("--audio-file={}", proxy.audio_url));
@@ -232,6 +292,30 @@ pub async fn play_video(
     }
     apply_mpv_vo(&mut cmd);
 
+    let first_frame_ipc = ipc_path.clone();
+    let first_frame_t0 = load_t0;
+    tokio::spawn(async move {
+        let mut waited = 0u64;
+        loop {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            waited += 50;
+            if waited > 15000 {
+                log_load("first_frame_timeout", first_frame_t0);
+                break;
+            }
+            if let Ok(v) = mpv_ipc(
+                &first_frame_ipc,
+                serde_json::json!(["get_property", "time-pos"]),
+            )
+            .await
+            {
+                if v.get("data").and_then(|d| d.as_f64()).unwrap_or(0.0) > 0.0 {
+                    log_load("first_frame", first_frame_t0);
+                    break;
+                }
+            }
+        }
+    });
     let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -242,6 +326,7 @@ pub async fn play_video(
             return Err(error.into());
         }
     };
+    log_load("mpv_spawned", load_t0);
     let stderr = child
         .stderr
         .take()
@@ -278,7 +363,24 @@ pub async fn play_video(
         // Danmaku is fed to mpv position-by-position below; subtitles are
         // attached over IPC once the player socket is up (a spawned child
         // retries until the socket answers).
-        let danmaku = api_client.get_video_danmaku(cid, duration).await.unwrap_or_default();
+        let danmaku = api_client.get_video_danmaku(cid, Some(aid), duration).await.unwrap_or_default();
+        // 抓取总量诊断：无条件写盘（调试期，每次播放 append 一行，开销极小）。
+        {
+            let mut counts = std::collections::HashMap::<i32, usize>::new();
+            for d in &danmaku {
+                *counts.entry(d.mode).or_insert(0) += 1;
+            }
+            let mut line = format!("[fetch] total={} ", danmaku.len());
+            for k in [1, 4, 5, 6, 7, 8] {
+                if let Some(c) = counts.get(&k) {
+                    line.push_str(&format!("mode{}={} ", k, c));
+                }
+            }
+            line.push('\n');
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/bili_danmaku.log") {
+                let _ = f.write_all(line.as_bytes());
+            }
+        }
         let subtitle_paths = fetch_and_render_subtitles(&api_client, &bvid, cid).await;
         let subtitle_for_attach = subtitle_paths.clone();
         let attach_ipc = ipc_path.clone();
@@ -298,7 +400,22 @@ pub async fn play_video(
         let mut rerank_applied = false;
         if let Some(play_url) = play_url_for_rerank.clone() {
             tokio::spawn(async move {
-                let ranked = crate::api::cdn::rank_streams(&play_url, playback).await.ok();
+                log_load("rank_start", load_t0);
+                // Warm cache: from_unranked + best_cached_index already put the
+                // fastest edge at index 0 at start time, so the full probe adds
+                // no benefit and only competes with the video stream for
+                // bandwidth (and can reload/stutter). Skip it. Cold start (no
+                // cached scores) still probes and writes cdn-history.json.
+                let warm = crate::api::cdn::RankedStreams::from_unranked(&play_url, playback)
+                    .ok()
+                    .and_then(|st| st.best_cached_index())
+                    .is_some();
+                let ranked = if warm {
+                    None
+                } else {
+                    crate::api::cdn::rank_streams(&play_url, playback).await.ok()
+                };
+                log_load("rank_done", load_t0);
                 let _ = rerank_tx.send(ranked);
             });
         }
@@ -369,6 +486,17 @@ pub async fn play_video(
                             ).await.is_ok();
                             if !danmaku_ready {
                                 continue;
+                            }
+                        }
+                        // Seek handling: any jump larger than the tolerance
+                        // re-anchors the cursor to the new play position so the
+                        // comments at and after the landing point always appear
+                        // (otherwise they are skipped forever and danmaku
+                        // "disappears" after a seek). This intentionally replays
+                        // comments when scrubbing backward (matches Bilibili web).
+                        if let Some(head) = danmaku.get(next_danmaku) {
+                            if head.time < position - 0.5 || head.time > position + 0.5 {
+                                next_danmaku = danmaku.partition_point(|m| m.time < position);
                             }
                         }
                         last_danmaku_position = position;
@@ -578,11 +706,17 @@ async fn attach_subtitle_files(
     ipc_path: &std::path::Path,
     paths: &[std::path::PathBuf],
 ) {
-    for path in paths {
+    // `paths` is ordered with the Chinese track first (fetch_and_render_
+    // subtitles sorts entries by the zh flag, and play_playlist sorts the same
+    // way). Select only that first track so the displayed caption defaults to
+    // Chinese; the remaining tracks are attached but left unselected so they
+    // stay available without overriding the Chinese default.
+    for (i, path) in paths.iter().enumerate() {
+        let flags = if i == 0 { "select" } else { "auto" };
         for _ in 0..10 {
             match mpv_ipc(
                 ipc_path,
-                serde_json::json!(["sub-add", path.display().to_string(), "select"]),
+                serde_json::json!(["sub-add", path.display().to_string(), flags]),
             )
             .await
             {
@@ -601,6 +735,13 @@ fn is_corrupt_video_log(line: &str) -> bool {
     ]
     .iter()
     .any(|needle| line.contains(needle))
+}
+
+fn log_load(tag: &str, t0: std::time::Instant) {
+    let el = t0.elapsed().as_millis() as u64;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/bili_load.log") {
+        let _ = writeln!(f, "[load] {} ms={}", tag, el);
+    }
 }
 
 fn create_live_danmaku_script() -> Result<std::path::PathBuf> {
@@ -622,7 +763,7 @@ fn create_live_danmaku_script() -> Result<std::path::PathBuf> {
 }
 
 fn live_danmaku_value(message: &LiveMessage) -> Option<serde_json::Value> {
-    let LiveMessage::Danmaku { uid, content, color, .. } = message else {
+    let LiveMessage::Danmaku { uid, content, color, mode, .. } = message else {
         return None;
     };
 
@@ -630,7 +771,7 @@ fn live_danmaku_value(message: &LiveMessage) -> Option<serde_json::Value> {
         "text": content,
         "color": color,
         "uid": *uid,
-        "mode": 1,
+        "mode": *mode,
     }))
 }
 
@@ -1428,7 +1569,7 @@ pub async fn play_bangumi_episode(
     // Fetch the danmaku history before spawning mpv; the Lua script renders
     // it incrementally over IPC once playback starts.
     let danmaku = api_client
-        .get_video_danmaku(cid, duration_secs)
+        .get_video_danmaku(cid, None, duration_secs)
         .await
         .unwrap_or_default();
 
@@ -1508,6 +1649,17 @@ pub async fn play_bangumi_episode(
                             ).await.is_ok();
                             if !danmaku_ready {
                                 continue;
+                            }
+                        }
+                        // Seek handling: any jump larger than the tolerance
+                        // re-anchors the cursor to the new play position so the
+                        // comments at and after the landing point always appear
+                        // (otherwise they are skipped forever and danmaku
+                        // "disappears" after a seek). This intentionally replays
+                        // comments when scrubbing backward (matches Bilibili web).
+                        if let Some(head) = danmaku.get(next_danmaku) {
+                            if head.time < position - 0.5 || head.time > position + 0.5 {
+                                next_danmaku = danmaku.partition_point(|m| m.time < position);
                             }
                         }
                         last_danmaku_position = position;
@@ -2040,6 +2192,7 @@ mod playlist_tests {
             uname: "tester".to_string(),
             content: "你好".to_string(),
             color: 0x12_34_56,
+            mode: 1,
         };
         let payload = live_danmaku_payload(&message).expect("danmaku payload");
         let value: serde_json::Value = serde_json::from_str(&payload).expect("valid payload");

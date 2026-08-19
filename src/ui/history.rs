@@ -377,7 +377,15 @@ impl HistoryPage {
         if item.history.business == "archive" {
             if let Some(bvid) = item.get_bvid() {
                 let aid = item.history.oid;
-                return Some(AppAction::OpenVideoDetail(bvid.to_string(), aid));
+                // Use the preheating variant: watch history already carries the
+                // video's cid, so we can start warming the media proxy
+                // immediately instead of waiting for the detail page's
+                // VideoDetailLoaded event (~one network round-trip earlier).
+                return Some(AppAction::OpenVideoDetailPreheat(
+                    bvid.to_string(),
+                    aid,
+                    item.history.cid,
+                ));
             }
             return None;
         }

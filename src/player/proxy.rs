@@ -75,6 +75,13 @@ impl MediaProxy {
         });
         prefetch_backup(state.clone());
         prefetch_audio(state.clone());
+        // Warm the PRIMARY (generation=0) video prefix too, so the first
+        // frames are already in the local proxy cache when mpv starts. When
+        // this proxy is preheated on focus (before the user hits play), the
+        // segment is fetched ahead of time and mpv gets an instant local hit.
+        if let Some(pfx) = fetch_main_prefix(state.clone()).await {
+            state.prefixes.lock().await.insert(0, pfx);
+        }
         Ok(Self {
             state,
             video_url: format!("http://{address}/video?generation=0"),
@@ -143,6 +150,57 @@ impl MediaProxy {
         if let Some(candidate) = self.state.video.get(index) {
             record_cdn_result(&candidate.host, false);
         }
+    }
+}
+
+async fn fetch_main_prefix(state: Arc<ProxyState>) -> Option<CachedPrefix> {
+    let candidate = state.video.first()?.clone();
+    let download = async {
+        let Ok(mut response) = state
+            .client
+            .get(&candidate.url)
+            .header(RANGE, "bytes=0-1048575")
+            .header(REFERER, "https://www.bilibili.com/")
+            .header(USER_AGENT, UA)
+            .send()
+            .await
+            .and_then(|response| response.error_for_status())
+        else {
+            return None;
+        };
+        if response.status() != reqwest::StatusCode::PARTIAL_CONTENT {
+            return None;
+        }
+        let Some((range_start, range_end, total)) = response
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(parse_content_range)
+        else {
+            return None;
+        };
+        if range_start != 0 || range_end < range_start || total <= range_end {
+            return None;
+        }
+        let mut bytes = Vec::with_capacity(1024 * 1024);
+        while let Ok(Some(chunk)) = response.chunk().await {
+            let remaining = 1024 * 1024usize - bytes.len();
+            if remaining == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+            if bytes.len() >= 1024 * 1024 {
+                break;
+            }
+        }
+        if bytes.is_empty() {
+            return None;
+        }
+        Some(CachedPrefix { bytes, total })
+    };
+    tokio::select! {
+        _ = state.cancellation.cancelled() => None,
+        r = download => r,
     }
 }
 

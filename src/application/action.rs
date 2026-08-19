@@ -112,6 +112,12 @@ pub enum AppAction {
     RefreshDynamic,
     /// Open video detail page (bvid, aid)
     OpenVideoDetail(String, i64),
+    /// Open video detail page AND immediately pre-warm the media proxy using a
+    /// known cid (e.g. from watch history, which already carries the video's
+    /// cid). This starts the proxy ~one network round-trip earlier than
+    /// waiting for the detail page's `VideoDetailLoaded` event, so pressing
+    /// play soon after opening is already preheated.
+    OpenVideoDetailPreheat(String, i64, i64),
     /// Open an uploader's public space by member ID.
     OpenUpPage(i64),
     RefreshUpPage,

@@ -889,6 +889,7 @@ impl ApiClient {
     pub async fn get_video_danmaku(
         &self,
         cid: i64,
+        aid: Option<i64>,
         duration_secs: i64,
     ) -> Result<Vec<super::danmaku::VideoDanmaku>> {
         // Two endpoints complement each other:
@@ -907,14 +908,21 @@ impl ApiClient {
         let segment_count = ((duration_secs.max(0) as usize).div_ceil(360)).clamp(1, 64);
         let mut all = Vec::new();
         for chunk in (1..=segment_count).collect::<Vec<_>>().chunks(8) {
+            let cookie_str: Option<String> =
+                self.cookies.read().expect("cookies lock poisoned").clone();
             let fetched = futures_util::stream::iter(chunk.iter().copied())
                 .map(|segment_index| {
                     let client = self.client.clone();
+                    let cookie_str = cookie_str.clone();
                     async move {
                         let url = format!(
                             "https://api.bilibili.com/x/v2/dm/web/seg.so?type=1&oid={cid}&segment_index={segment_index}"
                         );
-                        let response = client.get(&url).send().await?;
+                        let mut req = client.get(&url);
+                        if let Some(ref cookies) = cookie_str {
+                            req = req.header(reqwest::header::COOKIE, cookies.as_str());
+                        }
+                        let response = req.send().await?;
                         if !response.status().is_success() {
                             return Ok::<Vec<super::danmaku::VideoDanmaku>, reqwest::Error>(
                                 Vec::new(),
@@ -982,17 +990,19 @@ impl ApiClient {
                         })
                     };
                     if !duplicate {
-                        all.push(item);
+                        all.push(item.clone());
                     }
                 }
             }
         }
 
+
+
         all.sort_by(|left, right| left.time.total_cmp(&right.time));
         Ok(all)
     }
 
-    /// Fetch the AI subtitle track list for a video. Returns an empty list
+/// Fetch the AI subtitle track list for a video. Returns an empty list
     /// when the video has no AI subtitles (or the player API hides them).
     pub async fn get_video_subtitles(
         &self,

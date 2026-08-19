@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 mod catalog;
 
 const PROBE_BYTES: u64 = 512 * 1024 - 1;
-const PROBE_TIMEOUT: Duration = Duration::from_millis(1500);
+const PROBE_TIMEOUT: Duration = Duration::from_millis(900);
 const USER_AGENT_VALUE: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36";
 const SCORE_TTL: Duration = Duration::from_secs(15 * 60);
 
@@ -486,7 +486,7 @@ async fn rank_urls(
     catalog_hosts: &[String],
 ) -> Result<Vec<CdnCandidate>> {
     let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_millis(800))
+        .connect_timeout(Duration::from_millis(400))
         .build()?;
     let mut urls = Vec::with_capacity(
         1 + stream.backup_url.as_ref().map_or(0, Vec::len)
@@ -704,7 +704,7 @@ pub async fn rank_streams(
     let audio = pick_audio(&data.dash, options)
         .ok_or_else(|| anyhow!("播放地址没有音频流"))?;
     let region_client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_millis(800))
+        .connect_timeout(Duration::from_millis(400))
         .build()?;
     let (region, catalog_hosts) = catalog::regional_hosts(&region_client).await;
     let (video, audio) = tokio::join!(

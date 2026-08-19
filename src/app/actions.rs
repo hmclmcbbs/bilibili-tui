@@ -266,6 +266,7 @@ impl App {
                 let video_quality = self.config.video_quality;
                 let tx = self.playback_event_tx.clone();
                 let bvid2 = bvid.clone();
+                let preheat = self.preheat.clone();
                 // Run the network startup (history progress + play URL +
                 // subtitles + danmaku) on a background task so the TUI keeps
                 // rendering while mpv is being prepared.
@@ -290,6 +291,7 @@ impl App {
                         video_quality,
                         tx.clone(),
                         session_id,
+                        preheat,
                     )
                     .await;
                     let (success, error) = match result {
@@ -324,6 +326,7 @@ impl App {
                     let video_quality = self.config.video_quality;
                     let tx = self.playback_event_tx.clone();
                     let bvid2 = bvid.clone();
+                    let preheat = self.preheat.clone();
                     // Update current page index in video detail page
                     if let Page::VideoDetail(detail_page) = &mut self.current_page
                         && detail_page.bvid == bvid
@@ -351,10 +354,11 @@ impl App {
                             credentials.as_ref(),
                             danmaku,
                             video_quality,
-                            tx.clone(),
-                            session_id,
-                        )
-                        .await;
+                        tx.clone(),
+                        session_id,
+                        preheat,
+                    )
+                    .await;
                         let (success, error) = match result {
                             Ok(()) => (true, None),
                             Err(error) => (false, Some(format!("启动播放器失败: {error:#}"))),
@@ -523,6 +527,39 @@ impl App {
                     bvid,
                     aid,
                 });
+            }
+            AppAction::OpenVideoDetailPreheat(bvid, aid, cid) => {
+                // Same as OpenVideoDetail, but also pre-warm the media proxy
+                // right now using the already-known cid. This matters for
+                // watch history, where the item already carries the cid: it
+                // starts the proxy ~one network round-trip before the
+                // VideoDetailLoaded event would, so playback is preheated if
+                // the user presses play soon after opening the detail page.
+                // The duplicate preheat fired later by VideoDetailLoaded is
+                // idempotent (do_preheat overwrites the store with the same
+                // proxy), so no harm is done.
+                let detail_page =
+                    crate::presentation::tui::VideoDetailPage::new(bvid.clone(), aid);
+                let previous = std::mem::replace(
+                    &mut self.current_page,
+                    Page::VideoDetail(Box::new(detail_page)),
+                );
+                self.navigation_stack.push(previous);
+                let req_id = self.next_request_id("video_detail");
+                self.send_network_command(network::NetworkCommand::LoadVideoDetail {
+                    req_id,
+                    bvid: bvid.clone(),
+                    aid,
+                });
+                if cid > 0 {
+                    self.send_network_command(network::NetworkCommand::PreheatStream {
+                        bvid,
+                        aid: 0,
+                        cid,
+                        duration: 0,
+                        playback: crate::domain::playback::PlaybackOptions::default(),
+                    });
+                }
             }
             AppAction::OpenUpPage(mid) => {
                 let page = UpPage::new(mid);
