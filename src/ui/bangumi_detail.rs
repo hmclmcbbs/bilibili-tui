@@ -25,6 +25,8 @@ pub struct BangumiDetailPage {
     pub followed: Option<bool>,
     /// Short message shown after a follow/unfollow operation.
     pub follow_msg: Option<String>,
+    /// Last watched episode id from the user's progress (None = not logged in / unknown).
+    pub last_ep_id: Option<i64>,
     // Flat list of all episodes for navigation
     flat_episodes: Vec<FlatEpisode>,
     last_click_time: Option<Instant>,
@@ -51,6 +53,7 @@ impl BangumiDetailPage {
             auto_play_pending: false,
             followed: None,
             follow_msg: None,
+            last_ep_id: None,
             flat_episodes: Vec::new(),
             last_click_time: None,
             last_click_index: None,
@@ -84,12 +87,32 @@ impl BangumiDetailPage {
             .and_then(|s| s.user_status.as_ref())
             .filter(|u| u.login == 1)
             .map(|u| u.follow == 1);
+        self.last_ep_id = self
+            .season
+            .as_ref()
+            .and_then(|s| s.user_status.as_ref())
+            .and_then(|u| u.progress.as_ref())
+            .filter(|p| p.last_ep_id > 0)
+            .map(|p| p.last_ep_id);
         let target_index = self.target_episode_id.and_then(|ep_id| {
             self.flat_episodes
                 .iter()
                 .position(|episode| episode.episode.id == ep_id)
         });
         self.selected_episode = target_index.unwrap_or(0);
+        // When opened normally (not from a specific episode), jump to the
+        // user's last-watched episode so "继续观看" starts where they left off.
+        if target_index.is_none() {
+            if let Some(last) = self.last_ep_id {
+                if let Some(idx) = self
+                    .flat_episodes
+                    .iter()
+                    .position(|fe| fe.episode.id == last)
+                {
+                    self.selected_episode = idx;
+                }
+            }
+        }
         if self.target_episode_id.is_some() && target_index.is_none() {
             self.auto_play_pending = false;
             self.error_message = Some("未找到历史记录对应的番剧剧集".to_string());
@@ -172,9 +195,12 @@ impl BangumiDetailPage {
             let mut constraints = vec![
                 Constraint::Length(1), // Title
                 Constraint::Length(1), // Score / status
+                Constraint::Length(1), // Watch progress
             ];
             if season.evaluate.is_some() {
-                constraints.push(Constraint::Min(2));
+                constraints.push(Constraint::Min(2)); // Description
+            } else {
+                constraints.push(Constraint::Min(1));
             }
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -243,6 +269,36 @@ impl BangumiDetailPage {
             }
             frame.render_widget(Paragraph::new(Line::from(stats_spans)), chunks[1]);
 
+            // Watch progress
+            if let Some(last_ep_id) = self.last_ep_id {
+                let last_index = self
+                    .season
+                    .as_ref()
+                    .and_then(|s| s.user_status.as_ref())
+                    .and_then(|u| u.progress.as_ref())
+                    .map(|p| p.last_ep_index.clone())
+                    .unwrap_or_default();
+                let total = self.flat_episodes.len();
+                let watched = self
+                    .flat_episodes
+                    .iter()
+                    .filter(|fe| fe.episode.id <= last_ep_id)
+                    .count();
+                let progress_text = if !last_index.is_empty() {
+                    format!("▶ 观看进度：第 {} 集（已看 {} / {}）", last_index, watched, total)
+                } else {
+                    format!("▶ 观看进度：已看 {} / {}", watched, total)
+                };
+                frame.render_widget(
+                    Paragraph::new(progress_text).style(
+                        Style::default()
+                            .fg(theme.fg_accent)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    chunks[2],
+                );
+            }
+
             // Description
             if let Some(ref desc) = season.evaluate
                 && !desc.is_empty()
@@ -256,7 +312,7 @@ impl BangumiDetailPage {
                     Paragraph::new(desc_text)
                         .style(Style::default().fg(theme.fg_muted))
                         .wrap(Wrap { trim: true }),
-                    chunks[2],
+                    chunks[3],
                 );
             }
         }
@@ -305,7 +361,18 @@ impl BangumiDetailPage {
                 .badge_text()
                 .map(|b| format!(" [{}]", b))
                 .unwrap_or_default();
-            let content = format!("  {}{}", ep.display_title(), badge);
+            let watched_mark = if let Some(last) = self.last_ep_id {
+                if ep.id == last {
+                    " ⏯"
+                } else if ep.id < last {
+                    " ✓"
+                } else {
+                    ""
+                }
+            } else {
+                ""
+            };
+            let content = format!("  {}{}{}", ep.display_title(), badge, watched_mark);
 
             let style = if is_selected {
                 Style::default()

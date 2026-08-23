@@ -175,6 +175,23 @@ pub struct UserStatus {
     /// even for valid sessions), so callers must fall back to the follow list.
     #[serde(default)]
     pub login: i32,
+    /// Watch progress for the logged-in user (present when logged in).
+    #[serde(default)]
+    pub progress: Option<SeasonProgress>,
+}
+
+/// User's watch progress for a season, returned under `user_status.progress`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SeasonProgress {
+    /// Episode id of the last watched episode.
+    #[serde(rename = "last_ep_id", default)]
+    pub last_ep_id: i64,
+    /// Human-readable index of the last watched episode (e.g. "6").
+    #[serde(rename = "last_ep_index", default)]
+    pub last_ep_index: String,
+    /// Seconds watched in the last episode (0 = fully watched / unknown).
+    #[serde(rename = "last_time", default)]
+    pub last_time: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -203,6 +220,8 @@ pub struct EpisodeSection {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BangumiEpisode {
     pub aid: i64,
+    #[serde(default)]
+    pub bvid: String,
     #[serde(default)]
     pub badge: String,
     pub cid: i64,

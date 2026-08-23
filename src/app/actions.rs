@@ -1750,7 +1750,7 @@ impl App {
             }
             AppAction::PlayBangumiEpisode {
                 ep_id,
-                season_id: _,
+                season_id,
                 title: _,
             } => {
                 let session_id = self.allocate_playback_session();
@@ -1760,6 +1760,7 @@ impl App {
                 match media::play_bangumi_episode(
                     self.api_client.clone(),
                     ep_id,
+                    season_id,
                     self.credentials.as_ref(),
                     danmaku_config,
                     self.config.video_quality,
