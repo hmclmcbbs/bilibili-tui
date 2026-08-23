@@ -38,6 +38,9 @@ pub struct ArticleDetailPage {
     comments: Vec<CommentItem>,
     image_urls: Vec<String>,
     image_protocols: Vec<Option<StatefulProtocol>>,
+    /// For each comment (parallel to `comments`), the indices into
+    /// `image_urls`/`image_protocols` that hold its inline pictures.
+    comment_images: Vec<Vec<usize>>,
     scroll: u16,
     visible_height: u16,
     picker: Arc<Picker>,
@@ -60,6 +63,7 @@ impl ArticleDetailPage {
             comments: Vec::new(),
             image_urls: Vec::new(),
             image_protocols: Vec::new(),
+            comment_images: Vec::new(),
             scroll: 0,
             visible_height: 1,
             picker,
@@ -73,8 +77,25 @@ impl ArticleDetailPage {
     pub fn set_article(&mut self, article: ArticleData, comments: Vec<CommentItem>) {
         let document = article.document();
         self.blocks = document.blocks;
+        let mut comment_images: Vec<Vec<usize>> = Vec::with_capacity(comments.len());
+        let mut image_urls = document.image_urls;
+        for comment in &comments {
+            let mut idxs = Vec::new();
+            for url in comment.pictures() {
+                let normalized = if url.starts_with("//") {
+                    format!("https:{url}")
+                } else {
+                    url
+                };
+                let i = image_urls.len();
+                image_urls.push(normalized);
+                idxs.push(i);
+            }
+            comment_images.push(idxs);
+        }
         self.comments = comments;
-        self.image_urls = document.image_urls;
+        self.comment_images = comment_images;
+        self.image_urls = image_urls;
         self.image_protocols = (0..self.image_urls.len()).map(|_| None).collect();
         self.article = Some(article);
         self.loading = false;
@@ -172,13 +193,93 @@ impl ArticleDetailPage {
             let clipped_rows = visible_start.saturating_sub(document_y);
             match article_block {
                 ArticleBlock::Text(text) => {
-                    frame.render_widget(
-                        Paragraph::new(text.as_str())
-                            .wrap(Wrap { trim: false })
-                            .scroll((clipped_rows, 0))
-                            .style(Style::default().fg(theme.fg_primary)),
-                        render_area,
-                    );
+                    let trimmed = text.trim_start();
+                    if let Some(rest) = trimmed.strip_prefix("### ") {
+                        // 三级小标题
+                        frame.render_widget(
+                            Paragraph::new(rest)
+                                .wrap(Wrap { trim: false })
+                                .scroll((clipped_rows, 0))
+                                .style(
+                                    Style::default()
+                                        .fg(theme.fg_primary)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            render_area,
+                        );
+                    } else if let Some(rest) = trimmed.strip_prefix("## ") {
+                        // 二级标题
+                        frame.render_widget(
+                            Paragraph::new(rest)
+                                .wrap(Wrap { trim: false })
+                                .scroll((clipped_rows, 0))
+                                .style(
+                                    Style::default()
+                                        .fg(theme.fg_accent)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            render_area,
+                        );
+                    } else if let Some(rest) = trimmed.strip_prefix("# ") {
+                        // 一级大标题（居中加粗）
+                        frame.render_widget(
+                            Paragraph::new(rest)
+                                .wrap(Wrap { trim: false })
+                                .scroll((clipped_rows, 0))
+                                .alignment(Alignment::Center)
+                                .style(
+                                    Style::default()
+                                        .fg(theme.fg_primary)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            render_area,
+                        );
+                    } else if let Some(rest) = trimmed.strip_prefix("> ") {
+                        // 引用块
+                        frame.render_widget(
+                            Paragraph::new(rest)
+                                .wrap(Wrap { trim: false })
+                                .scroll((clipped_rows, 0))
+                                .style(Style::default().fg(theme.fg_muted)),
+                            render_area,
+                        );
+                    } else if trimmed.starts_with("```") {
+                        // 代码块（去掉首尾 ``` 围栏）
+                        let code = text
+                            .trim_matches('`')
+                            .trim_matches('\n')
+                            .trim();
+                        frame.render_widget(
+                            Paragraph::new(code)
+                                .wrap(Wrap { trim: false })
+                                .scroll((clipped_rows, 0))
+                                .style(
+                                    Style::default()
+                                        .fg(theme.fg_muted)
+                                        .add_modifier(Modifier::DIM),
+                                ),
+                            render_area,
+                        );
+                    } else if trimmed.starts_with("• ") {
+                        // 列表项
+                        frame.render_widget(
+                            Paragraph::new(text.as_str())
+                                .wrap(Wrap { trim: false })
+                                .scroll((clipped_rows, 0))
+                                .style(Style::default().fg(theme.fg_primary)),
+                            render_area,
+                        );
+                    } else {
+                        // 正文段落：首行缩进 2 空格，呈书本/PDF 观感
+                        let indented = format!("  {text}");
+                        frame.render_widget(
+                            Paragraph::new(indented)
+                                .wrap(Wrap { trim: false })
+                                .scroll((clipped_rows, 0))
+                                .style(Style::default().fg(theme.fg_primary)),
+                            render_area,
+                        );
+                    }
                 }
                 ArticleBlock::Embedded(text) => {
                     frame.render_widget(
@@ -213,13 +314,21 @@ impl ArticleDetailPage {
         theme: &Theme,
         images: &mut ArticleImageState<'_>,
     ) {
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
-            .border_style(Style::default().fg(theme.border_subtle))
-            .title(format!(" {alt} "));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+        // LaTeX formula images (mathjax SVG) get no border box — just the
+        // rasterized formula drawn inline, like a piece of text.
+        let framed = !url.contains("mathjax");
+        let inner = if framed {
+            let block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.border_subtle))
+                .title(format!(" {alt} "));
+            let inner = block.inner(area);
+            frame.render_widget(block, area);
+            inner
+        } else {
+            area
+        };
         let Some(index) = images.urls.iter().position(|candidate| candidate == url) else {
             return;
         };
@@ -235,7 +344,7 @@ impl ArticleDetailPage {
         }
     }
 
-    fn render_comments(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+    fn render_comments(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
@@ -253,9 +362,16 @@ impl ArticleDetailPage {
             return;
         }
 
-        let mut lines = Vec::new();
-        for comment in &self.comments {
-            lines.push(Line::from(vec![
+        // Lay out each comment as: meta line, message (wrapped), then one
+        // image block per inline picture. Clip overflow to the visible area.
+        let mut y = inner.y;
+        let mut images = ArticleImageState {
+            urls: &self.image_urls,
+            protocols: &mut self.image_protocols,
+            failed: &self.failed_images,
+        };
+        for (ci, comment) in self.comments.iter().enumerate() {
+            let meta = Line::from(vec![
                 Span::styled(
                     comment.author_name(),
                     Style::default()
@@ -266,14 +382,44 @@ impl ArticleDetailPage {
                     format!("  {}  👍{}", comment.format_time(), comment.format_like()),
                     Style::default().fg(theme.fg_muted),
                 ),
-            ]));
-            lines.push(Line::styled(
-                comment.message().to_string(),
-                Style::default().fg(theme.fg_primary),
-            ));
-            lines.push(Line::default());
+            ]);
+            if y < inner.y + inner.height {
+                frame.render_widget(Paragraph::new(meta), Rect::new(inner.x, y, inner.width, 1));
+                y += 1;
+            }
+            let msg = Paragraph::new(comment.message().to_string())
+                .wrap(Wrap { trim: true })
+                .style(Style::default().fg(theme.fg_primary));
+            let msg_h = comment
+                .message()
+                .lines()
+                .map(|line| {
+                    let w = inner.width.max(1) as usize;
+                    line.chars().count().max(1).div_ceil(w) as u16
+                })
+                .sum::<u16>()
+                .max(1);
+            if y < inner.y + inner.height {
+                let h = msg_h.min(inner.y + inner.height - y);
+                frame.render_widget(msg, Rect::new(inner.x, y, inner.width, h));
+                y += msg_h;
+            }
+            for &img_idx in self.comment_images.get(ci).into_iter().flatten() {
+                let img_url = self
+                    .image_urls
+                    .get(img_idx)
+                    .cloned()
+                    .unwrap_or_default();
+                let h = 14u16.min(inner.y + inner.height - y);
+                if h == 0 {
+                    break;
+                }
+                let rect = Rect::new(inner.x, y, inner.width, h);
+                Self::render_inline_image(frame, rect, &img_url, "评论图片", theme, &mut images);
+                y += h + 1;
+            }
+            y += 1; // gap between comments
         }
-        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
     }
 }
 
@@ -411,8 +557,9 @@ fn article_block_height(block: &ArticleBlock, width: u16) -> u16 {
             text.lines()
                 .map(|line| Line::from(line).width().max(1).div_ceil(width) as u16)
                 .sum::<u16>()
-                .saturating_add(1)
+                .saturating_add(2)
         }
+        ArticleBlock::Image { url, .. } if url.contains("mathjax") => 8,
         ArticleBlock::Image { .. } => 14,
         ArticleBlock::Embedded(_) => 2,
     }

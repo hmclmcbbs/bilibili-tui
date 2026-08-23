@@ -113,6 +113,8 @@ impl SettingsPage {
             ("标签1", &self.keybindings.tab_1),
             ("标签2", &self.keybindings.tab_2),
             ("标签3", &self.keybindings.tab_3),
+            ("标签4", &self.keybindings.tab_4),
+            ("标签5", &self.keybindings.tab_5),
             // Actions
             ("切换主题", &self.keybindings.next_theme),
             ("播放", &self.keybindings.play),

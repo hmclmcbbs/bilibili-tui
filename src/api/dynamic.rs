@@ -173,6 +173,10 @@ pub struct DynamicItem {
     #[serde(rename = "type")]
     pub dynamic_type: Option<String>,
     pub modules: Option<DynamicModules>,
+    /// For forwarded (转发) dynamics, the original content is nested here.
+    /// Reused as the content source when rendering a forward card.
+    #[serde(default)]
+    pub orig: Option<Box<DynamicItem>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -393,6 +397,16 @@ impl DynamicItem {
             .and_then(|d| d.major.as_ref())
             .and_then(|m| m.major_type.as_ref())
             .map(|t| t == "MAJOR_TYPE_OPUS")
+            .unwrap_or(false)
+    }
+
+
+    /// Forwarded (转发) dynamics: the top-level type is DYNAMIC_TYPE_FORWARD
+    /// and the original content is nested under `orig` (not parsed here).
+    pub fn is_forward(&self) -> bool {
+        self.dynamic_type
+            .as_deref()
+            .map(|t| t == "DYNAMIC_TYPE_FORWARD")
             .unwrap_or(false)
     }
 

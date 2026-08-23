@@ -51,6 +51,19 @@ pub struct LevelInfo {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommentContent {
     pub message: Option<String>,
+    /// Inline pictures attached to the comment (B站: content.pictures[].img_src).
+    #[serde(default)]
+    pub pictures: Option<Vec<CommentPicture>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommentPicture {
+    #[serde(default)]
+    pub img_src: Option<String>,
+    #[serde(default)]
+    pub img_width: Option<i64>,
+    #[serde(default)]
+    pub img_height: Option<i64>,
 }
 
 impl CommentItem {
@@ -66,6 +79,20 @@ impl CommentItem {
             .as_ref()
             .and_then(|c| c.message.as_deref())
             .unwrap_or("")
+    }
+
+    /// URLs of pictures attached to the comment, if any.
+    pub fn pictures(&self) -> Vec<String> {
+        self.content
+            .as_ref()
+            .and_then(|c| c.pictures.as_ref())
+            .map(|ps| {
+                ps.iter()
+                    .filter_map(|p| p.img_src.clone())
+                    .filter(|u| !u.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn format_like(&self) -> String {

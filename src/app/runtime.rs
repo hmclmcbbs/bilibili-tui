@@ -1,6 +1,8 @@
 use crate::app::App;
 use crate::presentation::tui::{Component, Page};
+use crate::presentation::tui::NavItem;
 use crossterm::event::MouseEventKind;
+use ratatui::layout::Position;
 use ratatui::{
     DefaultTerminal, Frame,
     crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers, MouseEvent},
@@ -161,6 +163,7 @@ impl App {
         };
 
         if self.show_sidebar && chunks.len() > 1 {
+            self.last_sidebar_area = chunks[0];
             let user = self
                 .current_user
                 .as_ref()
@@ -250,6 +253,44 @@ impl App {
     }
 
     async fn handle_mouse(&mut self, event: MouseEvent, area: Rect) {
+        // Sidebar clicks: select the nav item under the cursor.
+        if self.show_sidebar {
+            let pos = Position::new(event.column, event.row);
+            if self.last_sidebar_area.contains(pos) {
+                let header_h: u16 = if self.current_user.is_some() { 9 } else { 4 };
+                // block has only a right border, so inner.y == area.y
+                let nav_start = self.last_sidebar_area.y + header_h + 1;
+                let idx = (event.row.saturating_sub(nav_start)) as usize;
+                let items = NavItem::all();
+                if idx < items.len() {
+                    let item = items[idx];
+                    match event.kind {
+                        MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
+                            self.handle_action(crate::application::AppAction::NavSelect(item)).await; return;
+                        }
+                        // scrolling over the sidebar moves selection sequentially
+                        MouseEventKind::ScrollDown => {
+                            let cur = items
+                                .iter()
+                                .position(|i| *i == self.sidebar.selected)
+                                .unwrap_or(0);
+                            let next = (cur + 1) % items.len();
+                            self.handle_action(crate::application::AppAction::NavSelect(items[next])).await; return;
+                        }
+                        MouseEventKind::ScrollUp => {
+                            let cur = items
+                                .iter()
+                                .position(|i| *i == self.sidebar.selected)
+                                .unwrap_or(0);
+                            let prev = if cur == 0 { items.len() - 1 } else { cur - 1 };
+                            self.handle_action(crate::application::AppAction::NavSelect(items[prev])).await; return;
+                        }
+                        _ => return,
+                    }
+                }
+                return;
+            }
+        }
         let action = match &mut self.current_page {
             Page::Login(page) => page.handle_mouse(event, area),
             Page::Home(page) => page.handle_mouse(event, area),
@@ -436,6 +477,8 @@ impl App {
                 page.series_videos.start_cover_downloads();
                 page.series_cards.poll_cover_results();
                 page.series_cards.start_cover_downloads();
+                page.article_cards.poll_cover_results();
+                page.article_cards.start_cover_downloads();
             }
             Page::Notifications(page) => {
                 page.poll_avatar_results();

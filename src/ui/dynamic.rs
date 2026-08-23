@@ -23,6 +23,8 @@ pub enum DynamicTab {
     Videos,
     /// Image/Opus dynamics (图文动态)
     Images,
+    /// Forwarded (转发) dynamics
+    Forward,
 }
 
 impl DynamicTab {
@@ -31,11 +33,17 @@ impl DynamicTab {
             DynamicTab::All => "全部",
             DynamicTab::Videos => "视频",
             DynamicTab::Images => "图文",
+            DynamicTab::Forward => "转发",
         }
     }
 
-    pub fn all_tabs() -> [DynamicTab; 3] {
-        [DynamicTab::All, DynamicTab::Videos, DynamicTab::Images]
+    pub fn all_tabs() -> [DynamicTab; 4] {
+        [
+            DynamicTab::All,
+            DynamicTab::Videos,
+            DynamicTab::Images,
+            DynamicTab::Forward,
+        ]
     }
 
     /// Get the API feed type parameter for this tab
@@ -44,6 +52,7 @@ impl DynamicTab {
             DynamicTab::All => None, // No type filter = all types
             DynamicTab::Videos => Some("video"),
             DynamicTab::Images => Some("draw"), // draw type includes both draw and opus
+            DynamicTab::Forward => None,
         }
     }
 }
@@ -109,28 +118,49 @@ impl DynamicPage {
             DynamicTab::All => item.is_video() || item.is_draw() || item.is_opus(),
             DynamicTab::Videos => item.is_video(),
             DynamicTab::Images => item.is_draw() || item.is_opus(),
+            DynamicTab::Forward => item.is_forward(),
         };
         if !should_include {
             return None;
         }
 
+        // Forwarded (转发) dynamics carry no own major content; the original
+        // item is nested under `orig`. Render that instead, but keep the
+        // forwarder's author name so the card reads as a repost.
+        let content = if item.is_forward() {
+            item.orig.as_deref().unwrap_or(item)
+        } else {
+            item
+        };
+        let forwarder = if item.is_forward() {
+            Some(item.author_name().to_string())
+        } else {
+            None
+        };
+        // 转发卡片：展示「🔁 转发者 → 原作者」，明确转发关系。
+        let display_author = if let Some(f) = &forwarder {
+            format!("🔁 {} 转发 {}", f, content.author_name())
+        } else {
+            content.author_name().to_string()
+        };
+
         // Handle video dynamics
-        if item.is_video() {
-            if let Some(bvid) = item.video_bvid() {
+        if content.is_video() {
+            if let Some(bvid) = content.video_bvid() {
                 return Some(VideoCard::new(
                     Some(bvid.to_string()),
                     None,
-                    item.video_title().unwrap_or("无标题").to_string(),
-                    item.author_name().to_string(),
-                    format!("▶ {}", item.video_play()),
-                    item.video_duration().to_string(),
-                    item.video_cover().map(|s| s.to_string()),
+                    content.video_title().unwrap_or("无标题").to_string(),
+                    display_author.clone(),
+                    format!("▶ {}", content.video_play()),
+                    content.video_duration().to_string(),
+                    content.video_cover().map(|s| s.to_string()),
                 ));
             }
         }
         // Handle image dynamics (带图动态)
-        else if item.is_draw() {
-            let images = item.draw_images();
+        else if content.is_draw() {
+            let images = content.draw_images();
             let image_url = images.first().map(|s| s.to_string());
             let desc = item.desc_text().unwrap_or("图片动态");
             let image_count = if images.len() > 1 {
@@ -142,16 +172,16 @@ impl DynamicPage {
                 None, // No bvid for images
                 None,
                 format!("{}{}", desc, image_count),
-                item.author_name().to_string(),
+                display_author.clone(),
                 "📷 图片动态".to_string(),
                 "".to_string(),
                 image_url,
             ));
         }
         // Handle text/opus dynamics (图文动态)
-        else if item.is_opus() {
-            let text = item.opus_text().unwrap_or("图文动态");
-            let images = item.opus_images();
+        else if content.is_opus() {
+            let text = content.opus_text().unwrap_or("图文动态");
+            let images = content.opus_images();
             let image_url = images.first().map(|s| s.to_string());
             let image_count = if !images.is_empty() {
                 format!(" [{}P]", images.len())
@@ -162,7 +192,7 @@ impl DynamicPage {
                 None,
                 None,
                 format!("{}{}", text, image_count),
-                item.author_name().to_string(),
+                display_author.clone(),
                 "📝 图文".to_string(),
                 "".to_string(),
                 image_url,
@@ -255,6 +285,21 @@ impl DynamicPage {
             self.grid.clear();
             self.loading = true;
             self.error_message = None;
+        }
+    }
+
+    /// Switch tab without reloading: reuse the items already fetched for the
+    /// same underlying feed (e.g. All / Article / Forward all pull the full
+    /// feed, only the client-side filter differs). Instantly re-filter the
+    /// stored `dynamic_items` so the grid updates without a network round-trip
+    /// or a stuck loading spinner.
+    pub fn switch_tab_reuse(&mut self, tab: DynamicTab) {
+        if self.current_tab != tab {
+            self.current_tab = tab;
+            self.grid.clear();
+            self.loading = false;
+            self.error_message = None;
+            self.apply_filter();
         }
     }
 
@@ -664,6 +709,10 @@ impl Component for DynamicPage {
         if keys.matches_tab_3(key) {
             return Some(AppAction::SwitchDynamicTab(DynamicTab::Images));
         }
+        if keys.matches_tab_4(key) {
+            return Some(AppAction::SwitchDynamicTab(DynamicTab::Forward));
+        }
+        // Note: no 5th tab; tab_5 keybinding is left unused to avoid a dead slot.
 
         // Open selected card
         if key == KeyCode::Char('u')

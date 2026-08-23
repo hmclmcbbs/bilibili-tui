@@ -167,6 +167,34 @@ pub struct SeriesArchiveStat {
     pub danmaku: Option<i64>,
 }
 
+/// A single column (专栏) article published by an UP.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpaceArticleItem {
+    pub id: i64,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub image_urls: Vec<String>,
+    #[serde(default)]
+    pub stats: Option<SpaceArticleStats>,
+    #[serde(default)]
+    pub ctime: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpaceArticleStats {
+    pub view: Option<i64>,
+    pub like: Option<i64>,
+}
+
+/// Response payload for the UP column list.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SpaceArticleData {
+    #[serde(default)]
+    pub articles: Vec<SpaceArticleItem>,
+    pub count: Option<i64>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::SpaceVideoOrder;

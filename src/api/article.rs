@@ -105,7 +105,7 @@ fn document_from_html(content: &str) -> ArticleDocument {
                     push_unique_url(&mut image_urls, &url);
                     document_blocks.push(ArticleBlock::Image {
                         url: normalized_url(&url),
-                        alt: image.value().attr("alt").unwrap_or("文章图片").to_string(),
+                        alt: image_alt(&image),
                     });
                 }
             }
@@ -119,19 +119,15 @@ fn document_from_html(content: &str) -> ArticleDocument {
             if inside_figure {
                 continue;
             }
-            if let Some(placeholder) = embedded_placeholder(&element) {
-                document_blocks.push(ArticleBlock::Embedded(placeholder));
-            } else if let Some(url) = image_url(&element) {
-                push_unique_url(&mut image_urls, &url);
-                document_blocks.push(ArticleBlock::Image {
-                    url: normalized_url(&url),
-                    alt: element
-                        .value()
-                        .attr("alt")
-                        .unwrap_or("文章图片")
-                        .to_string(),
-                });
-            }
+                if let Some(placeholder) = embedded_placeholder(&element) {
+                    document_blocks.push(ArticleBlock::Embedded(placeholder));
+                } else if let Some(url) = image_url(&element) {
+                    push_unique_url(&mut image_urls, &url);
+                    document_blocks.push(ArticleBlock::Image {
+                        url: normalized_url(&url),
+                        alt: image_alt(&element),
+                    });
+                }
             continue;
         }
 
@@ -200,14 +196,15 @@ fn document_from_json(content: &str) -> ArticleDocument {
         };
         if let Some(image) = object.get("native-image") {
             if let Some(url) = image.get("url").and_then(serde_json::Value::as_str) {
+                let alt = image
+                    .get("alt")
+                    .and_then(serde_json::Value::as_str)
+                    .map(percent_decode)
+                    .unwrap_or_else(|| "文章图片".to_string());
                 push_unique_url(&mut image_urls, url);
                 blocks.push(ArticleBlock::Image {
                     url: normalized_url(url),
-                    alt: image
-                        .get("alt")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("文章图片")
-                        .to_string(),
+                    alt,
                 });
             }
         } else if let Some(card) = object.get("video-card") {
@@ -310,6 +307,40 @@ fn normalized_url(url: &str) -> String {
     }
 }
 
+/// Percent-decode a string (`%XX` sequences -> bytes). Used to turn Bilibili's
+/// percent-encoded LaTeX `alt` text (e.g. `%5Cint_0`) into readable formulas.
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && bytes[i + 1].is_ascii_hexdigit()
+            && bytes[i + 2].is_ascii_hexdigit()
+        {
+            let hi = (bytes[i + 1] as char).to_digit(16).unwrap();
+            let lo = (bytes[i + 2] as char).to_digit(16).unwrap();
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Resolve the alt text for an image block, percent-decoding LaTeX formulas.
+fn image_alt(element: &scraper::ElementRef<'_>) -> String {
+    match element.value().attr("alt") {
+        Some(alt) if !alt.is_empty() => percent_decode(alt),
+        _ => "文章图片".to_string(),
+    }
+}
+
+/// Whether a Bilibili image URL points to an inline LaTeX formula rendered by
+/// the mathjax service (we show these as plain text, not as an image block).
 #[cfg(test)]
 mod tests {
     use super::*;

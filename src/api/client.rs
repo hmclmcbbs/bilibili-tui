@@ -1124,6 +1124,32 @@ impl ApiClient {
             .ok_or_else(|| anyhow!("space videos response has no data"))
     }
 
+    /// List an UP's columns (专栏) using the wbi-signed space article endpoint.
+    pub async fn get_space_articles(
+        &self,
+        mid: i64,
+        page: i32,
+        page_size: i32,
+    ) -> Result<super::space::SpaceArticleData> {
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/space/wbi/article");
+        let params = vec![
+            ("mid", mid.to_string()),
+            ("pn", page.to_string()),
+            ("ps", page_size.to_string()),
+        ];
+        let resp: ApiResponse<super::space::SpaceArticleData> =
+            self.get_with_wbi(&url, params).await?;
+        if resp.code != 0 {
+            return Err(anyhow!(
+                "space articles API error {}: {}",
+                resp.code,
+                resp.message
+            ));
+        }
+        resp.data
+            .ok_or_else(|| anyhow!("space articles response has no data"))
+    }
+
     /// List public favorite folders created by a user. Private folders remain
     /// visible only when the authenticated account has permission.
     pub async fn get_favorite_folders(

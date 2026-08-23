@@ -7,6 +7,7 @@ use crate::domain::playback::{PlayOrder, PlaylistItem, PlaylistSource};
 use crate::domain::playback::PlaybackOptions;
 use crate::infrastructure::persistence::{Credentials, DanmakuConfig, Keybindings, VideoQuality};
 use crate::presentation::tui::DynamicTab;
+use crate::presentation::tui::NavItem;
 
 /// Actions that can be triggered from UI components
 #[derive(Debug, Clone)]
@@ -103,6 +104,8 @@ pub enum AppAction {
     NavNext,
     /// Navigate to previous sidebar item
     NavPrev,
+    /// Jump directly to a specific sidebar item (used by mouse clicks on the sidebar)
+    NavSelect(NavItem),
     CancelPendingLoads,
     /// Search for videos
     Search(String),
@@ -128,6 +131,10 @@ pub enum AppAction {
     LoadMoreFavoriteResources,
     OpenSeriesFolder(i64),
     LoadMoreSeriesVideos,
+    /// Load (or refresh) an UP's columns (专栏) list, first page.
+    LoadUpArticles,
+    /// Load the next page of an UP's columns list.
+    LoadMoreUpArticles,
     SelectFavoriteSource(FavoriteSource),
     LoadMoreFavorites,
     /// Open dynamic detail page for image/text dynamics (dynamic_id)

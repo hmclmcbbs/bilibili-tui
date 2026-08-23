@@ -99,6 +99,8 @@ pub struct Keybindings {
     pub tab_1: String,
     pub tab_2: String,
     pub tab_3: String,
+    pub tab_4: String,
+    pub tab_5: String,
 
     // Actions
     pub next_theme: String,
@@ -140,6 +142,8 @@ impl Default for Keybindings {
             tab_1: "1".to_string(),
             tab_2: "2".to_string(),
             tab_3: "3".to_string(),
+            tab_4: "4".to_string(),
+            tab_5: "5".to_string(),
 
             // Actions
             next_theme: "t".to_string(),
@@ -332,6 +336,12 @@ impl Keybindings {
     pub fn matches_tab_3(&self, key: KeyCode) -> bool {
         self.matches(&self.tab_3, key)
     }
+    pub fn matches_tab_4(&self, key: KeyCode) -> bool {
+        self.matches(&self.tab_4, key)
+    }
+    pub fn matches_tab_5(&self, key: KeyCode) -> bool {
+        self.matches(&self.tab_5, key)
+    }
 
     pub fn matches_up_prev(&self, key: KeyCode) -> bool {
         self.matches(&self.up_prev, key) || key == KeyCode::Char('[')
@@ -375,6 +385,8 @@ impl Keybindings {
             ("标签1", &self.tab_1),
             ("标签2", &self.tab_2),
             ("标签3", &self.tab_3),
+            ("标签4", &self.tab_4),
+            ("标签5", &self.tab_5),
             // Actions
             ("切换主题", &self.next_theme),
             ("播放", &self.play),
@@ -412,17 +424,19 @@ impl Keybindings {
             14 => self.tab_1 = new_key,
             15 => self.tab_2 = new_key,
             16 => self.tab_3 = new_key,
+            17 => self.tab_4 = new_key,
+            18 => self.tab_5 = new_key,
             // Actions
-            17 => self.next_theme = new_key,
-            18 => self.play = new_key,
-            19 => self.open_settings = new_key,
-            20 => self.search_focus = new_key,
+            19 => self.next_theme = new_key,
+            20 => self.play = new_key,
+            21 => self.open_settings = new_key,
+            22 => self.search_focus = new_key,
             // Comments
-            21 => self.comment = new_key,
-            22 => self.toggle_replies = new_key,
+            23 => self.comment = new_key,
+            24 => self.toggle_replies = new_key,
             // Dynamic page
-            23 => self.up_prev = new_key,
-            24 => self.up_next = new_key,
+            25 => self.up_prev = new_key,
+            26 => self.up_next = new_key,
             _ => {}
         }
     }

@@ -426,6 +426,13 @@ impl App {
                     self.switch_to_nav_page().await;
                 }
             }
+            AppAction::NavSelect(item) => {
+                self.send_network_command(network::NetworkCommand::CancelPending);
+                if !matches!(self.current_page, Page::VideoDetail(_)) {
+                    self.sidebar.select(item);
+                    self.switch_to_nav_page().await;
+                }
+            }
             AppAction::CancelPendingLoads => {
                 self.send_network_command(network::NetworkCommand::CancelPending);
             }
@@ -747,6 +754,37 @@ impl App {
                             page: next_page,
                         },
                     );
+                }
+            }
+            AppAction::LoadUpArticles => {
+                if let Page::Up(page) = &mut self.current_page {
+                    if !page.articles.is_empty() {
+                        return;
+                    }
+                    page.loading = true;
+                    let mid = page.mid;
+                    let req_id = self.next_request_id("up_articles");
+                    self.send_network_command(network::NetworkCommand::LoadUpArticles {
+                        req_id,
+                        mid,
+                        page: 1,
+                    });
+                }
+            }
+            AppAction::LoadMoreUpArticles => {
+                if let Page::Up(page) = &mut self.current_page
+                    && page.article_has_more
+                    && !page.article_loading_more
+                {
+                    page.article_loading_more = true;
+                    let mid = page.mid;
+                    let next_page = page.article_page + 1;
+                    let req_id = self.next_request_id("up_articles");
+                    self.send_network_command(network::NetworkCommand::LoadUpArticles {
+                        req_id,
+                        mid,
+                        page: next_page,
+                    });
                 }
             }
             AppAction::SelectFavoriteSource(source) => {

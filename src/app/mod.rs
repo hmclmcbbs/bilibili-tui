@@ -10,6 +10,7 @@ use crate::infrastructure::{
     persistence::{self, AppConfig, Credentials, Keybindings},
 };
 use crate::presentation::tui::{BangumiPage, DEFAULT_THEME_ID, HomePage, Page, Sidebar, Theme};
+use ratatui::layout::Rect;
 use ratatui_image::{picker::Picker, protocol::StatefulProtocol};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,6 +57,8 @@ pub struct App {
     pub credentials: Option<Credentials>,
     pub sidebar: Sidebar,
     pub show_sidebar: bool,
+    /// Last rendered sidebar area, used for mouse hit-testing.
+    last_sidebar_area: Rect,
 
     /// Currently logged-in user profile shown in the sidebar.
     pub current_user: Option<CurrentUser>,
@@ -140,6 +143,7 @@ impl App {
             credentials,
             sidebar: Sidebar::new(),
             show_sidebar: true,
+            last_sidebar_area: Rect::default(),
             current_user: None,
             user_avatar: None,
             user_avatar_pending: false,

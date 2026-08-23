@@ -542,6 +542,21 @@ impl App {
                     page.apply_series_archives(series_id, is_series, loaded_page, data);
                 }
             }
+            network::NetworkEvent::UpArticlesLoaded {
+                req_id,
+                mid,
+                page: loaded_page,
+                data,
+            } => {
+                if !self.is_latest_request("up_articles", req_id) {
+                    return;
+                }
+                if let Page::Up(page) = &mut self.current_page
+                    && page.mid == mid
+                {
+                    page.apply_articles(loaded_page, data, mid);
+                }
+            }
             network::NetworkEvent::PlaylistLoaded {
                 req_id,
                 items,

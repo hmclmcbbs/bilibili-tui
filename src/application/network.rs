@@ -143,6 +143,12 @@ pub enum NetworkCommand {
         is_series: bool,
         page: i32,
     },
+    /// Load an UP's columns (专栏) list.
+    LoadUpArticles {
+        req_id: u64,
+        mid: i64,
+        page: i32,
+    },
     BuildUpPlaylist {
         req_id: u64,
         mid: i64,
@@ -387,6 +393,12 @@ pub enum NetworkEvent {
         page: i32,
         data: crate::api::space::SeriesArchivesData,
     },
+    UpArticlesLoaded {
+        req_id: u64,
+        mid: i64,
+        page: i32,
+        data: crate::api::space::SpaceArticleData,
+    },
     PlaylistLoaded {
         req_id: u64,
         items: Vec<PlaylistItem>,
@@ -575,7 +587,8 @@ impl NetworkCommand {
             Self::LoadUpPage { .. }
             | Self::LoadUpVideos { .. }
             | Self::LoadSeriesList { .. }
-            | Self::LoadSeriesArchives { .. } => "up",
+            | Self::LoadSeriesArchives { .. }
+            | Self::LoadUpArticles { .. } => "up",
             Self::LoadDynamicDetail { .. } => "dynamic_detail",
             Self::LoadBangumiIndex { .. } | Self::LoadBangumiDetail { .. } => "bangumi",
             Self::LoadBangumiFollowList { .. } => "bangumi_follow_list",
@@ -864,6 +877,17 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 },
             Err(error) => failed(req_id, "series_archives", error),
         },
+        NetworkCommand::LoadUpArticles { req_id, mid, page } => {
+            match api_client.get_space_articles(mid, page, 20).await {
+                Ok(data) => NetworkEvent::UpArticlesLoaded {
+                    req_id,
+                    mid,
+                    page,
+                    data,
+                },
+                Err(error) => failed(req_id, "up_articles", error),
+            }
+        }
         NetworkCommand::BuildUpPlaylist {
             req_id,
             mid,

@@ -23,6 +23,7 @@ pub enum UpTab {
     Videos,
     Favorites,
     Collections,
+    Articles,
 }
 
 pub struct UpPage {
@@ -43,18 +44,25 @@ pub struct UpPage {
     pub favorite_page: i32,
     pub favorite_order: FavoriteOrder,
     pub favorite_has_more: bool,
-    // ── 合集状态 ──
-    pub series_list: Vec<SeriesInfo>,
-    pub series_cards: VideoCardGrid,
-    pub series_selected: usize,
-    pub series_list_loaded: bool,
-    pub pending_series: Option<i64>,
-    pub pending_series_is_series: bool,
-    pub active_series: Option<i64>,
-    pub active_series_is_series: bool,
-    pub series_videos: VideoCardGrid,
-    pub series_page: i32,
-    pub series_has_more: bool,
+            // ── 合集状态 ──
+            pub series_list: Vec<SeriesInfo>,
+            pub series_cards: VideoCardGrid,
+            pub series_selected: usize,
+            pub series_list_loaded: bool,
+            pub pending_series: Option<i64>,
+            pub pending_series_is_series: bool,
+            pub active_series: Option<i64>,
+            pub active_series_is_series: bool,
+            pub series_videos: VideoCardGrid,
+            pub series_page: i32,
+            pub series_has_more: bool,
+            // ── 专栏状态 ──
+            pub articles: Vec<crate::api::space::SpaceArticleItem>,
+            pub article_cards: VideoCardGrid,
+            pub article_selected: usize,
+            pub article_page: i32,
+            pub article_has_more: bool,
+            pub article_loading_more: bool,
     pub loading: bool,
     pub loading_more: bool,
     pub error: Option<String>,
@@ -97,6 +105,12 @@ impl UpPage {
             series_videos: VideoCardGrid::new(),
             series_page: 1,
             series_has_more: false,
+            articles: Vec::new(),
+            article_cards: VideoCardGrid::new(),
+            article_selected: 0,
+            article_page: 1,
+            article_has_more: false,
+            article_loading_more: false,
             loading: true,
             loading_more: false,
             error: None,
@@ -295,6 +309,51 @@ impl UpPage {
         self.error = None;
     }
 
+    /// Apply a page of column (专栏) articles fetched for this UP.
+    pub fn apply_articles(
+        &mut self,
+        page: i32,
+        data: crate::api::space::SpaceArticleData,
+        _mid: i64,
+    ) {
+        if page == 1 {
+            self.articles.clear();
+            self.article_cards.clear();
+        }
+        let total = data.count.unwrap_or(0);
+        for article in data.articles {
+            let views = article
+                .stats
+                .as_ref()
+                .and_then(|s| s.view)
+                .map(format_count)
+                .unwrap_or_else(|| "-".to_string());
+            let likes = article
+                .stats
+                .as_ref()
+                .and_then(|s| s.like)
+                .map(format_count)
+                .unwrap_or_else(|| "-".to_string());
+            let cover = article.image_urls.first().cloned();
+            let card = VideoCard::new(
+                None, // 专栏不是视频，无 bvid
+                None,
+                article.title.clone().unwrap_or_else(|| "(无标题)".to_string()),
+                "专栏".to_string(),
+                format!("👁 {views}"),
+                format!("👍 {likes}"),
+                cover,
+            );
+            self.articles.push(article);
+            self.article_cards.add_card(card);
+        }
+        self.article_page = page;
+        self.article_has_more = self.articles.len() < total as usize;
+        self.article_loading_more = false;
+        self.loading = false;
+        self.error = None;
+    }
+
     pub fn set_error(&mut self, error: String) {
         self.loading = false;
         self.loading_more = false;
@@ -318,6 +377,7 @@ impl UpPage {
             UpTab::Videos => &mut self.videos,
             UpTab::Favorites => &mut self.favorite_videos,
             UpTab::Collections => &mut self.series_videos,
+            UpTab::Articles => &mut self.videos, // unreachable: Articles has its own nav
         }
     }
 
@@ -441,11 +501,12 @@ impl Component for UpPage {
             PlayOrder::Reverse => "倒序播放",
             PlayOrder::Shuffle => "随机播放",
         };
-        let tabs = Tabs::new(vec!["1 投稿", "2 收藏夹", "3 合集"])
+        let tabs = Tabs::new(vec!["1 投稿", "2 收藏夹", "3 合集", "4 专栏"])
             .select(match self.tab {
                 UpTab::Videos => 0,
                 UpTab::Favorites => 1,
                 UpTab::Collections => 2,
+                UpTab::Articles => 3,
             })
             .highlight_style(Style::default().fg(theme.bilibili_pink))
             .block(Block::default().borders(Borders::ALL).title(format!(
@@ -454,6 +515,7 @@ impl Component for UpPage {
                     UpTab::Videos => sort,
                     UpTab::Favorites => favorite_sort,
                     UpTab::Collections => "合集",
+                    UpTab::Articles => "专栏",
                 }
             )));
         frame.render_widget(tabs, chunks[1]);
@@ -499,13 +561,23 @@ impl Component for UpPage {
             } else {
                 self.series_cards.render(frame, chunks[2], theme);
             }
+        } else if self.tab == UpTab::Articles {
+            // 专栏列表（带封面的卡片网格，与合集样式一致）
+            if self.articles.is_empty() {
+                frame.render_widget(
+                    Paragraph::new("该UP主没有发布专栏，或正在加载…")
+                        .style(Style::default().fg(theme.fg_secondary)),
+                    chunks[2],
+                );
+            } else {
+                self.article_cards.render(frame, chunks[2], theme);
+            }
         }
-
         frame.render_widget(
             Paragraph::new(shortcut_footer(
                 theme,
                 [
-                    ("1/2/3".into(), "投稿/收藏夹/合集".into(), theme.info),
+                    ("1/2/3/4".into(), "投稿/收藏夹/合集/专栏".into(), theme.info),
                     (
                         format!("{}/{}", keys.page_up, keys.page_down),
                         "翻页".into(),
@@ -566,6 +638,15 @@ impl Component for UpPage {
                 if !self.series_list_loaded {
                     self.loading = true;
                     return Some(AppAction::OpenSeriesFolder(0));
+                }
+                return Some(AppAction::None);
+            }
+            KeyCode::Char('4') => {
+                self.tab = UpTab::Articles;
+                self.article_selected = 0;
+                // 首次进入时触发加载（由 AppAction 发送到网络）。
+                if self.articles.is_empty() {
+                    return Some(AppAction::LoadUpArticles);
                 }
                 return Some(AppAction::None);
             }
@@ -660,6 +741,39 @@ impl Component for UpPage {
         let favorite_has_more = self.favorite_has_more;
         let series_has_more = self.series_has_more;
         let grid = self.selected_grid();
+        // 专栏 tab uses its own list navigation.
+        if tab == UpTab::Articles {
+            if keys.matches_down(key) || keys.matches_page_down(key) {
+                self.article_cards.move_down();
+                if self.article_cards.is_near_bottom(self.article_cards.cached_visible_rows)
+                    && self.article_has_more
+                    && !self.article_loading_more
+                    && self.article_cards.selected_index + 1 >= self.articles.len()
+                {
+                    return Some(AppAction::LoadMoreUpArticles);
+                }
+                return Some(AppAction::None);
+            }
+            if keys.matches_up(key) || keys.matches_page_up(key) {
+                self.article_cards.move_up();
+                return Some(AppAction::None);
+            }
+            if keys.matches_right(key) {
+                self.article_cards.move_right();
+                return Some(AppAction::None);
+            }
+            if keys.matches_left(key) {
+                self.article_cards.move_left();
+                return Some(AppAction::None);
+            }
+            if keys.matches_confirm(key) {
+                if let Some(article) = self.articles.get(self.article_cards.selected_index) {
+                    return Some(AppAction::OpenArticle(article.id));
+                }
+                return Some(AppAction::None);
+            }
+            return Some(AppAction::None);
+        }
         if keys.matches_play(key) {
             if tab == UpTab::Videos {
                 return Some(AppAction::PlayUpAll {

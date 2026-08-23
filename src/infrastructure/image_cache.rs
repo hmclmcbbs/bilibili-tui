@@ -234,7 +234,12 @@ impl ImageCache {
         // 3. disk (raw bytes) -> decode
         let disk_bytes = tokio::fs::read(self.disk_path(url)).await.ok();
         if let Some(bytes) = disk_bytes {
-            if let Some(img) = decode_image(bytes).await {
+            let decoded = if is_svg(&bytes) {
+                decode_svg(bytes).await
+            } else {
+                decode_image(bytes).await
+            };
+            if let Some(img) = decoded {
                 let mut g = holder.lock().await;
                 *g = Some(img.clone());
                 self.touch_disk(url);
@@ -267,11 +272,67 @@ async fn decode_image(bytes: Vec<u8>) -> Option<DynamicImage> {
         .flatten()
 }
 
+/// Heuristic check for SVG content (Bilibili serves mathjax formulas as SVG).
+fn is_svg(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(512)];
+    std::str::from_utf8(head)
+        .map(|s| s.trim_start().starts_with("<svg") || s.contains("<svg"))
+        .unwrap_or(false)
+}
+
+/// Rasterize an SVG document into a `DynamicImage` via usvg + resvg.
+/// Bilibili mathjax SVGs are tiny (a few px tall), so we scale them up to a
+/// readable size before rasterizing.
+async fn decode_svg(bytes: Vec<u8>) -> Option<DynamicImage> {
+    const SCALE: f32 = 4.0;
+    tokio::task::spawn_blocking(move || {
+        // Bilibili mathjax formulas render with `currentColor` on a transparent
+        // background, which defaults to black text -> invisible on a dark
+        // terminal. Force white so formulas read clearly.
+        let bytes: Vec<u8> = {
+            let s = String::from_utf8_lossy(&bytes);
+            if s.contains("currentColor") {
+                s.replace("currentColor", "#ffffff").into_bytes()
+            } else {
+                bytes
+            }
+        };
+        let tree = usvg::Tree::from_data(&bytes, &usvg::Options::default()).ok()?;
+        let pixmap_size = tree.size();
+        let width = pixmap_size.width().ceil() as u32;
+        let height = pixmap_size.height().ceil() as u32;
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let w = (width as f32 * SCALE) as u32;
+        let h = (height as f32 * SCALE) as u32;
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(w, h)?;
+        let mut pixmap_mut = pixmap.as_mut();
+        resvg::render(
+            &tree,
+            usvg::Transform::from_scale(SCALE, SCALE),
+            &mut pixmap_mut,
+        );
+        let png_bytes = pixmap.encode_png().ok()?;
+        image::load_from_memory(&png_bytes).ok()
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 async fn fetch_and_store(cache: &ImageCache, url: &str) -> Option<DynamicImage> {
     let _permit = download_semaphore().acquire().await.ok()?;
     let response = reqwest::get(url).await.ok()?;
     let bytes = response.bytes().await.ok()?;
-    let img = decode_image(bytes.to_vec()).await?;
+    // Bilibili mathjax formula images are served as SVG, which the `image`
+    // crate cannot decode. Rasterize them to PNG first.
+    let decoded = if is_svg(&bytes) {
+        decode_svg(bytes.to_vec()).await?
+    } else {
+        decode_image(bytes.to_vec()).await?
+    };
+    let img = decoded;
     // Store raw bytes on disk for next run.
     let path = cache.disk_path(url);
     let _ = tokio::fs::create_dir_all(cache.dir.clone()).await;
