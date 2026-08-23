@@ -1505,7 +1505,6 @@ fn ordered_playlist(
 pub async fn play_bangumi_episode(
     api_client: Arc<ApiClient>,
     ep_id: i64,
-    season_id: i64,
     credentials: Option<&Credentials>,
     danmaku_config: DanmakuConfig,
     video_quality: VideoQuality,
@@ -1514,10 +1513,6 @@ pub async fn play_bangumi_episode(
 ) -> Result<()> {
     // Resolve the episode first: we need its cid to fetch danmaku.
     let episode = api_client.get_bangumi_episode_info(ep_id).await?;
-    // Parse the user's mid (for progress reporting) before the spawn, since
-    // `credentials` is a borrow that must not escape the async task.
-    let report_mid =
-        credentials.and_then(|c| c.dede_user_id.parse::<i64>().ok()).unwrap_or(0);
     let cid = episode.cid;
     let duration_secs = if episode.duration > 0 {
         episode.duration / 1000
@@ -1641,14 +1636,6 @@ pub async fn play_bangumi_episode(
         let mut danmaku_interval = tokio::time::interval(Duration::from_millis(50));
         let mut danmaku_ready = false;
         let mut exit_status = None;
-        // Throttle watch-progress reporting (the same 50ms loop as danmaku).
-        let mut report_ticks = 0u32;
-        let report_ep_id = ep_id;
-        let report_aid = episode.aid;
-        let report_cid = episode.cid;
-        let report_bvid = episode.bvid.clone();
-        let report_season_id = season_id;
-        let report_client = api_client;
 
         loop {
             tokio::select! {
@@ -1689,22 +1676,6 @@ pub async fn play_bangumi_episode(
                             &due_messages,
                         )
                         .await;
-                        // Report watch progress to Bilibili roughly every ~15s
-                        // so the season view's "继续观看" stays current.
-                        report_ticks = report_ticks.wrapping_add(1);
-                        if report_ticks % 300 == 0 {
-                            let _ = report_client
-                                .report_bangumi_progress(
-                                    report_aid,
-                                    report_cid,
-                                    &report_bvid,
-                                    report_ep_id,
-                                    report_season_id,
-                                    report_mid,
-                                    position as i64,
-                                )
-                                .await;
-                        }
                     }
                 }
                 result = child.wait() => {
@@ -1712,21 +1683,6 @@ pub async fn play_bangumi_episode(
                     break;
                 }
             }
-        }
-
-        // Final progress report on playback end (use last known position).
-        if let Some(position) = mpv_time_pos(&ipc_path).await {
-            let _ = report_client
-                .report_bangumi_progress(
-                    report_aid,
-                    report_cid,
-                    &report_bvid,
-                    report_ep_id,
-                    report_season_id,
-                    report_mid,
-                    position as i64,
-                )
-                .await;
         }
 
         // Cleanup cookie file

@@ -1601,49 +1601,6 @@ impl ApiClient {
         Ok(result)
     }
 
-    /// Report bangumi/episode watch progress to Bilibili so the season view
-    /// shows the correct "继续观看" position. `played_time` is elapsed seconds.
-    /// Uses the player heartbeat endpoint (carries ep_id/sid/mid) which drives
-    /// the season view's progress, not the plain video history report.
-    pub async fn report_bangumi_progress(
-        &self,
-        aid: i64,
-        cid: i64,
-        bvid: &str,
-        ep_id: i64,
-        sid: i64,
-        mid: i64,
-        played_time: i64,
-    ) -> Result<()> {
-        let url = self.build_url(BilibiliApiDomain::Main, "/x/click-interface/web/heartbeat");
-        let now = chrono::Utc::now().timestamp();
-        let start_ts = now - played_time;
-        let form_data = vec![
-            ("aid", aid.to_string()),
-            ("cid", cid.to_string()),
-            ("bvid", bvid.to_string()),
-            ("epid", ep_id.to_string()),
-            ("sid", sid.to_string()),
-            ("mid", mid.to_string()),
-            ("played_time", played_time.to_string()),
-            ("real_played_time", played_time.to_string()),
-            ("realtime", "0".to_string()),
-            ("start_ts", start_ts.to_string()),
-            ("type", "3".to_string()),
-            ("play_type", "1".to_string()),
-            ("dt", "2".to_string()),
-        ];
-        let resp: ApiResponse<serde_json::Value> = self.post(&url, form_data).await?;
-        if resp.code != 0 {
-            return Err(anyhow!(
-                "report bangumi progress error {}: {}",
-                resp.code,
-                resp.message
-            ));
-        }
-        Ok(())
-    }
-
     /// Resolve a single bangumi episode by its ep id, returning the episode
     /// record (used for its cid, which is needed to fetch danmaku).
     pub async fn get_bangumi_episode_info(
