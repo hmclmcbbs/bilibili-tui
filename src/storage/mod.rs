@@ -551,6 +551,10 @@ pub struct AppConfig {
     pub mpv_hwdec: Option<String>,
     #[serde(default)]
     pub video_quality: VideoQuality,
+    /// When true, downloading a bangumi episode also pulls the whole season
+    /// (yt-dlp `--yes-playlist`). Off by default to avoid bulk/rate-limiting.
+    #[serde(default)]
+    pub download_whole_season: bool,
 }
 
 impl Default for AppConfig {
@@ -563,6 +567,7 @@ impl Default for AppConfig {
             mpv_vo: None,
             mpv_hwdec: None,
             video_quality: VideoQuality::default(),
+            download_whole_season: false,
         }
     }
 }
@@ -741,6 +746,30 @@ pub fn export_cookies_for_ytdlp(credentials: &Credentials) -> Result<PathBuf> {
         credentials.sessdata, credentials.bili_jct, credentials.dede_user_id
     );
 
+    write_private_file(&path, content.as_bytes())?;
+    Ok(path)
+}
+
+/// Write a raw `name=value; name=value` cookie string (as held by the app's
+/// `ApiClient`, including buvid3/buvid4 fingerprint cookies) into a Netscape
+/// cookie file that `yt-dlp --cookies` can consume. This avoids the 412
+/// risk-control that hits yt-dlp when buvid cookies are missing.
+pub fn write_cookies_for_ytdlp(cookie_str: &str) -> Result<PathBuf> {
+    let sequence = COOKIE_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let path = get_config_dir()?.join(format!("cookies-{}-{sequence}.txt", std::process::id()));
+    let mut content = String::from("# Netscape HTTP Cookie File\n");
+    for part in cookie_str.split(';') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        if let Some((name, value)) = part.split_once('=') {
+            content.push_str(&format!(
+                ".bilibili.com\tTRUE\t/\tFALSE\t0\t{}\t{}\n",
+                name, value
+            ));
+        }
+    }
     write_private_file(&path, content.as_bytes())?;
     Ok(path)
 }

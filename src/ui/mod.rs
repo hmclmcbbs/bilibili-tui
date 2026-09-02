@@ -3,6 +3,7 @@ mod bangumi;
 mod bangumi_detail;
 mod dynamic;
 mod dynamic_detail;
+mod downloads;
 mod favorites;
 mod history;
 mod home;
@@ -25,6 +26,7 @@ pub use bangumi::BangumiPage;
 pub use bangumi_detail::BangumiDetailPage;
 pub use dynamic::{DynamicPage, DynamicTab};
 pub use dynamic_detail::DynamicDetailPage;
+pub use downloads::DownloadsPage;
 pub use favorites::FavoritesPage;
 pub use history::HistoryPage;
 pub use home::HomePage;
@@ -109,6 +111,7 @@ pub enum Page {
     Up(Box<UpPage>),
     History(HistoryPage),
     Favorites(FavoritesPage),
+    Downloads(DownloadsPage),
     Live(LivePage),
     LiveDetail(Box<LiveDetailPage>),
     Settings(Box<SettingsPage>),

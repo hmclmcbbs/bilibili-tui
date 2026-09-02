@@ -1,11 +1,14 @@
 use crate::app::{App, PreviousPage};
 use crate::api::favorite::FavoriteSource;
-use crate::application::{AppAction, network};
+use crate::application::{AppAction, DownloadItem, network};
 use crate::infrastructure::{media, persistence};
+use crate::infrastructure::download::{download, set_status, DownloadPhase, DownloadTarget};
+use tokio::sync::mpsc;
 use crate::presentation::tui::{
     ArticleDetailPage, BangumiDetailPage, BangumiPage, DynamicDetailPage, DynamicPage,
-    FavoritesPage, HistoryPage, HomePage, LiveDetailPage, LivePage, LoginPage, MallPage, NavItem,
-    NotificationsPage, NotifTab, Page, SearchPage, SectionPage, SettingsPage, Theme, UpPage,
+    DownloadsPage, FavoritesPage, HistoryPage, HomePage, LiveDetailPage, LivePage, LoginPage,
+    MallPage, NavItem, NotificationsPage, NotifTab, Page, SearchPage, SectionPage, SettingsPage,
+    Theme, UpPage,
 };
 use std::sync::Arc;
 
@@ -1908,6 +1911,126 @@ impl App {
                 }
             }
             AppAction::None => {}
+            AppAction::PlayLocalFile { path } => {
+                let danmaku_config = self.config.danmaku.clone();
+                tokio::spawn(async move {
+                    let _ = media::play_local_file(
+                        std::path::PathBuf::from(path),
+                        danmaku_config,
+                    )
+                    .await;
+                });
+            }
+            AppAction::DownloadMedia { items } => {
+                let logged_in = self
+                    .credentials
+                    .as_ref()
+                    .map(|c| !c.sessdata.is_empty() && !c.bili_jct.is_empty())
+                    .unwrap_or(false);
+                if !logged_in {
+                    crate::infrastructure::download::begin_batch(1);
+                    crate::infrastructure::download::set_status("下载", "未登录，无法下载");
+                    return;
+                }
+                if items.is_empty() {
+                    crate::infrastructure::download::set_status("下载", "没有可下载的项目");
+                    return;
+                }
+                let credentials = self.credentials.clone();
+                let default_quality = self.config.video_quality;
+                let out_dir = crate::infrastructure::download::download_dir();
+                crate::infrastructure::download::begin_batch(items.len());
+                for item in items {
+                    let credentials = credentials.clone();
+                    let quality = item.quality.unwrap_or(default_quality);
+                    let out_dir = out_dir.clone();
+                    let api_client = self.api_client.clone();
+                    let item_title = item.title.clone();
+                    let whole_playlist = item.kind == "bangumi"
+                        && self.config.download_whole_season;
+                    tokio::spawn(async move {
+                        // Bilibili answers HTTP 412 to yt-dlp unless the
+                        // buvid3/buvid4 fingerprint cookies are present. Fetch
+                        // them on the background task (NOT the UI loop) so the
+                        // main event loop never blocks on this network call.
+                        let _ = api_client.ensure_buvid_cookies().await;
+                        let (tx, mut rx) = mpsc::channel::<DownloadPhase>(16);
+                        let target = if item.kind == "bangumi" {
+                            DownloadTarget::Bangumi { ep_id: item.ep_id }
+                        } else {
+                            DownloadTarget::Video { bvid: item.bvid.clone() }
+                        };
+                        // Reuse the app's full cookie string (incl. buvid3/buvid4
+                        // fingerprint cookies) so yt-dlp is not hit with HTTP 412.
+                        let cookie_path =
+                            api_client.cookies_for_ytdlp().and_then(|cookies| {
+                                crate::storage::write_cookies_for_ytdlp(&cookies).ok()
+                            });
+                        let save_quality = quality.clone();
+                        let height = quality.max_height().unwrap_or(1080);
+                        // Spawn the download future so it starts running and
+                        // feeds progress through `tx`. Awaiting it only AFTER
+                        // `rx.recv()` would deadlock (the worker never runs
+                        // until polled, so Preparing is never sent). All args
+                        // are cloned into owned values because the spawned
+                        // future must be 'static.
+                        let dl_target = target.clone();
+                        let dl_out_dir = out_dir.clone();
+                        let dl_title = item_title.clone();
+                        let dl_cookie = cookie_path.clone();
+                        let worker = tokio::spawn(download(
+                            dl_target,
+                            height,
+                            dl_out_dir,
+                            dl_title,
+                            dl_cookie,
+                            whole_playlist,
+                            crate::api::client::UA.to_string(),
+                            tx,
+                        ));
+                        let mut last = String::from("准备中…");
+                        crate::infrastructure::download::set_status(&item_title, &last);
+                        while let Some(phase) = rx.recv().await {
+                            last = match &phase {
+                                DownloadPhase::Preparing => "解析中…".to_string(),
+                                DownloadPhase::Downloading(p) => format!("下载中 {:.0}%", p),
+                                DownloadPhase::Merging => "合并中…".to_string(),
+                                DownloadPhase::Done(path) => format!("已下载: {}", path.display()),
+                                DownloadPhase::Error(e) => format!("下载失败: {e}"),
+                            };
+                            crate::infrastructure::download::set_status(&item_title, &last);
+                        }
+                        match worker.await {
+                            Ok(Ok(final_path)) => {
+                                let _ = crate::infrastructure::download::save_cover_and_danmaku(
+                                    &api_client,
+                                    &final_path,
+                                    &item.pic_url,
+                                    item.cid,
+                                    item.aid,
+                                    item.duration_secs,
+                                    &item.bvid,
+                                    item.ep_id,
+                                    save_quality,
+                                )
+                                .await;
+                            }
+                            Ok(Err(e)) => {
+                                let msg = format!("下载失败: {e:#}");
+                                crate::infrastructure::download::set_status(&item_title, &msg);
+                            }
+                            Err(e) => {
+                                let msg = format!("下载任务异常: {e}");
+                                crate::infrastructure::download::set_status(&item_title, &msg);
+                            }
+                        }
+                        crate::infrastructure::download::mark_done();
+                        if let Some(cp) = cookie_path {
+                            let _ = crate::storage::remove_cookie_export(&cp);
+                        }
+                    });
+                }
+            }
         }
     }
 
@@ -2020,6 +2143,11 @@ impl App {
                     )));
                 }
             }
+            NavItem::Downloads => {
+                if !matches!(self.current_page, Page::Downloads(_)) {
+                    self.current_page = Page::Downloads(DownloadsPage::new());
+                }
+            }
             NavItem::Mall => {
                 if !matches!(self.current_page, Page::Mall(_)) {
                     self.current_page = Page::Mall(MallPage::new());
@@ -2105,6 +2233,9 @@ impl App {
                     req_id,
                     mid,
                 });
+            }
+            Page::Downloads(_) => {
+                // DownloadsPage is fully local; no async initialization needed.
             }
             Page::Search(page) => {
                 page.start_hotword_loading();

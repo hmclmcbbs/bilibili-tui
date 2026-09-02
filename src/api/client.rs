@@ -14,7 +14,7 @@ use std::io::Write;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+pub const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 pub enum BilibiliApiDomain {
     Main,
@@ -2822,6 +2822,14 @@ impl ApiClient {
             }
         }
         self.refresh_buvid_cookies().await
+    }
+
+    /// Return the full cookie string (including the buvid3/buvid4 fingerprint
+    /// cookies that prevent Bilibili's 412 risk-control on yt-dlp requests),
+    /// or `None` when no cookies are set. Used to feed `yt-dlp --cookies`.
+    pub fn cookies_for_ytdlp(&self) -> Option<String> {
+        let cookies = self.cookies.read().expect("cookies lock poisoned");
+        cookies.as_ref().cloned()
     }
 
     /// Force-fetch fresh buvid3/buvid4 from the SPI endpoint and overwrite

@@ -5,7 +5,7 @@ use crate::api::live_ws::LiveMessage;
 use crate::domain::playback::{PlayOrder, PlaybackEvent, PlaylistItem};
 use crate::domain::playback::PlaybackOptions;
 use crate::storage::{Credentials, DanmakuConfig, VideoQuality};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::collections::VecDeque;
 use std::io::Write as StdWrite;
 use std::process::Stdio;
@@ -1712,7 +1712,122 @@ pub async fn play_bangumi_episode(
         let _ = playback_event_tx.send(event);
     });
 
+Ok(())
+}
+
+/// Play a downloaded local file with mpv.
+///
+/// If `<file>.danmaku.json` exists next to the mp4 (saved by the downloader),
+/// the danmaku are loaded and rendered exactly like online playback (same
+/// live_danmaku.lua script + IPC batch feeding). Without a sidecar this is a
+/// plain local mpv playback.
+pub async fn play_local_file(path: std::path::PathBuf, danmaku_config: DanmakuConfig) -> Result<()> {
+    let danmaku = load_local_danmaku(&path).await.unwrap_or_default();
+
+    let ipc_suffix = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "local".to_string());
+    let ipc_path = mpv_ipc_path("bilibili-tui-local", &ipc_suffix);
+    remove_stale_mpv_ipc(&ipc_path);
+    let danmaku_script_path = create_live_danmaku_script()?;
+
+    let mut cmd = Command::new("mpv");
+    cmd.stdout(mpv_stdout());
+    cmd.stderr(Stdio::null());
+    cmd.arg("--force-window=immediate");
+    cmd.arg("--input-terminal=no");
+    cmd.arg("--profile=low-latency");
+    cmd.arg("--stream-buffer-size=4M");
+    cmd.arg("--vd-lavc-threads=0");
+    apply_mpv_hwdec(&mut cmd);
+    apply_mpv_vo(&mut cmd);
+    cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
+    if !danmaku.is_empty() {
+        cmd.arg(format!("--script={}", danmaku_script_path.display()));
+        cmd.arg("--script-opts-append=double_video_fps=no");
+    }
+    cmd.arg("--msg-level=ffmpeg=error,vd=warn");
+    cmd.arg("--ytdl=no");
+    // Offline subtitle sidecar: `<name>.srt` saved by the downloader.
+    let mp4_name = path.to_string_lossy();
+    let stem = mp4_name.strip_suffix(".mp4").unwrap_or(&mp4_name);
+    let srt_path = std::path::PathBuf::from(format!("{stem}.srt"));
+    if srt_path.exists() {
+        cmd.arg(format!("--sub-file={}", srt_path.display()));
+    }
+    cmd.arg(&path);
+
+    let mut child = cmd
+        .spawn()
+        .context("启动 mpv 播放本地文件失败")?;
+    wait_for_ipc(&ipc_path, &mut child).await?;
+
+    let mut danmaku_ready = false;
+    let mut next_danmaku = 0usize;
+    let mut danmaku_interval = tokio::time::interval(Duration::from_millis(50));
+
+    loop {
+        tokio::select! {
+            _ = danmaku_interval.tick(), if next_danmaku < danmaku.len() => {
+                if let Some(position) = mpv_time_pos(&ipc_path).await {
+                    if !danmaku_ready {
+                        danmaku_ready = send_live_danmaku_config(
+                            &ipc_path,
+                            &danmaku_script_path,
+                            &danmaku_config,
+                        )
+                        .await
+                        .is_ok();
+                        if !danmaku_ready {
+                            continue;
+                        }
+                    }
+                    // Seek handling: re-anchor so danmaku after a seek still
+                    // appear (matches online playback).
+                    if let Some(head) = danmaku.get(next_danmaku) {
+                        if head.time < position - 0.5 || head.time > position + 0.5 {
+                            next_danmaku = danmaku.partition_point(|m| m.time < position);
+                        }
+                    }
+                    let mut due_messages = Vec::new();
+                    while let Some(message) = danmaku.get(next_danmaku)
+                        && message.time <= position + 0.02
+                    {
+                        due_messages.push(message.clone());
+                        next_danmaku += 1;
+                    }
+                    let _ = send_video_danmaku_batch(
+                        &ipc_path,
+                        &danmaku_script_path,
+                        &due_messages,
+                    )
+                    .await;
+                }
+            }
+            result = child.wait() => {
+                let _ = result;
+                break;
+            }
+        }
+    }
+
+    let _ = tokio::fs::remove_file(&ipc_path).await;
+    let _ = tokio::fs::remove_file(&danmaku_script_path).await;
     Ok(())
+}
+
+async fn load_local_danmaku(path: &std::path::Path) -> Result<Vec<VideoDanmaku>> {
+    // Path::with_extension truncates multi-dot filenames; build the sidecar
+    // name by stripping only the trailing ".mp4".
+    let mp4_name = path.to_string_lossy();
+    let stem = mp4_name.strip_suffix(".mp4").unwrap_or(&mp4_name);
+    let danmaku_path = std::path::PathBuf::from(format!("{stem}.danmaku.json"));
+    if !danmaku_path.exists() {
+        return Ok(Vec::new());
+    }
+    let bytes = tokio::fs::read(&danmaku_path).await?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 
 /// Play a live stream using mpv

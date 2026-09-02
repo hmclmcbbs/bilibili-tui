@@ -8,7 +8,7 @@ use crate::api::video::{RelatedVideoItem, VideoInfo};
 use crate::api::favorite::FavoriteFolder;
 use crate::application::AppAction;
 use crate::domain::playback::PlaybackOptions;
-use crate::storage::Keybindings;
+use crate::storage::{Keybindings, VideoQuality};
 use ratatui::{
     crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind},
     prelude::*,
@@ -77,6 +77,14 @@ pub struct VideoDetailPage {
     pub interaction_msg: Option<String>,
     /// When the feedback message was set, for auto-clear.
     pub interaction_msg_set_at: Option<Instant>,
+    /// Multi-select set for batch downloads. Each entry is a "bvid" string
+    /// (or an episode identifier for multi-part videos).
+    pub download_selection: std::collections::HashSet<String>,
+    /// Download resolution override. `None` = follow the global setting.
+    pub download_quality: Option<VideoQuality>,
+    /// Whether the download-quality picker popup is open.
+    pub download_quality_picker: bool,
+    download_quality_index: usize,
 }
 
 impl VideoDetailPage {
@@ -124,7 +132,82 @@ impl VideoDetailPage {
             default_media_id: None,
             interaction_msg: None,
             interaction_msg_set_at: None,
+            download_selection: std::collections::HashSet::new(),
+            download_quality: None,
+            download_quality_picker: false,
+            download_quality_index: 0,
         }
+    }
+
+    fn download_quality_label(&self) -> String {
+        match self.download_quality {
+            Some(q) => format!("下载:{}", q.label()),
+            None => "下载:跟随".to_string(),
+        }
+    }
+
+    fn quality_options() -> [Option<VideoQuality>; 8] {
+        use crate::storage::VideoQuality as VQ;
+        [
+            None,
+            Some(VQ::Best),
+            Some(VQ::Q4k),
+            Some(VQ::Q1080pHigh),
+            Some(VQ::Q1080p),
+            Some(VQ::Q720p),
+            Some(VQ::Q480p),
+            Some(VQ::Q360p),
+        ]
+    }
+
+    fn quality_option_label(index: usize) -> String {
+        match Self::quality_options().get(index).copied().flatten() {
+            Some(q) => q.label().to_string(),
+            None => "跟随全局".to_string(),
+        }
+    }
+
+    fn current_quality_index(&self) -> usize {
+        Self::quality_options()
+            .iter()
+            .position(|opt| *opt == self.download_quality)
+            .unwrap_or(0)
+    }
+
+    /// Build a `DownloadItem` for the current video.
+    fn current_download_item(&self) -> crate::application::DownloadItem {
+        let title = self
+            .video_info
+            .as_ref()
+            .map(|v| v.title.clone())
+            .unwrap_or_else(|| self.bvid.clone());
+        let (cid, duration_secs, pic_url) = self
+            .video_info
+            .as_ref()
+            .map(|v| {
+                (
+                    v.cid,
+                    v.duration.unwrap_or(0) / 1000,
+                    v.pic.clone().unwrap_or_default(),
+                )
+            })
+            .unwrap_or((0, 0, String::new()));
+        crate::application::DownloadItem {
+            kind: "video".to_string(),
+            bvid: self.bvid.clone(),
+            ep_id: 0,
+            title,
+            aid: self.aid,
+            cid,
+            pic_url,
+            duration_secs,
+            quality: self.download_quality,
+        }
+    }
+
+    /// Current download identifier used as the multi-select key.
+    fn current_download_key(&self) -> String {
+        self.bvid.clone()
     }
 
     /// Set a one-line feedback message that auto-clears after 3 seconds.
@@ -916,7 +999,7 @@ impl VideoDetailPage {
 impl Component for VideoDetailPage {
     fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &Theme, keys: &Keybindings) {
         // Adjust layout based on input mode
-        let show_extra_pane = self.input_mode || self.folder_picker_mode;
+        let show_extra_pane = self.input_mode || self.folder_picker_mode || self.download_quality_picker;
         let chunks = if show_extra_pane {
             Layout::default()
                 .direction(Direction::Vertical)
@@ -1041,6 +1124,31 @@ impl Component for VideoDetailPage {
                 .block(picker_block)
                 .highlight_style(Style::default().fg(theme.bilibili_pink));
             frame.render_widget(list, chunks[2]);
+        } else if self.download_quality_picker {
+            let picker_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.fg_accent))
+                .title(Span::styled(
+                    " 下载分辨率 [↑↓ 选择, Enter 确认, Esc 取消] ",
+                    Style::default()
+                        .fg(theme.fg_accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            let items: Vec<ListItem> = (0..Self::quality_options().len())
+                .map(|i| {
+                    let label = Self::quality_option_label(i);
+                    if i == self.download_quality_index {
+                        ListItem::new(format!("▶ {label}"))
+                    } else {
+                        ListItem::new(format!("  {label}"))
+                    }
+                })
+                .collect();
+            let list = List::new(items)
+                .block(picker_block)
+                .highlight_style(Style::default().fg(theme.fg_accent));
+            frame.render_widget(list, chunks[2]);
         }
 
         // Help
@@ -1065,6 +1173,15 @@ impl Component for VideoDetailPage {
                     ("v/Esc".into(), "取消".into(), theme.info),
                 ],
             )
+        } else if self.download_quality_picker {
+            shortcut_footer(
+                theme,
+                [
+                    ("↑↓".into(), "选择".into(), theme.fg_accent),
+                    ("Enter".into(), "确认".into(), theme.success),
+                    ("Esc".into(), "取消".into(), theme.info),
+                ],
+            )
         } else {
             shortcut_footer(
                 theme,
@@ -1081,7 +1198,14 @@ impl Component for VideoDetailPage {
                     ("a/b/v".to_string(), "赞/币/藏".into(), theme.info),
                     ("w".into(), "稍后再看".into(), theme.fg_accent),
                     ("u".into(), "UP主页".into(), theme.fg_accent),
-                    ("m/d/f".into(), "画质/HDR/高帧".into(), theme.fg_accent),
+                    ("m/h/f".into(), "画质/HDR/高帧".into(), theme.fg_accent),
+                    (
+                        "x".into(),
+                        self.download_quality_label(),
+                        theme.fg_accent,
+                    ),
+                    ("Space".into(), "多选".into(), theme.fg_accent),
+                    ("d/D".into(), "下载/批量下载".into(), theme.fg_accent),
                     (keys.play.clone(), "播放".into(), theme.success),
                     (keys.back.clone(), "返回".into(), theme.info),
                 ],
@@ -1089,6 +1213,29 @@ impl Component for VideoDetailPage {
         };
         let help = Paragraph::new(help).alignment(Alignment::Center);
         frame.render_widget(help, help_chunk);
+
+        // 常驻下载进度条（从全局下载状态读取，覆盖底部最后一行）
+        if let Some(status) = crate::infrastructure::download::current_status() {
+            let progress_line = if status.total > 1 {
+                format!(
+                    "下载中 {}/{} · {} {}",
+                    status.done, status.total, status.current_title, status.current_msg
+                )
+            } else {
+                format!("下载中 · {} {}", status.current_title, status.current_msg)
+            };
+            let area = frame.area();
+            let bottom = Rect {
+                x: area.x,
+                y: area.height.saturating_sub(1),
+                width: area.width,
+                height: 1,
+            };
+            let bar = Paragraph::new(progress_line)
+                .style(Style::default().fg(theme.bilibili_pink))
+                .alignment(Alignment::Left);
+            frame.render_widget(bar, bottom);
+        }
     }
 
     fn handle_input(
@@ -1161,8 +1308,40 @@ impl Component for VideoDetailPage {
             }
         }
 
+        // Download-quality picker mode (after pressing `x`).
+        if self.download_quality_picker {
+            match key {
+                KeyCode::Esc | KeyCode::Char('x') => {
+                    self.download_quality_picker = false;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.download_quality_index > 0 {
+                        self.download_quality_index -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let last = Self::quality_options().len() - 1;
+                    if self.download_quality_index < last {
+                        self.download_quality_index += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    self.download_quality =
+                        Self::quality_options().get(self.download_quality_index).copied().flatten();
+                    self.download_quality_picker = false;
+                }
+                _ => {}
+            }
+            return Some(AppAction::None);
+        }
+
         if keys.matches_quit(key) || keys.matches_back(key) {
             return Some(AppAction::BackToList);
+        }
+        if key == KeyCode::Char('x') {
+            self.download_quality_index = self.current_quality_index();
+            self.download_quality_picker = true;
+            return Some(AppAction::None);
         }
         if key == KeyCode::Char('u')
             && let Some(info) = &self.video_info
@@ -1174,9 +1353,49 @@ impl Component for VideoDetailPage {
             self.playback.cycle_quality();
             return Some(AppAction::None);
         }
-        if key == KeyCode::Char('d') {
+        if key == KeyCode::Char('h') {
+            // HDR toggle moved here so `d`/`D` can be used for downloads.
             self.playback.prefer_hdr = !self.playback.prefer_hdr;
             return Some(AppAction::None);
+        }
+        if key == KeyCode::Char(' ') {
+            // Toggle multi-select for batch download.
+            let key_id = self.current_download_key();
+            if self.download_selection.contains(&key_id) {
+                self.download_selection.remove(&key_id);
+            } else {
+                self.download_selection.insert(key_id);
+            }
+            return Some(AppAction::None);
+        }
+        if key == KeyCode::Char('d') {
+            // Download the current video immediately.
+            let item = self.current_download_item();
+            return Some(AppAction::DownloadMedia {
+                items: vec![item],
+            });
+        }
+        if key == KeyCode::Char('D') {
+            // Download everything selected, or current if nothing selected.
+            let items: Vec<crate::application::DownloadItem> = if self.download_selection.is_empty() {
+                vec![self.current_download_item()]
+            } else {
+                self.download_selection
+                    .iter()
+                    .map(|bvid| crate::application::DownloadItem {
+                        kind: "video".to_string(),
+                        bvid: bvid.clone(),
+                        ep_id: 0,
+                        title: bvid.clone(),
+                        aid: 0,
+                        cid: 0,
+                        pic_url: String::new(),
+                        duration_secs: 0,
+                        quality: None,
+                    })
+                    .collect()
+            };
+            return Some(AppAction::DownloadMedia { items });
         }
         if key == KeyCode::Char('f') {
             self.playback.prefer_hires = !self.playback.prefer_hires;

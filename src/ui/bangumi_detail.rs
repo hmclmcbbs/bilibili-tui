@@ -4,7 +4,7 @@ use super::{Component, Theme, shortcut_footer};
 use crate::api::bangumi::{BangumiEpisode, SeasonResult};
 use crate::api::client::ApiClient;
 use crate::application::AppAction;
-use crate::storage::Keybindings;
+use crate::storage::{Keybindings, VideoQuality};
 use ratatui::{
     crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind},
     prelude::*,
@@ -29,6 +29,13 @@ pub struct BangumiDetailPage {
     flat_episodes: Vec<FlatEpisode>,
     last_click_time: Option<Instant>,
     last_click_index: Option<usize>,
+    /// Multi-select set for batch downloads. Stores episode ids.
+    pub download_selection: std::collections::HashSet<i64>,
+    /// Download resolution override. `None` = follow the global setting.
+    pub download_quality: Option<VideoQuality>,
+    /// Whether the download-quality picker popup is open.
+    pub download_quality_picker: bool,
+    download_quality_index: usize,
 }
 
 #[derive(Clone)]
@@ -54,6 +61,10 @@ impl BangumiDetailPage {
             flat_episodes: Vec::new(),
             last_click_time: None,
             last_click_index: None,
+            download_selection: std::collections::HashSet::new(),
+            download_quality: None,
+            download_quality_picker: false,
+            download_quality_index: 0,
         }
     }
 
@@ -62,6 +73,41 @@ impl BangumiDetailPage {
         page.target_episode_id = Some(ep_id);
         page.auto_play_pending = auto_play;
         page
+    }
+
+    fn download_quality_label(&self) -> String {
+        match self.download_quality {
+            Some(q) => format!("下载:{}", q.label()),
+            None => "下载:跟随".to_string(),
+        }
+    }
+
+    fn quality_options() -> [Option<VideoQuality>; 8] {
+        use crate::storage::VideoQuality as VQ;
+        [
+            None,
+            Some(VQ::Best),
+            Some(VQ::Q4k),
+            Some(VQ::Q1080pHigh),
+            Some(VQ::Q1080p),
+            Some(VQ::Q720p),
+            Some(VQ::Q480p),
+            Some(VQ::Q360p),
+        ]
+    }
+
+    fn quality_option_label(index: usize) -> String {
+        match Self::quality_options().get(index).copied().flatten() {
+            Some(q) => q.label().to_string(),
+            None => "跟随全局".to_string(),
+        }
+    }
+
+    fn current_quality_index(&self) -> usize {
+        Self::quality_options()
+            .iter()
+            .position(|opt| *opt == self.download_quality)
+            .unwrap_or(0)
     }
 
     pub fn set_season(&mut self, season: SeasonResult) {
@@ -383,10 +429,52 @@ impl Component for BangumiDetailPage {
         self.render_info(frame, chunks[0], theme);
         self.render_episodes(frame, chunks[1], theme);
 
+        // Download-quality picker popup (over the episodes area).
+        if self.download_quality_picker {
+            let popup_height = (Self::quality_options().len() as u16) + 2;
+            let popup_width = 40u16.min(chunks[1].width.saturating_sub(4));
+            let popup_area = Rect {
+                x: chunks[1].x + (chunks[1].width.saturating_sub(popup_width)) / 2,
+                y: chunks[1].y + (chunks[1].height.saturating_sub(popup_height)) / 2,
+                width: popup_width,
+                height: popup_height.min(chunks[1].height),
+            };
+            frame.render_widget(Clear, popup_area);
+            let picker_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(theme.fg_accent))
+                .title(Span::styled(
+                    " 下载分辨率 [↑↓ 选择, Enter 确认, Esc 取消] ",
+                    Style::default()
+                        .fg(theme.fg_accent)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            let items: Vec<ListItem> = (0..Self::quality_options().len())
+                .map(|i| {
+                    let label = Self::quality_option_label(i);
+                    if i == self.download_quality_index {
+                        ListItem::new(format!("▶ {label}"))
+                    } else {
+                        ListItem::new(format!("  {label}"))
+                    }
+                })
+                .collect();
+            let list = List::new(items)
+                .block(picker_block)
+                .highlight_style(Style::default().fg(theme.fg_accent));
+            frame.render_widget(list, popup_area);
+        }
+
         // Help
-        let help = Paragraph::new(shortcut_footer(
-            theme,
-            [
+        let help_items: Vec<(String, String, Color)> = if self.download_quality_picker {
+            vec![
+                ("↑↓".into(), "选择".into(), theme.fg_accent),
+                ("Enter".into(), "确认".into(), theme.success),
+                ("Esc".into(), "取消".into(), theme.info),
+            ]
+        } else {
+            vec![
                 (
                     format!("{}/{}", keys.nav_up, keys.nav_down),
                     "滚动".into(),
@@ -398,12 +486,40 @@ impl Component for BangumiDetailPage {
                     theme.fg_accent,
                 ),
                 ("f".into(), "追番/取消".into(), theme.info),
+                (
+                    "x".into(),
+                    self.download_quality_label(),
+                    theme.fg_accent,
+                ),
                 (keys.confirm.clone(), "播放".into(), theme.success),
                 (keys.back.clone(), "返回".into(), theme.info),
-            ],
-        ))
-        .alignment(Alignment::Center);
+            ]
+        };
+        let help = Paragraph::new(shortcut_footer(theme, help_items)).alignment(Alignment::Center);
         frame.render_widget(help, chunks[2]);
+
+        // 常驻下载进度条（从全局下载状态读取，覆盖底部最后一行）
+        if let Some(status) = crate::infrastructure::download::current_status() {
+            let progress_line = if status.total > 1 {
+                format!(
+                    "下载中 {}/{} · {} {}",
+                    status.done, status.total, status.current_title, status.current_msg
+                )
+            } else {
+                format!("下载中 · {} {}", status.current_title, status.current_msg)
+            };
+            let area = frame.area();
+            let bottom = Rect {
+                x: area.x,
+                y: area.height.saturating_sub(1),
+                width: area.width,
+                height: 1,
+            };
+            let bar = Paragraph::new(progress_line)
+                .style(Style::default().fg(theme.bilibili_pink))
+                .alignment(Alignment::Left);
+            frame.render_widget(bar, bottom);
+        }
     }
 
     fn handle_input(&mut self, key: KeyCode, keys: &Keybindings) -> Option<AppAction> {
@@ -431,10 +547,114 @@ impl Component for BangumiDetailPage {
             return Some(AppAction::None);
         }
 
+        // Download-quality picker mode (after pressing `x`).
+        if self.download_quality_picker {
+            match key {
+                KeyCode::Esc | KeyCode::Char('x') => {
+                    self.download_quality_picker = false;
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if self.download_quality_index > 0 {
+                        self.download_quality_index -= 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let last = Self::quality_options().len() - 1;
+                    if self.download_quality_index < last {
+                        self.download_quality_index += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    self.download_quality =
+                        Self::quality_options().get(self.download_quality_index).copied().flatten();
+                    self.download_quality_picker = false;
+                }
+                _ => {}
+            }
+            return Some(AppAction::None);
+        }
+
+        if key == KeyCode::Char('x') {
+            self.download_quality_index = self.current_quality_index();
+            self.download_quality_picker = true;
+            return Some(AppAction::None);
+        }
+
         if key == KeyCode::Char('f') {
             return Some(AppAction::ToggleBangumiFollow {
                 season_id: self.season_id,
             });
+        }
+        if key == KeyCode::Char(' ') {
+            // Toggle multi-select for batch download (keyed by episode id).
+            if let Some(ep) = self.flat_episodes.get(self.selected_episode) {
+                let id = ep.episode.id;
+                if self.download_selection.contains(&id) {
+                    self.download_selection.remove(&id);
+                } else {
+                    self.download_selection.insert(id);
+                }
+            }
+            return Some(AppAction::None);
+        }
+        if key == KeyCode::Char('d') {
+            // Download the currently focused episode.
+            if let Some(ep) = self.flat_episodes.get(self.selected_episode) {
+                let item = crate::application::DownloadItem {
+                    kind: "bangumi".to_string(),
+                    bvid: String::new(),
+                    ep_id: ep.episode.id,
+                    title: ep.episode.title.clone(),
+                    aid: ep.episode.aid,
+                    cid: ep.episode.cid,
+                    pic_url: ep.episode.cover_url(),
+                    duration_secs: ep.episode.duration / 1000,
+                    quality: self.download_quality,
+                };
+                return Some(AppAction::DownloadMedia { items: vec![item] });
+            }
+            return Some(AppAction::None);
+        }
+        if key == KeyCode::Char('D') {
+            // Download all selected episodes, or current if nothing selected.
+            let items: Vec<crate::application::DownloadItem> = if self.download_selection.is_empty() {
+                self.flat_episodes
+                    .get(self.selected_episode)
+                    .map(|ep| crate::application::DownloadItem {
+                        kind: "bangumi".to_string(),
+                        bvid: String::new(),
+                        ep_id: ep.episode.id,
+                        title: ep.episode.title.clone(),
+                        aid: ep.episode.aid,
+                        cid: ep.episode.cid,
+                        pic_url: ep.episode.cover_url(),
+                        duration_secs: ep.episode.duration / 1000,
+                        quality: self.download_quality,
+                    })
+                    .into_iter()
+                    .collect()
+            } else {
+                self.download_selection
+                    .iter()
+                    .filter_map(|id| {
+                        self.flat_episodes
+                            .iter()
+                            .find(|e| e.episode.id == *id)
+                            .map(|ep| crate::application::DownloadItem {
+                                kind: "bangumi".to_string(),
+                                bvid: String::new(),
+                                ep_id: ep.episode.id,
+                                title: ep.episode.title.clone(),
+                                aid: ep.episode.aid,
+                                cid: ep.episode.cid,
+                                pic_url: ep.episode.cover_url(),
+                                duration_secs: ep.episode.duration / 1000,
+                                quality: self.download_quality,
+                            })
+                    })
+                    .collect()
+            };
+            return Some(AppAction::DownloadMedia { items });
         }
 
         if keys.matches_down(key) {

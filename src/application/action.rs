@@ -9,6 +9,30 @@ use crate::infrastructure::persistence::{Credentials, DanmakuConfig, Keybindings
 use crate::presentation::tui::DynamicTab;
 use crate::presentation::tui::NavItem;
 
+/// A single media item to download. Used by `AppAction::DownloadMedia`,
+/// which carries a `Vec` of these so the UI can download a multi-selection.
+#[derive(Debug, Clone)]
+pub struct DownloadItem {
+    /// "video" or "bangumi"
+    pub kind: String,
+    /// bvid for videos, ignored for bangumi
+    pub bvid: String,
+    /// ep_id for bangumi, ignored for videos
+    pub ep_id: i64,
+    /// Display title used for the output filename.
+    pub title: String,
+    /// Video aid (0 when unknown; needed for the danmaku API).
+    pub aid: i64,
+    /// Video/episode cid (0 when unknown; needed to fetch danmaku).
+    pub cid: i64,
+    /// Cover image URL (empty when unknown; saved next to the mp4).
+    pub pic_url: String,
+    /// Media duration in seconds (0 when unknown).
+    pub duration_secs: i64,
+    /// Download resolution override. `None` = follow the global setting.
+    pub quality: Option<VideoQuality>,
+}
+
 /// Actions that can be triggered from UI components
 #[derive(Debug, Clone)]
 pub enum AppAction {
@@ -255,6 +279,16 @@ pub enum AppAction {
         ep_id: i64,
         season_id: i64,
         title: String,
+    },
+    /// Download a video or bangumi episode to local disk (offline mp4).
+    DownloadMedia {
+        /// One or more items to download. A single entry = current item;
+        /// multiple entries = batch download of everything selected.
+        items: Vec<DownloadItem>,
+    },
+    /// Play a local file (e.g. a downloaded mp4) with mpv.
+    PlayLocalFile {
+        path: String,
     },
     /// Create a new favorite folder (title, intro, privacy)
     CreateFavoriteFolder {
