@@ -490,7 +490,9 @@ impl HomePage {
     pub fn begin_search(&mut self) {
         self.selected_source = 0;
         self.focus_sources = false;
-        self.search.input_mode = true;
+        self.search.edit_backup = self.search.query.clone();
+        // `/` only enters the search view; `i` starts typing.
+        self.search.input_mode = false;
         self.search.show_hot_list = true;
     }
 
@@ -561,7 +563,11 @@ impl Component for HomePage {
         if keys.matches_quit(key) {
             return Some(AppAction::Quit);
         }
-        if keys.matches_search_focus(key) {
+        // 已在搜索输入模式时，i 应作为普通字符输入（由 search.handle_input
+        // 处理），不再被"进入搜索"快捷键拦截。
+        if keys.matches_search_focus(key)
+            && !(self.selected_source == 0 && self.search.input_mode)
+        {
             self.begin_search();
             return Some(AppAction::None);
         }

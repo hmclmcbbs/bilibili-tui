@@ -149,7 +149,7 @@ impl Default for Keybindings {
             next_theme: "t".to_string(),
             play: "p".to_string(),
             open_settings: "s".to_string(),
-            search_focus: "i".to_string(),
+            search_focus: "/".to_string(),
 
             // Comments
             comment: "c".to_string(),

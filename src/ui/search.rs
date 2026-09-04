@@ -37,6 +37,9 @@ pub struct SearchPage {
     pub error_message: Option<String>,
     pub user_error: Option<String>,
     pub input_mode: bool,
+    /// Search query backup taken when re-entering edit mode, so Esc can
+    /// restore the previously shown results instead of staying in the picker.
+    pub edit_backup: String,
     pub hotwords: Vec<HotwordItem>,
     pub hotword_error: Option<String>,
     pub hotword_loading: bool,
@@ -69,7 +72,8 @@ impl SearchPage {
             user_loading: false,
             error_message: None,
             user_error: None,
-            input_mode: true,
+            input_mode: false,
+            edit_backup: String::new(),
             hotwords: Vec::new(),
             hotword_error: None,
             hotword_loading: false,
@@ -209,17 +213,8 @@ impl SearchPage {
     /// - 热词列表状态：h 没有其他用途，直接回侧边栏
     /// - 结果列表：已处于最左列时回侧边栏，否则交给网格左移
     pub fn wants_left_to_sidebar(&self) -> bool {
-        // 输入模式但还没有任何字符时（正在浏览搜索历史/热搜下拉栏），
-        // h 键应该回到侧边栏而不是当作字符输入。
-        // 输入模式：有字符时 h 永远作为字符；无字符时仅当下拉栏有可选项才回侧边栏，
-        // 否则 h 作为普通字符输入（方便输入含 h 的搜索词）。
+        // 输入模式：h 永远作为字符输入（下拉栏导航请用方向键/Enter）。
         if self.input_mode {
-            if !self.query.is_empty() {
-                return false;
-            }
-            if self.show_hot_list && self.picker_has_items() {
-                return true;
-            }
             return false;
         }
         if self.show_hot_list {
@@ -1008,23 +1003,8 @@ impl Component for SearchPage {
         if self.input_mode {
             match key {
                 KeyCode::Char(c) => {
-                    // 下拉栏可见且还没输入任何字符时，j/k 作为导航键（仅当下拉栏有可选项）
-                    if self.show_hot_list && self.query.is_empty() && self.picker_has_items() {
-                        if c == 'j' {
-                            self.picker_nav(1);
-                            return Some(AppAction::None);
-                        }
-                        if c == 'k' {
-                            self.picker_nav(-1);
-                            return Some(AppAction::None);
-                        }
-                        if c == 'x' || c == 'X' {
-                            if self.picker_focus == PickerFocus::History && !self.history.is_empty() {
-                                self.clear_history();
-                                return Some(AppAction::None);
-                            }
-                        }
-                    }
+                    // 输入模式下所有可打印字符都进入搜索词（下拉栏导航请用
+                    // 方向键 ↑/↓，删除历史用 Delete 键）。
                     self.query.push(c);
                     self.show_hot_list = true;
                     match self.picker_focus {
@@ -1115,7 +1095,11 @@ impl Component for SearchPage {
                     Some(AppAction::None)
                 }
                 KeyCode::Esc => {
+                    // First Esc: leave edit mode, drop the in-progress edit and
+                    // go back to the history/hotword state.
                     self.input_mode = false;
+                    self.query = self.edit_backup.clone();
+                    self.show_hot_list = true;
                     Some(AppAction::None)
                 }
                 _ if keys.matches_nav_next(key) => Some(AppAction::NavNext),
@@ -1143,9 +1127,18 @@ impl Component for SearchPage {
                     return Some(AppAction::None);
                 }
             }
-            if keys.matches_search_focus(key) {
+            if key == KeyCode::Char('i') {
+                self.edit_backup = self.query.clone();
                 self.input_mode = true;
                 self.show_hot_list = true;
+                return Some(AppAction::None);
+            }
+            // Second Esc from the picker: restore the previous search results.
+            if key == KeyCode::Esc {
+                if !self.edit_backup.trim().is_empty() {
+                    self.query = self.edit_backup.clone();
+                    self.show_hot_list = false;
+                }
                 return Some(AppAction::None);
             }
             if keys.matches_nav_next(key) {
@@ -1203,7 +1196,8 @@ impl Component for SearchPage {
                         }
                         return Some(AppAction::None);
                     }
-                    if keys.matches_search_focus(key) {
+                    if key == KeyCode::Char('i') {
+                        self.edit_backup = self.query.clone();
                         self.input_mode = true;
                         self.show_hot_list = true;
                         if self.hot_selected.is_none() && !self.hotwords.is_empty() {
@@ -1270,7 +1264,8 @@ impl Component for SearchPage {
                         }
                         return Some(AppAction::None);
                     }
-                    if keys.matches_search_focus(key) {
+                    if key == KeyCode::Char('i') {
+                        self.edit_backup = self.query.clone();
                         self.input_mode = true;
                         self.show_hot_list = true;
                         if self.hot_selected.is_none() && !self.hotwords.is_empty() {

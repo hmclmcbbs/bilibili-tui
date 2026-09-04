@@ -491,7 +491,7 @@ impl Component for FavoritesPage {
                     ("n".into(), "新建收藏夹".into(), theme.info),
                     ("r".into(), "重命名".into(), theme.info),
                     ("x".into(), "删除收藏夹".into(), theme.error),
-                    ("Del".into(), "移除视频".into(), theme.warning),
+                    ("Del/x".into(), "移除视频".into(), theme.warning),
                     ("/".into(), "搜索".into(), theme.info),
                     (keys.nav_next_page.clone(), "下一页面".into(), theme.info),
                     (keys.nav_prev_page.clone(), "上一页面".into(), theme.info),
@@ -692,7 +692,7 @@ impl Component for FavoritesPage {
             }
         } else if keys.matches_up(key) {
             self.videos.move_up();
-        } else if key == KeyCode::Delete {
+        } else if key == KeyCode::Delete || key == KeyCode::Char('x') {
             // Remove selected video from current folder / watch-later
             if let Some(card) = self.videos.selected_card()
                 && let Some(aid) = card.aid

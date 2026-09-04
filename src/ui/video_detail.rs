@@ -85,6 +85,8 @@ pub struct VideoDetailPage {
     /// Whether the download-quality picker popup is open.
     pub download_quality_picker: bool,
     download_quality_index: usize,
+    /// When true, a pending download confirmation is showing.
+    download_confirm: bool,
 }
 
 impl VideoDetailPage {
@@ -136,6 +138,7 @@ impl VideoDetailPage {
             download_quality: None,
             download_quality_picker: false,
             download_quality_index: 0,
+            download_confirm: false,
         }
     }
 
@@ -607,15 +610,6 @@ impl VideoDetailPage {
         let quality_label = PlaybackOptions::quality_label(self.playback.quality);
         let hdr_label = if self.playback.prefer_hdr { "开" } else { "关" };
         let hires_label = if self.playback.prefer_hires { "开" } else { "关" };
-        let hdr_sup = match self.hdr_supported {
-            Some(true) => Some("HDR✓"),
-            _ => None,
-        };
-        let hires_sup = match self.hires_supported {
-            Some(true) => Some("Hi-Res✓"),
-            _ => None,
-        };
-
         let mut lines = vec![Line::from(vec![
             Span::styled("画质:", Style::default().fg(theme.fg_primary)),
             Span::styled(
@@ -628,8 +622,7 @@ impl VideoDetailPage {
         ])];
 
         // Hide a toggle when the probe says the video has no such stream.
-        // While probing or when the probe failed (None), keep it visible
-        // to avoid hiding it by mistake.
+        // While probing or when the probe failed (None), keep it visible.
         let show_hdr = self.hdr_supported != Some(false);
         let show_hires = self.hires_supported != Some(false);
         if show_hdr {
@@ -641,14 +634,11 @@ impl VideoDetailPage {
                         .fg(theme.bilibili_pink)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("[d]", Style::default().fg(theme.fg_secondary)),
             ];
-            if let Some(h) = hdr_sup {
-                spans.push(Span::styled(
-                    format!(" {h}"),
-                    Style::default().fg(theme.fg_secondary),
-                ));
-            }
+            spans.push(Span::styled(
+                "[h]",
+                Style::default().fg(theme.fg_secondary),
+            ));
             lines.push(Line::from(spans));
         }
         if show_hires {
@@ -660,14 +650,11 @@ impl VideoDetailPage {
                         .fg(theme.bilibili_pink)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("[f]", Style::default().fg(theme.fg_secondary)),
             ];
-            if let Some(h) = hires_sup {
-                spans.push(Span::styled(
-                    format!(" {h}"),
-                    Style::default().fg(theme.fg_secondary),
-                ));
-            }
+            spans.push(Span::styled(
+                "[f]",
+                Style::default().fg(theme.fg_secondary),
+            ));
             lines.push(Line::from(spans));
         }
         if self.streams_probing {
@@ -1004,7 +991,7 @@ impl Component for VideoDetailPage {
             Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(6), // Video info
+                    Constraint::Length(8), // Video info
                     Constraint::Min(8),    // Comments + Related
                     Constraint::Length(6), // Input box / Folder picker
                     Constraint::Length(2), // Help
@@ -1014,7 +1001,7 @@ impl Component for VideoDetailPage {
             Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(6), // Video info
+                    Constraint::Length(8), // Video info
                     Constraint::Min(10),   // Comments + Related
                     Constraint::Length(2), // Help
                 ])
@@ -1102,24 +1089,25 @@ impl Component for VideoDetailPage {
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme.info))
                 .title(Span::styled(
-                    " 收藏到文件夹 [1-9] 选择, v/Esc 取消 ",
+                    " 收藏到文件夹 [1-9] 选择, 0 取消收藏, v/Esc 取消 ",
                     Style::default()
                         .fg(theme.info)
                         .add_modifier(Modifier::BOLD),
                 ));
-            let items: Vec<ListItem> = self
-                .folder_list
-                .iter()
-                .enumerate()
-                .map(|(i, folder)| {
-                    ListItem::new(format!(
-                        "  {} {} ({})",
-                        i + 1,
-                        folder.title,
-                        folder.media_count.unwrap_or_default()
-                    ))
-                })
-                .collect();
+            let mut items: Vec<ListItem> = Vec::new();
+            if self.favorited
+                && let Some(_media_id) = self.default_media_id
+            {
+                items.push(ListItem::new("  0. 取消收藏（从当前收藏夹移除）"));
+            }
+            items.extend(self.folder_list.iter().enumerate().map(|(i, folder)| {
+                ListItem::new(format!(
+                    "  {} {} ({})",
+                    i + 1,
+                    folder.title,
+                    folder.media_count.unwrap_or_default()
+                ))
+            }));
             let list = List::new(items)
                 .block(picker_block)
                 .highlight_style(Style::default().fg(theme.bilibili_pink));
@@ -1182,34 +1170,51 @@ impl Component for VideoDetailPage {
                     ("Esc".into(), "取消".into(), theme.info),
                 ],
             )
-        } else {
+        } else if self.download_confirm {
             shortcut_footer(
                 theme,
                 [
-                    (
-                        format!("{}/{}", keys.nav_up, keys.nav_down),
-                        "滚动".into(),
-                        theme.fg_accent,
-                    ),
-                    (keys.nav_next_page.clone(), "切换".into(), theme.info),
-                    (keys.confirm.clone(), "点赞/选择".into(), theme.success),
-                    (keys.comment.clone(), "评论".into(), theme.info),
-                    (keys.toggle_replies.clone(), "回复".into(), theme.info),
-                    ("a/b/v".to_string(), "赞/币/藏".into(), theme.info),
-                    ("w".into(), "稍后再看".into(), theme.fg_accent),
-                    ("u".into(), "UP主页".into(), theme.fg_accent),
-                    ("m/h/f".into(), "画质/HDR/高帧".into(), theme.fg_accent),
-                    (
-                        "x".into(),
-                        self.download_quality_label(),
-                        theme.fg_accent,
-                    ),
-                    ("Space".into(), "多选".into(), theme.fg_accent),
-                    ("d/D".into(), "下载/批量下载".into(), theme.fg_accent),
-                    (keys.play.clone(), "播放".into(), theme.success),
-                    (keys.back.clone(), "返回".into(), theme.info),
+                    ("Enter".into(), "确认下载当前视频".into(), theme.success),
+                    ("Esc".into(), "取消".into(), theme.info),
                 ],
             )
+        } else {
+            let mut items: Vec<(String, String, Color)> = vec![
+                (
+                    format!("{}/{}", keys.nav_up, keys.nav_down),
+                    "滚动".into(),
+                    theme.fg_accent,
+                ),
+                (keys.nav_next_page.clone(), "切换".into(), theme.info),
+                (keys.confirm.clone(), "点赞/选择".into(), theme.success),
+                (keys.comment.clone(), "评论".into(), theme.info),
+                (keys.toggle_replies.clone(), "回复".into(), theme.info),
+                ("a/b/v".to_string(), "赞/币/藏".into(), theme.info),
+                ("w".into(), "稍后再看".into(), theme.fg_accent),
+                ("u".into(), "UP主页".into(), theme.fg_accent),
+            ];
+            // 播放画质键 m 始终显示；HDR/Hi-Res 仅在该视频支持时显示。
+            let mut playback_keys = "m".to_string();
+            let mut playback_label = "画质".to_string();
+            if self.hdr_supported != Some(false) {
+                playback_keys.push_str("/h");
+                playback_label.push_str("/HDR");
+            }
+            if self.hires_supported != Some(false) {
+                playback_keys.push_str("/f");
+                playback_label.push_str("/Hi-Res");
+            }
+            items.push((playback_keys, playback_label, theme.fg_accent));
+            items.push((
+                "x".into(),
+                self.download_quality_label(),
+                theme.fg_accent,
+            ));
+            items.push(("Space".into(), "多选".into(), theme.fg_accent));
+            items.push(("d/D".into(), "下载/批量下载".into(), theme.fg_accent));
+            items.push((keys.play.clone(), "播放".into(), theme.success));
+            items.push((keys.back.clone(), "返回".into(), theme.info));
+            shortcut_footer(theme, items)
         };
         let help = Paragraph::new(help).alignment(Alignment::Center);
         frame.render_widget(help, help_chunk);
@@ -1293,6 +1298,17 @@ impl Component for VideoDetailPage {
                 }
                 KeyCode::Char(c) if c.is_ascii_digit() => {
                     let index = c.to_digit(10).unwrap() as usize;
+                    if index == 0
+                        && self.favorited
+                        && let Some(media_id) = self.default_media_id
+                    {
+                        self.folder_picker_mode = false;
+                        return Some(AppAction::FavoriteVideoInFolder {
+                            aid: self.aid,
+                            media_id,
+                            add: false,
+                        });
+                    }
                     if index > 0 && index <= self.folder_list.len() {
                         let folder = &self.folder_list[index - 1];
                         self.folder_picker_mode = false;
@@ -1335,6 +1351,24 @@ impl Component for VideoDetailPage {
             return Some(AppAction::None);
         }
 
+        // Download confirmation (after pressing `d`): Enter downloads, Esc cancels.
+        if self.download_confirm {
+            match key {
+                KeyCode::Enter => {
+                    self.download_confirm = false;
+                    let item = self.current_download_item();
+                    return Some(AppAction::DownloadMedia {
+                        items: vec![item],
+                    });
+                }
+                KeyCode::Esc | KeyCode::Char('d') => {
+                    self.download_confirm = false;
+                    return Some(AppAction::None);
+                }
+                _ => return Some(AppAction::None),
+            }
+        }
+
         if keys.matches_quit(key) || keys.matches_back(key) {
             return Some(AppAction::BackToList);
         }
@@ -1369,11 +1403,9 @@ impl Component for VideoDetailPage {
             return Some(AppAction::None);
         }
         if key == KeyCode::Char('d') {
-            // Download the current video immediately.
-            let item = self.current_download_item();
-            return Some(AppAction::DownloadMedia {
-                items: vec![item],
-            });
+            // Ask for confirmation first (download is a heavy operation).
+            self.download_confirm = true;
+            return Some(AppAction::None);
         }
         if key == KeyCode::Char('D') {
             // Download everything selected, or current if nothing selected.
@@ -1629,7 +1661,7 @@ impl Component for VideoDetailPage {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Length(6),
+                        Constraint::Length(8),
                         Constraint::Min(10),
                         Constraint::Length(2),
                     ])
