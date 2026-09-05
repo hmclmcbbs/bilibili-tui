@@ -616,7 +616,8 @@ impl Component for NotificationsPage {
                 )));
                 frame.render_widget(msg, inner);
             }
-            const ROW_H: u16 = 3;
+            // name(1) + preview(2) + divider(1)
+            const ROW_H: u16 = 4;
             let max_rows = (inner.height / ROW_H).max(1);
             let start = self.session_scroll;
             let end = (start + max_rows as usize).min(self.sessions.len());
@@ -638,7 +639,7 @@ impl Component for NotificationsPage {
                 match self.avatar_protocols.get_mut(i).and_then(|p| p.as_mut()) {
                     Some(protocol) => {
                         let img = StatefulImage::new();
-                        let img_area = Rect::new(avatar_area.x, avatar_area.y, 5, ROW_H);
+                        let img_area = Rect::new(avatar_area.x, avatar_area.y, 5, 3);
                         frame.render_stateful_widget(img, img_area, protocol);
                     }
                     None => {
@@ -651,7 +652,7 @@ impl Component for NotificationsPage {
                 }
                 let text_style = |s: Style| {
                     if is_selected {
-                        s.bg(theme.selection_bg)
+                        s.bg(theme.selection_bg).fg(theme.selection_fg)
                     } else {
                         s
                     }
@@ -707,14 +708,37 @@ impl Component for NotificationsPage {
                 frame.render_widget(name_para, Rect::new(text_area.x, text_area.y, text_area.width, 1));
                 // Rows 1-2: last message, wrapped to two rows max.
                 if !last_text.is_empty() {
-                    let last_para = Paragraph::new(Line::from(Span::styled(
-                        format!("  {}", last_text),
-                        text_style(Style::default().fg(theme.fg_secondary)),
-                    )))
-                    .wrap(Wrap { trim: true });
+                    let last_style = text_style(Style::default().fg(theme.fg_secondary));
+                    let avail_w = text_area.width.saturating_sub(2).max(4);
+                    let mut shown = wrap_text(&format!("  {last_text}"), avail_w);
+                    let truncated = shown.len() > 2;
+                    shown.truncate(2);
+                    if truncated {
+                        if let Some(last) = shown.last_mut() {
+                            while UnicodeWidthStr::width(last.as_str()) > avail_w as usize - 1 {
+                                last.pop();
+                            }
+                            last.push('…');
+                        }
+                    }
+                    let last_para =
+                        Paragraph::new(Text::from(shown.into_iter().map(Line::from).collect::<Vec<_>>()))
+                            .style(last_style);
                     frame.render_widget(
                         last_para,
                         Rect::new(text_area.x, text_area.y + 1, text_area.width, 2),
+                    );
+                }
+                // Divider between conversations.
+                let divider_y = row_area.y + ROW_H - 1;
+                if divider_y < inner.y + inner.height {
+                    let divider = Paragraph::new(Line::from(Span::styled(
+                        "─".repeat(row_area.width as usize),
+                        Style::default().fg(theme.border_subtle),
+                    )));
+                    frame.render_widget(
+                        divider,
+                        Rect::new(row_area.x, divider_y, row_area.width, 1),
                     );
                 }
             }
@@ -812,7 +836,9 @@ impl Component for NotificationsPage {
                             .cloned()
                             .unwrap_or_default();
                         let base = if is_selected {
-                            Style::default().bg(theme.selection_bg)
+                            Style::default()
+                                .bg(theme.selection_bg)
+                                .fg(theme.selection_fg)
                         } else {
                             Style::default()
                         };
@@ -1237,14 +1263,14 @@ impl NotificationsPage {
             // highlight background).
             let s_style = |s: Style| {
                 if is_selected {
-                    s.bg(theme.selection_bg)
+                    s.bg(theme.selection_bg).fg(theme.selection_fg)
                 } else {
                     s
                 }
             };
             let card_style = |s: Style| {
                 if is_selected {
-                    s.bg(theme.selection_bg)
+                    s.bg(theme.selection_bg).fg(theme.selection_fg)
                 } else {
                     s
                 }

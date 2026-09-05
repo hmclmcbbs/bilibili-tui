@@ -177,7 +177,7 @@ impl HomePage {
                     "翻页".into(),
                     theme.fg_accent,
                 ),
-                ("←/→".into(), "切换面板".into(), theme.fg_accent),
+                ("Tab".into(), "侧边栏".into(), theme.fg_accent),
                 (keys.confirm.clone(), "播放".into(), theme.success),
                 (keys.search_focus.clone(), "搜索".into(), theme.info),
                 ("u".into(), "UP主页".into(), theme.fg_accent),
@@ -496,6 +496,17 @@ impl HomePage {
         self.search.show_hot_list = true;
     }
 
+    /// Leave the in-page search overlay and return to the currently selected
+    /// home feed (used when the search page reaches its leftmost edge).
+    fn exit_search_to_feed(&mut self) {
+        self.selected_source = HomeFeed::ALL
+            .iter()
+            .position(|candidate| *candidate == self.feed)
+            .map(|index| index + 1)
+            .unwrap_or(1);
+        self.focus_sources = false;
+    }
+
     pub fn select_source(&mut self, source: usize) {
         self.selected_source = source.min(HomeFeed::ALL.len());
         if self.selected_source == 0 {
@@ -542,16 +553,10 @@ impl Default for HomePage {
 
 impl Component for HomePage {
     fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &Theme, keys: &Keybindings) {
-        let panes = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(28), Constraint::Min(30)])
-            .split(area);
-        self.draw_sources(frame, panes[0], theme);
-
         if self.selected_source == 0 {
-            self.search.draw(frame, panes[1], theme, keys);
+            self.search.draw(frame, area, theme, keys);
         } else {
-            self.draw_feed(frame, panes[1], theme, keys);
+            self.draw_feed(frame, area, theme, keys);
         }
     }
 
@@ -578,49 +583,16 @@ impl Component for HomePage {
         if keys.matches_nav_prev(key) {
             return Some(AppAction::NavPrev);
         }
-        if self.focus_sources {
-            if keys.matches_down(key) {
-                self.selected_source = (self.selected_source + 1) % self.source_count();
-            } else if keys.matches_up(key) {
-                self.selected_source = if self.selected_source == 0 {
-                    self.source_count() - 1
-                } else {
-                    self.selected_source - 1
-                };
-            } else if keys.matches_right(key) || keys.matches_confirm(key) {
-                if self.selected_source == 0 {
-                    self.begin_search();
-                } else if let Some(feed) = self.source_feed(self.selected_source)
-                    && feed != self.feed
-                {
-                    self.focus_sources = false;
-                    return Some(AppAction::SwitchHomeFeed(feed));
-                } else {
-                    self.focus_sources = false;
-                }
-            }
-            return Some(AppAction::None);
-        }
-
         // 搜索模式下，所有按键先交给搜索页处理（包括 h/l 方向键）
-        // 但按 h 且搜索页已处于最左边缘时，回到侧边栏
+        // 但按 h 且搜索页已处于最左边缘时，退出搜索回到当前 feed
         if self.selected_source == 0 {
             if keys.matches_left(key) && self.search.wants_left_to_sidebar() {
-                self.focus_sources = true;
+                self.exit_search_to_feed();
                 return Some(AppAction::None);
             }
             return self.search.handle_input(key, keys);
         }
 
-        if keys.matches_left(key) {
-            self.focus_sources = true;
-            if self.selected_source == 0 || self.loading || self.loading_more {
-                self.loading = false;
-                self.loading_more = false;
-                return Some(AppAction::CancelPendingLoads);
-            }
-            return Some(AppAction::None);
-        }
         if self.loading {
             return Some(AppAction::None);
         }
@@ -714,49 +686,8 @@ impl Component for HomePage {
     }
 
     fn handle_mouse(&mut self, event: MouseEvent, area: Rect) -> Option<AppAction> {
-        let panes = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(28), Constraint::Min(30)])
-            .split(area);
-        let position = ratatui::layout::Position::new(event.column, event.row);
-
-        if panes[0].contains(position) {
-            self.focus_sources = true;
-            match event.kind {
-                MouseEventKind::ScrollDown => {
-                    self.selected_source = (self.selected_source + 1) % self.source_count();
-                }
-                MouseEventKind::ScrollUp => {
-                    self.selected_source = if self.selected_source == 0 {
-                        self.source_count() - 1
-                    } else {
-                        self.selected_source - 1
-                    };
-                }
-                MouseEventKind::Down(MouseButton::Left) => {
-                    let row = event.row.saturating_sub(panes[0].y + 1) as usize;
-                    if row < self.source_count() {
-                        self.selected_source = row;
-                        if row == 0 {
-                            self.begin_search();
-                        } else if let Some(feed) = self.source_feed(row)
-                            && feed != self.feed
-                        {
-                            return Some(AppAction::SwitchHomeFeed(feed));
-                        }
-                    }
-                }
-                _ => {}
-            }
-            return Some(AppAction::None);
-        }
-
-        if !panes[1].contains(position) {
-            return None;
-        }
-        self.focus_sources = false;
         if self.selected_source == 0 {
-            return self.search.handle_mouse(event, panes[1]);
+            return self.search.handle_mouse(event, area);
         }
 
         match event.kind {
@@ -784,8 +715,8 @@ impl Component for HomePage {
                 None
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                let content_top = panes[1].y + 3;
-                let content_bottom = panes[1].bottom().saturating_sub(2);
+                let content_top = area.y + 3;
+                let content_bottom = area.bottom().saturating_sub(2);
 
                 if event.row >= content_top && event.row < content_bottom {
                     // Calculate which card was clicked
@@ -793,8 +724,8 @@ impl Component for HomePage {
                     let click_row = (relative_y / self.card_height) as usize;
                     let actual_row = self.scroll_row + click_row;
 
-                    let card_width = panes[1].width / self.columns as u16;
-                    let click_col = (event.column.saturating_sub(panes[1].x) / card_width) as usize;
+                    let card_width = area.width / self.columns as u16;
+                    let click_col = (event.column.saturating_sub(area.x) / card_width) as usize;
 
                     let click_idx = actual_row * self.columns + click_col.min(self.columns - 1);
 
@@ -1045,19 +976,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn home_pane_switch_preempts_loading() {
-        let mut page = HomePage::new();
-        page.focus_sources = false;
-        page.loading = true;
-        let keys = Keybindings::default();
-        assert!(matches!(
-            page.handle_input(KeyCode::Left, &keys),
-            Some(AppAction::CancelPendingLoads)
-        ));
-        assert!(page.focus_sources);
-    }
-
-    #[test]
     fn home_is_a_single_column_list() {
         let page = HomePage::new();
         assert_eq!(page.columns, 1);
@@ -1070,6 +988,7 @@ mod tests {
         assert_eq!(page.feed(), HomeFeed::Recommended);
         page.begin_search();
         assert_eq!(page.selected_source, 0);
-        assert!(page.search.input_mode);
+        // `/` opens the search view; `i` is what starts typing.
+        assert!(!page.search.input_mode);
     }
 }

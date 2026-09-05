@@ -290,6 +290,9 @@ impl VideoDetailPage {
                                     .and_then(|flac| flac.audio.as_ref())
                                     .is_some(),
                         );
+                        // 自动开启 HDR / Hi-Res（仅当该视频确实提供这些流）。
+                        self.playback.prefer_hdr = self.hdr_supported == Some(true);
+                        self.playback.prefer_hires = self.hires_supported == Some(true);
                     }
                     Err(_) => {
                         self.hdr_supported = None;
@@ -1387,8 +1390,10 @@ impl Component for VideoDetailPage {
             self.playback.cycle_quality();
             return Some(AppAction::None);
         }
-        if key == KeyCode::Char('h') {
+        if key == KeyCode::Char('h') && self.focus != DetailFocus::Related {
             // HDR toggle moved here so `d`/`D` can be used for downloads.
+            // In the Related grid `h` is the left-arrow key (nav_left), so it
+            // must not be stolen by the HDR toggle there.
             self.playback.prefer_hdr = !self.playback.prefer_hdr;
             return Some(AppAction::None);
         }

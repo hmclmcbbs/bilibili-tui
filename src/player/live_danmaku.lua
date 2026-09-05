@@ -594,6 +594,32 @@ end)
 mp.register_event("file-loaded", restart_fps_probe)
 mp.register_event("video-reconfig", restart_fps_probe)
 mp.add_timeout(0, restart_fps_probe)
+
+-- When the user seeks (drags the progress bar / presses a jump key), mpv
+-- reports a large time-pos jump. The old on-screen danmaku and their lane
+-- reservations belong to the previous playback position; keeping them makes
+-- stale comments linger and forces the new comments into wrong lanes. Clear
+-- the render state on a real seek so the comments at the new position start
+-- from a clean screen. `pending` is dropped too: the Rust sender re-anchors
+-- and re-sends the batch after the seek, so keeping pre-seek queued comments
+-- would only produce duplicates.
+local last_time_pos = nil
+local function reset_for_seek()
+    active, pending = {}, {}
+    lane_ready = {}
+    next_lane = 1
+    overlay.data = ""
+    overlay:update()
+end
+mp.observe_property("time-pos", "number", function(_, value)
+    local pos = tonumber(value)
+    if pos == nil then return end
+    if last_time_pos ~= nil and math.abs(pos - last_time_pos) > 0.5 then
+        reset_for_seek()
+    end
+    last_time_pos = pos
+end)
+
 mp.observe_property("pause", "bool", function(_, p)
     local is_paused = p == true
     if is_paused and not paused then

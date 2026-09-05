@@ -554,10 +554,10 @@ mod tests {
         assert!((item.y.unwrap() - 0.11).abs() < 1e-9);
         // Normalized (non-per-mille) payloads use field 3 for duration
         // seconds; the font size comes from the p attribute p[2] (70 here).
-        // Field 2 is alpha ("1-1" = fully opaque), field 5 is rotate-z (0),
-        // field 11 is the border flag (true).
+        // The parser keeps max(field3 * 1000, field9-ms), so 1.5 s wins over
+        // the shorter field-9 value.
         assert_eq!(item.size, Some(70.0));
-        assert_eq!(item.duration_ms, Some(500));
+        assert_eq!(item.duration_ms, Some(1500));
         assert_eq!(item.alpha, Some(1.0));
         assert_eq!(item.alpha_to, Some(1.0));
         assert_eq!(item.border, Some(true));
@@ -567,7 +567,7 @@ mod tests {
     #[ignore = "requires network access"]
     async fn current_public_danmaku_xml_parses() {
         let parsed = crate::api::client::ApiClient::new()
-            .get_video_danmaku(39884818572, 300)
+            .get_video_danmaku(39884818572, None, 300)
             .await
             .unwrap();
         assert!(!parsed.is_empty());
@@ -659,6 +659,6 @@ mod tests {
         assert_eq!(parsed[1].text, "真/n是/n毫/n无/n道/n理");
         assert!((parsed[1].x.unwrap() - 0.32).abs() < 1e-9);
         assert!((parsed[1].y.unwrap() - 0.11).abs() < 1e-9);
-        assert_eq!(parsed[1].duration_ms, Some(500));
+        assert_eq!(parsed[1].duration_ms, Some(1500));
     }
 }

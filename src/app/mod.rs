@@ -57,6 +57,10 @@ pub struct App {
     pub credentials: Option<Credentials>,
     pub sidebar: Sidebar,
     pub show_sidebar: bool,
+    /// True while the user is operating the sidebar with hjkl after clicking
+    /// it. Cleared when the user clicks the content area or presses a key
+    /// that is not a sidebar key.
+    pub sidebar_active: bool,
     /// Last rendered sidebar area, used for mouse hit-testing.
     last_sidebar_area: Rect,
 
@@ -74,6 +78,10 @@ pub struct App {
     pub navigation_stack: Vec<Page>,
     pub theme: Theme,
     pub theme_id: String,
+    /// Last observed mtime of the matugen color file (auto theme refresh).
+    last_matugen_mtime: Option<std::time::SystemTime>,
+    /// Last time we stat()ed the matugen file (rate-limited polling).
+    last_matugen_check: std::time::Instant,
     pub config: AppConfig,
     pub keybindings: Keybindings,
     pub pending_home_notice: Option<String>,
@@ -94,8 +102,12 @@ pub struct App {
         crate::domain::playback::PlayOrder,
     )>,
 
-    /// Cached home page to avoid refresh when switching tabs
-    pub cached_home: Option<HomePage>,
+    /// Cached home/feed pages (one per HomeFeed) to avoid refresh when
+    /// switching between sidebar items.
+    pub cached_home_feeds: std::collections::HashMap<
+        crate::api::recommend::HomeFeed,
+        HomePage,
+    >,
     /// Cached bangumi page to avoid refresh when switching tabs
     pub cached_bangumi: Option<BangumiPage>,
     network_command_tx: mpsc::Sender<network::NetworkCommand>,
@@ -143,6 +155,7 @@ impl App {
             credentials,
             sidebar: Sidebar::new(),
             show_sidebar: true,
+            sidebar_active: false,
             last_sidebar_area: Rect::default(),
             current_user: None,
             user_avatar: None,
@@ -154,6 +167,10 @@ impl App {
             navigation_stack: Vec::new(),
             theme,
             theme_id,
+            last_matugen_mtime: std::fs::metadata(crate::ui::Theme::matugen_path())
+                .and_then(|m| m.modified())
+                .ok(),
+            last_matugen_check: std::time::Instant::now(),
             config,
             keybindings,
             pending_home_notice: used_fallback
@@ -167,7 +184,7 @@ impl App {
             next_playback_session_id: 1,
             preheat: preheat_store,
             pending_playlist: None,
-            cached_home: None,
+            cached_home_feeds: std::collections::HashMap::new(),
             cached_bangumi: None,
             network_command_tx: bridge.command_tx,
             network_event_rx: bridge.event_rx,
@@ -250,6 +267,25 @@ impl App {
         while let Ok(protocol) = self.avatar_rx.try_recv() {
             self.user_avatar = protocol;
             self.user_avatar_pending = false;
+        }
+    }
+
+    /// Auto-refresh the theme when the matugen color file changes.
+    /// Polling is rate-limited to every ~2s and only does a cheap stat().
+    pub fn poll_matugen_theme(&mut self) {
+        if self.theme_id != "matugen" {
+            return;
+        }
+        if self.last_matugen_check.elapsed() < std::time::Duration::from_secs(2) {
+            return;
+        }
+        self.last_matugen_check = std::time::Instant::now();
+        let mtime = std::fs::metadata(crate::ui::Theme::matugen_path())
+            .and_then(|m| m.modified())
+            .ok();
+        if mtime != self.last_matugen_mtime {
+            self.last_matugen_mtime = mtime;
+            self.theme = crate::ui::Theme::load_or_default("matugen").0;
         }
     }
 }
@@ -365,13 +401,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tab_continues_from_favorites_to_live() {
+    async fn tab_continues_from_favorites_to_downloads() {
         let mut app = App::new();
         app.sidebar.select(NavItem::Favorites);
         app.current_page = Page::Favorites(FavoritesPage::new(1));
         app.handle_action(AppAction::NavNext).await;
-        assert_eq!(app.sidebar.selected, NavItem::Live);
-        assert!(matches!(app.current_page, Page::Live(_)));
+        assert_eq!(app.sidebar.selected, NavItem::Downloads);
+        assert!(matches!(app.current_page, Page::Downloads(_)));
     }
 
     #[tokio::test]

@@ -13,6 +13,19 @@ use crate::presentation::tui::{
 use std::sync::Arc;
 
 impl App {
+    fn cache_home_page(&mut self, page: HomePage) {
+        let feed = page.feed();
+        self.cached_home_feeds.insert(feed, page);
+    }
+
+    fn take_cached_home(&mut self, feed: crate::api::recommend::HomeFeed) -> Option<HomePage> {
+        self.cached_home_feeds.remove(&feed)
+    }
+
+    fn clear_home_caches(&mut self) {
+        self.cached_home_feeds.clear();
+    }
+
     fn login_required_message() -> String {
         "该功能需要登录，请前往设置页登录".to_string()
     }
@@ -57,7 +70,9 @@ impl App {
             AppAction::SwitchToHome => {
                 self.sidebar.select(NavItem::Home);
                 // Use cached home page if available
-                if let Some(cached) = self.cached_home.take() {
+                if let Some(cached) =
+                    self.take_cached_home(crate::api::recommend::HomeFeed::Recommended)
+                {
                     self.current_page = Page::Home(cached);
                 } else {
                     self.current_page = Page::Home(HomePage::new());
@@ -67,8 +82,14 @@ impl App {
             AppAction::RefreshHome => {
                 self.sidebar.select(NavItem::Home);
                 // Clear cache and create fresh home page
-                self.cached_home = None;
-                self.current_page = Page::Home(HomePage::new());
+                let feed = match &self.current_page {
+                    Page::Home(page) => page.feed(),
+                    _ => crate::api::recommend::HomeFeed::Recommended,
+                };
+                self.cached_home_feeds.remove(&feed);
+                let mut page = HomePage::new();
+                page.begin_feed_load(feed);
+                self.current_page = Page::Home(page);
                 self.init_current_page().await;
             }
             AppAction::SwitchHomeFeed(feed) => {
@@ -426,6 +447,16 @@ impl App {
                 self.send_network_command(network::NetworkCommand::CancelPending);
                 if !matches!(self.current_page, Page::VideoDetail(_)) {
                     self.sidebar.prev();
+                    self.switch_to_nav_page().await;
+                }
+            }
+            AppAction::NavSelect(NavItem::HotGroup) => {
+                // The group header only expands/collapses; no network request
+                // is cancelled and no page is switched while collapsing. When
+                // expanding, jump straight into the first feed.
+                let was_expanded = self.sidebar.hot_expanded;
+                self.sidebar.select(NavItem::HotGroup);
+                if !was_expanded && !matches!(self.current_page, Page::VideoDetail(_)) {
                     self.switch_to_nav_page().await;
                 }
             }
@@ -819,7 +850,7 @@ impl App {
                 if let Page::Home(home_page) =
                     std::mem::replace(&mut self.current_page, Page::Home(HomePage::new()))
                 {
-                    self.cached_home = Some(home_page);
+                    self.cache_home_page(home_page);
                 }
                 let detail_page = DynamicDetailPage::new(dynamic_id.clone());
                 self.current_page = Page::DynamicDetail(Box::new(detail_page));
@@ -842,7 +873,9 @@ impl App {
                     Some(PreviousPage::Home) => {
                         self.sidebar.select(NavItem::Home);
                         // Use cached home page if available
-                        if let Some(cached) = self.cached_home.take() {
+                        if let Some(cached) = self
+                            .take_cached_home(crate::api::recommend::HomeFeed::Recommended)
+                        {
                             self.current_page = Page::Home(cached);
                         } else {
                             self.current_page = Page::Home(HomePage::new());
@@ -852,7 +885,9 @@ impl App {
                     Some(PreviousPage::Search) => {
                         // Search now lives inside Home; return there with the search pane open.
                         self.sidebar.select(NavItem::Home);
-                        let mut home = self.cached_home.take().unwrap_or_default();
+                        let mut home = self
+                            .take_cached_home(crate::api::recommend::HomeFeed::Recommended)
+                            .unwrap_or_default();
                         home.begin_search();
                         self.current_page = Page::Home(home);
                         self.init_current_page().await;
@@ -895,7 +930,9 @@ impl App {
                     None => {
                         // Default to home
                         self.sidebar.select(NavItem::Home);
-                        if let Some(cached) = self.cached_home.take() {
+                        if let Some(cached) = self
+                            .take_cached_home(crate::api::recommend::HomeFeed::Recommended)
+                        {
                             self.current_page = Page::Home(cached);
                         } else {
                             self.current_page = Page::Home(HomePage::new());
@@ -1204,7 +1241,7 @@ impl App {
                 let _ = persistence::delete_credentials();
                 self.credentials = None;
                 self.api_client.clear_credentials();
-                self.cached_home = None;
+                self.clear_home_caches();
                 self.current_page = Page::Home(HomePage::new());
                 self.init_current_page().await;
             }
@@ -2077,26 +2114,36 @@ impl App {
     }
 
     async fn switch_to_nav_page(&mut self) {
-        // First, cache home page if we're leaving it
-        if matches!(self.current_page, Page::Home(_))
-            && self.sidebar.selected != NavItem::Home
+        // Cache the current Home feed before switching to any different
+        // destination (another feed, a detail page, another sidebar page, …).
+        // The cache is keyed by HomeFeed so each feed keeps its own scroll
+        // position and loaded videos.
+        let target = self.sidebar.selected;
+        let staying_on_same_feed = match &self.current_page {
+            Page::Home(page) => target.home_feed() == Some(page.feed()),
+            _ => false,
+        };
+        if !staying_on_same_feed
             && let Page::Home(home_page) =
                 std::mem::replace(&mut self.current_page, Page::Home(HomePage::new()))
         {
-            self.cached_home = Some(home_page);
+            self.cache_home_page(home_page);
         }
 
-        match self.sidebar.selected {
+        match target {
+            // The group header is toggled by Sidebar::select; it never opens a
+            // page on its own.
+            NavItem::HotGroup => return,
             NavItem::Home => {
-                if !matches!(self.current_page, Page::Home(_)) {
-                    // Use cached home page if available
-                    if let Some(cached) = self.cached_home.take() {
-                        self.current_page = Page::Home(cached);
-                    } else {
-                        self.current_page = Page::Home(HomePage::new());
-                        self.init_current_page().await;
-                    }
-                }
+                self.open_home_feed(crate::api::recommend::HomeFeed::Recommended)
+                    .await;
+            }
+            NavItem::Popular
+            | NavItem::Weekly
+            | NavItem::Ranking
+            | NavItem::MustWatch => {
+                let feed = target.home_feed().expect("hot feed has a HomeFeed");
+                self.open_home_feed(feed).await;
             }
             NavItem::Search => {
                 if !matches!(self.current_page, Page::Search(_)) {
@@ -2193,6 +2240,24 @@ impl App {
                     self.init_current_page().await;
                 }
             }
+        }
+    }
+
+    async fn open_home_feed(&mut self, feed: crate::api::recommend::HomeFeed) {
+        // Already showing this exact feed? Keep it (avoids a reload when Tab
+        // wraps around to the current item).
+        if let Page::Home(page) = &self.current_page
+            && page.feed() == feed
+        {
+            return;
+        }
+        if let Some(cached) = self.take_cached_home(feed) {
+            self.current_page = Page::Home(cached);
+        } else {
+            let mut page = HomePage::new();
+            page.begin_feed_load(feed);
+            self.current_page = Page::Home(page);
+            self.init_current_page().await;
         }
     }
 

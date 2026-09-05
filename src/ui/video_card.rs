@@ -209,7 +209,7 @@ impl VideoCard {
         // Title styling - selected items get primary color and bold
         let title_style = if is_selected {
             Style::default()
-                .fg(theme.fg_primary)
+                .fg(theme.fg_accent)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.fg_secondary)
@@ -329,7 +329,7 @@ impl VideoCard {
         }
         let style = if is_selected {
             Style::default()
-                .fg(theme.fg_primary)
+                .fg(theme.fg_accent)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.fg_secondary)

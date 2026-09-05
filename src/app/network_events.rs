@@ -408,6 +408,8 @@ impl App {
                     page.hdr_supported = hdr_supported;
                     page.hires_supported = hires_supported;
                     page.streams_probing = false;
+                    page.playback.prefer_hdr = page.hdr_supported == Some(true);
+                    page.playback.prefer_hires = page.hires_supported == Some(true);
                     page.liked = liked;
                     page.coined = coined;
                     page.favorited = favorited;
@@ -445,6 +447,8 @@ impl App {
                     page.hdr_supported = hdr_supported;
                     page.hires_supported = hires_supported;
                     page.streams_probing = false;
+                    page.playback.prefer_hdr = page.hdr_supported == Some(true);
+                    page.playback.prefer_hires = page.hires_supported == Some(true);
                 }
             }
             network::NetworkEvent::UpPageLoaded {

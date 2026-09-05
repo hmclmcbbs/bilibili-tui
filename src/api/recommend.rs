@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HomeFeed {
     /// The personalized feed returned by Bilibili's homepage recommendation API.
     Recommended,
