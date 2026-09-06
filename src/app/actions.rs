@@ -69,15 +69,8 @@ impl App {
             AppAction::Quit => self.should_quit = true,
             AppAction::SwitchToHome => {
                 self.sidebar.select(NavItem::Home);
-                // Use cached home page if available
-                if let Some(cached) =
-                    self.take_cached_home(crate::api::recommend::HomeFeed::Recommended)
-                {
-                    self.current_page = Page::Home(cached);
-                } else {
-                    self.current_page = Page::Home(HomePage::new());
-                    self.init_current_page().await;
-                }
+                self.open_home_feed(crate::api::recommend::HomeFeed::Recommended)
+                    .await;
             }
             AppAction::RefreshHome => {
                 self.sidebar.select(NavItem::Home);
@@ -872,15 +865,8 @@ impl App {
                 match self.previous_page.take() {
                     Some(PreviousPage::Home) => {
                         self.sidebar.select(NavItem::Home);
-                        // Use cached home page if available
-                        if let Some(cached) = self
-                            .take_cached_home(crate::api::recommend::HomeFeed::Recommended)
-                        {
-                            self.current_page = Page::Home(cached);
-                        } else {
-                            self.current_page = Page::Home(HomePage::new());
-                            self.init_current_page().await;
-                        }
+                        self.open_home_feed(crate::api::recommend::HomeFeed::Recommended)
+                            .await;
                     }
                     Some(PreviousPage::Search) => {
                         // Search now lives inside Home; return there with the search pane open.
@@ -930,14 +916,8 @@ impl App {
                     None => {
                         // Default to home
                         self.sidebar.select(NavItem::Home);
-                        if let Some(cached) = self
-                            .take_cached_home(crate::api::recommend::HomeFeed::Recommended)
-                        {
-                            self.current_page = Page::Home(cached);
-                        } else {
-                            self.current_page = Page::Home(HomePage::new());
-                            self.init_current_page().await;
-                        }
+                        self.open_home_feed(crate::api::recommend::HomeFeed::Recommended)
+                            .await;
                     }
                 }
             }
@@ -2244,15 +2224,23 @@ impl App {
     }
 
     async fn open_home_feed(&mut self, feed: crate::api::recommend::HomeFeed) {
-        // Already showing this exact feed? Keep it (avoids a reload when Tab
-        // wraps around to the current item).
+        // Already showing this exact feed and it has finished its initial
+        // load? Keep it (avoids a reload when Tab wraps around to the current
+        // item). A page that is still on the initial loading spinner must not
+        // be kept as-is -- it was likely only a placeholder created while
+        // switching away, so re-issue the load.
         if let Page::Home(page) = &self.current_page
             && page.feed() == feed
+            && !page.needs_initial_load()
         {
             return;
         }
         if let Some(cached) = self.take_cached_home(feed) {
+            let needs_reload = cached.needs_initial_load();
             self.current_page = Page::Home(cached);
+            if needs_reload {
+                self.init_current_page().await;
+            }
         } else {
             let mut page = HomePage::new();
             page.begin_feed_load(feed);

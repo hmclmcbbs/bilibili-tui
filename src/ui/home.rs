@@ -479,6 +479,13 @@ impl HomePage {
         self.feed
     }
 
+    /// True when this page is still on its initial load (no videos and no
+    /// error yet). Such a page must not be shown from cache without (re)starting
+    /// a network request, otherwise it stays on the loading spinner forever.
+    pub fn needs_initial_load(&self) -> bool {
+        self.loading && self.videos.is_empty() && self.error_message.is_none()
+    }
+
     pub fn search_mut(&mut self) -> &mut SearchPage {
         &mut self.search
     }
