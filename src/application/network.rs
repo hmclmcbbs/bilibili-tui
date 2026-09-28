@@ -107,6 +107,8 @@ pub enum NetworkCommand {
         req_id: u64,
         bvid: String,
         aid: i64,
+        preheat_cid: Option<i64>,
+        preheat_playback: Option<PlaybackOptions>,
     },
     ProbeVideoStreams {
         req_id: u64,
@@ -332,10 +334,14 @@ pub enum NetworkEvent {
         append: bool,
         rooms: Vec<LiveRoom>,
     },
-    VideoDetailLoaded {
+    VideoInfoLoaded {
         req_id: u64,
         bvid: String,
         video_info: VideoInfo,
+    },
+    VideoDetailLoaded {
+        req_id: u64,
+        bvid: String,
         comments: Vec<CommentItem>,
         has_more_comments: bool,
         related_videos: Vec<RelatedVideoItem>,
@@ -536,6 +542,127 @@ pub fn start_network_worker(api_client: Arc<ApiClient>, preheat_store: PreheatSt
                     let api = api_client.clone();
                     runtime.spawn(async move {
                         do_preheat(api, bvid, aid, cid, duration, playback, store).await;
+                    });
+                    continue;
+                }
+                // Intercept LoadVideoDetail with a preheat hint
+                if let NetworkCommand::LoadVideoDetail { ref bvid, preheat_cid, preheat_playback, .. } = command
+                    && let (Some(cid), Some(playback)) = (preheat_cid, preheat_playback) {
+                        let store = preheat_store.clone();
+                        let api = api_client.clone();
+                        let bv = bvid.clone();
+                        runtime.spawn(async move {
+                            do_preheat(api, bv, 0, cid, 0, playback, store).await;
+                        });
+                    }
+                // Two-phase video detail loading
+                if let NetworkCommand::LoadVideoDetail { req_id, bvid, aid, .. } = command {
+                    let api = api_client.clone();
+                    let tx = event_tx.clone();
+                    let bv = bvid.clone();
+                    runtime.spawn(async move {
+                        let video_info = match api.get_video_info(&bv).await {
+                            Ok(info) => info,
+                            Err(e) => {
+                                let _ = tx.send(NetworkEvent::RequestFailed {
+                                    req_id,
+                                    target: "video_detail",
+                                    error: e.to_string(),
+                                });
+                                return;
+                            }
+                        };
+                        // Extract cid before moving video_info.
+                        let cid = video_info.pages.as_ref()
+                            .and_then(|p| p.first())
+                            .map(|pg| pg.cid)
+                            .unwrap_or(video_info.cid);
+                        // Phase 1: player can render now.
+                        let _ = tx.send(NetworkEvent::VideoInfoLoaded {
+                            req_id,
+                            bvid: bv.clone(),
+                            video_info,
+                        });
+                        let (
+                            (comments, has_more_comments),
+                            related_videos,
+                            (hdr_supported, hires_supported),
+                            like_result,
+                            coin_result,
+                            fav_result,
+                            watch_later_result,
+                        ) = tokio::join!(
+                            async {
+                                match api.get_comments(aid, 1).await {
+                                    Ok(data) => {
+                                        let comments = data.replies.unwrap_or_default();
+                                        let has_more = data.page
+                                            .map(|p| p.count.unwrap_or(0) > comments.len() as i32)
+                                            .unwrap_or(false);
+                                        (comments, has_more)
+                                    }
+                                    Err(_) => (Vec::new(), false),
+                                }
+                            },
+                            async { api.get_related_videos(&bv).await.unwrap_or_default() },
+                            async { probe_stream_support(&api, &bv, cid).await },
+                            async {
+                                match api.get_video_like_status(&bv).await {
+                                    Ok(v) => Ok(v),
+                                    Err(_) => Err("点赞状态: 需要登录"),
+                                }
+                            },
+                            async {
+                                match api.get_video_coin_status(&bv).await {
+                                    Ok(v) => Ok(v),
+                                    Err(_) => Err("投币状态: 需要登录"),
+                                }
+                            },
+                            async {
+                                match api.get_default_favorite_folder(aid).await {
+                                    Ok((mid, fav)) => Ok((mid, fav)),
+                                    Err(_) => Err("收藏状态: 需要登录"),
+                                }
+                            },
+                            async {
+                                match api.get_watch_later_status(aid).await {
+                                    Ok(v) => Ok(v),
+                                    Err(_) => Err("稍后再看状态: 需要登录"),
+                                }
+                            },
+                        );
+                        let liked = like_result.unwrap_or(false);
+                        let coined = coin_result.unwrap_or(0);
+                        let in_watch_later = watch_later_result.unwrap_or(false);
+                        let (default_media_id, favorited) = match fav_result {
+                            Ok((mid, fav)) => (Some(mid), fav),
+                            Err(_) => (None, false),
+                        };
+                        let mut interaction_errors = Vec::new();
+                        if let Err(e) = &like_result { interaction_errors.push(*e); }
+                        if let Err(e) = &coin_result { interaction_errors.push(*e); }
+                        if let Err(e) = &fav_result { interaction_errors.push(*e); }
+                        if let Err(e) = &watch_later_result { interaction_errors.push(*e); }
+                        let interaction_error = if interaction_errors.is_empty() {
+                            None
+                        } else {
+                            Some(interaction_errors.join(", "))
+                        };
+                        let _ = tx.send(NetworkEvent::VideoDetailLoaded {
+                            req_id,
+                            bvid: bv,
+                            comments,
+                            has_more_comments,
+                            related_videos,
+                            hdr_supported,
+                            hires_supported,
+                            liked,
+                            coined,
+                            favorited,
+                            in_watch_later,
+                            default_media_id,
+                            interaction_error,
+                        });
                     });
                     continue;
                 }
@@ -1338,7 +1465,7 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 Err(e) => failed(req_id, "live_more", e),
             }
         }
-        NetworkCommand::LoadVideoDetail { req_id, bvid, aid } => {
+        NetworkCommand::LoadVideoDetail { req_id, bvid, aid, .. } => {
             let video_info = match api_client.get_video_info(&bvid).await {
                 Ok(info) => info,
                 Err(e) => return failed(req_id, "video_detail", e),
@@ -1419,7 +1546,6 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
             NetworkEvent::VideoDetailLoaded {
                 req_id,
                 bvid,
-                video_info,
                 comments,
                 has_more_comments,
                 related_videos,

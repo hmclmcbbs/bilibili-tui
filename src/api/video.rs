@@ -2,7 +2,7 @@
 
 use serde::Deserialize;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct VideoInfo {
     pub bvid: String,
     pub aid: i64,
@@ -17,7 +17,7 @@ pub struct VideoInfo {
     pub pages: Option<Vec<VideoPage>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct VideoOwner {
     pub mid: i64,
     pub name: String,

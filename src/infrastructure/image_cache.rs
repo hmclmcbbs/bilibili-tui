@@ -18,10 +18,25 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
+use std::io::Write;
+
 use image::DynamicImage;
+use reqwest::Client;
+
+/// Append a line to the image timing log (file, not stderr, to avoid
+/// conflicting with ratatui/crossterm terminal control on stderr).
+pub fn img_log(line: &str) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/img-timing.log")
+    {
+        let _ = writeln!(f, "{line}");
+    }
+}
 
 const CACHE_SUBDIR: &str = "images";
 const META_FILE: &str = "meta.json";
@@ -57,6 +72,8 @@ pub struct ImageCache {
     meta_path: PathBuf,
     disk_limit_bytes: u64,
     memory_limit: usize,
+    /// Shared HTTP client — reuses TCP+TLS connections across downloads.
+    http: Client,
     /// url -> (decoded image, last_used_secs)
     memory: Mutex<HashMap<String, (DynamicImage, u64)>>,
     /// url -> shared result holder for in-flight downloads
@@ -78,7 +95,18 @@ static INSTANCE: OnceLock<ImageCache> = OnceLock::new();
 static DOWNLOAD_SEMAPHORE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
 
 fn download_semaphore() -> &'static tokio::sync::Semaphore {
-    DOWNLOAD_SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(6)))
+    DOWNLOAD_SEMAPHORE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(12)))
+}
+
+/// Shared HTTP client with connection pooling for image downloads.
+fn build_http_client() -> Client {
+    Client::builder()
+        .pool_max_idle_per_host(8)
+        .pool_idle_timeout(std::time::Duration::from_secs(60))
+        .connect_timeout(std::time::Duration::from_secs(8))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("failed to build image HTTP client")
 }
 
 /// Get the process-wide image cache singleton.
@@ -94,6 +122,7 @@ pub fn instance() -> &'static ImageCache {
             meta_path,
             disk_limit_bytes: DEFAULT_DISK_LIMIT_BYTES,
             memory_limit: DEFAULT_MEMORY_LIMIT,
+            http: build_http_client(),
             memory: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashMap::new()),
             meta: Mutex::new(HashMap::new()),
@@ -196,16 +225,22 @@ impl ImageCache {
     /// Fetch a decoded image, consulting memory -> disk -> network in order.
     /// Returns `None` only when the network fetch or decode fails.
     pub async fn get(&self, url: &str) -> Option<DynamicImage> {
+        let short: String = url.chars().rev().take(40).collect::<String>().chars().rev().collect();
         // 1. memory
-        {
-            let mut mem = self.memory.lock().unwrap();
-            if let Some((img, _)) = mem.get(url) {
-                let img = img.clone();
-                let seq = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
-                mem.insert(url.to_string(), (img.clone(), seq));
-                self.touch_disk(url);
-                return Some(img);
+        let img = {
+            let t = Instant::now();
+            let mem = self.memory.lock().unwrap();
+            let result = mem.get(url).map(|(img, _)| img.clone());
+            if result.is_some() {
+                img_log(&format!("[IMG] memory_hit url={short} time={}ms", t.elapsed().as_millis()));
+            } else {
+                img_log(&format!("[IMG] memory_miss url={short} time={}ms", t.elapsed().as_millis()));
             }
+            result
+        };
+        if let Some(img) = img {
+            self.touch_disk(url);
+            return Some(img);
         }
 
         // 2. deduplicate concurrent fetches of the same URL
@@ -234,6 +269,7 @@ impl ImageCache {
         // 3. disk (raw bytes) -> decode
         let disk_bytes = tokio::fs::read(self.disk_path(url)).await.ok();
         if let Some(bytes) = disk_bytes {
+            let t = Instant::now();
             let decoded = if is_svg(&bytes) {
                 decode_svg(bytes).await
             } else {
@@ -245,12 +281,15 @@ impl ImageCache {
                 self.touch_disk(url);
                 drop(g);
                 self.finish_fetch(url, img.clone());
+                img_log(&format!("[IMG] disk_hit url={short} time={}ms", t.elapsed().as_millis()));
                 return Some(img);
             }
         }
 
         // 4. network
+        let t = Instant::now();
         let fetched = fetch_and_store(self, url).await;
+        img_log(&format!("[IMG] network_total url={short} time={}ms", t.elapsed().as_millis()));
         let mut g = holder.lock().await;
         *g = fetched.clone();
         drop(g);
@@ -266,10 +305,15 @@ impl ImageCache {
 }
 
 async fn decode_image(bytes: Vec<u8>) -> Option<DynamicImage> {
-    tokio::task::spawn_blocking(move || image::load_from_memory(&bytes).ok())
-        .await
-        .ok()
-        .flatten()
+    tokio::task::spawn_blocking(move || {
+        let t = std::time::Instant::now();
+        let result = image::load_from_memory(&bytes).ok();
+        img_log(&format!("[IMG] decode_image time={}ms", t.elapsed().as_millis()));
+        result
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Heuristic check for SVG content (Bilibili serves mathjax formulas as SVG).
@@ -321,22 +365,41 @@ async fn decode_svg(bytes: Vec<u8>) -> Option<DynamicImage> {
     .flatten()
 }
 
+/// Append Bilibili CDN thumbnail size parameters to reduce download size.
+/// `foo.jpg` → `foo.jpg@480w_300h.jpg` (only for hdslb.com/bfs/ URLs).
+fn thumbnail_url(url: &str) -> String {
+    if !url.contains("hdslb.com/bfs/") || url.contains('@') {
+        return url.to_string();
+    }
+    if url.ends_with(".svg") || url.contains(".svg?") {
+        return url.to_string();
+    }
+    format!("{url}@480w_300h.jpg")
+}
+
 async fn fetch_and_store(cache: &ImageCache, url: &str) -> Option<DynamicImage> {
     let _permit = download_semaphore().acquire().await.ok()?;
-    let response = reqwest::get(url).await.ok()?;
+    let t = Instant::now();
+    let response = cache.http.get(&thumbnail_url(url)).send().await.ok()?;
     let bytes = response.bytes().await.ok()?;
+    let short_dl: String = url.chars().rev().take(40).collect::<String>().chars().rev().collect();
+    img_log(&format!("[IMG] http_download url={short_dl} time={}ms", t.elapsed().as_millis()));
     // Bilibili mathjax formula images are served as SVG, which the `image`
     // crate cannot decode. Rasterize them to PNG first.
+    let t = Instant::now();
     let decoded = if is_svg(&bytes) {
         decode_svg(bytes.to_vec()).await?
     } else {
         decode_image(bytes.to_vec()).await?
     };
+    img_log(&format!("[IMG] decode url={short_dl} time={}ms", t.elapsed().as_millis()));
     let img = decoded;
     // Store raw bytes on disk for next run.
+    let t = Instant::now();
     let path = cache.disk_path(url);
     let _ = tokio::fs::create_dir_all(cache.dir.clone()).await;
     let _ = tokio::fs::write(&path, &bytes).await;
+    img_log(&format!("[IMG] disk_write url={short_dl} time={}ms", t.elapsed().as_millis()));
     {
         let mut meta = cache.meta.lock().unwrap();
         meta.insert(
@@ -390,6 +453,7 @@ mod tests {
             meta_path: PathBuf::from("/tmp/bilibili-tui-test-images/meta.json"),
             disk_limit_bytes: DEFAULT_DISK_LIMIT_BYTES,
             memory_limit: 2,
+            http: build_http_client(),
             memory: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashMap::new()),
             meta: Mutex::new(HashMap::new()),

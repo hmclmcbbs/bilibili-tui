@@ -3,10 +3,10 @@
 local mp = require "mp"
 local utils = require "mp.utils"
 
-local MAX_ACTIVE = 320
-local MAX_PENDING = 512
+local MAX_ACTIVE = 640
+local MAX_PENDING = 1024
 local config = {
-    enabled = true, display_area = 0.5, opacity = 1.0, font_scale = 1.0,
+    enabled = true, display_area = 0.75, opacity = 1.0, font_scale = 1.0,
     duration = 7.0, stroke_width = 2.0, line_height = 1.6,
     massive_mode = false, font_family = "sans-serif",
     advanced_offset_x = 0.0, advanced_offset_y = 0.0, advanced_scale = 1.0,
@@ -106,8 +106,8 @@ local function layout(width, height)
     -- display_area: top half of the screen for mode 4, bottom half for mode 5.
     -- This makes them behave like advanced (mode 7/8) danmaku that ignore the
     -- scrolling-band cap entirely.
-    local top_lanes = math.max(1, math.floor((height * 0.5 - top) / lane_height))
-    local bot_lanes = math.max(1, math.floor((height * 0.5) / lane_height))
+    local top_lanes = math.max(1, math.floor((height * 0.65 - top) / lane_height))
+    local bot_lanes = math.max(1, math.floor((height * 0.65) / lane_height))
     return font_size, lane_height, top, math.max(1, math.floor(usable / lane_height)), top_lanes, bot_lanes
 end
 
@@ -134,7 +134,7 @@ end
 -- list in one frame turns a single OSD rebuild into a giant one. A small
 -- budget keeps per-frame work flat and lets the lane allocator spread the
 -- load across frames (the video clock gate in render() keeps timing exact).
-local SCHEDULE_BUDGET = 24
+local SCHEDULE_BUDGET = 48
 
 local function schedule(width, height, now)
     local font_size, lane_height, top, lanes, top_lanes, bot_lanes = layout(width, height)
@@ -200,8 +200,8 @@ local function target_fps(active_count)
     -- floor high enough that moving/scaling BAS comments stay fluid; the OSD
     -- is a GPU-shared layer in windowed (vo=gpu) playback, so the extra
     -- rebuilds are cheap (the earlier kitty-terminal stutter is gone).
-    if active_count >= 160 then return 45 end
-    if active_count >= 80 then return 55 end
+    if active_count >= 240 then return 40 end
+    if active_count >= 120 then return 50 end
     return 60
 end
 

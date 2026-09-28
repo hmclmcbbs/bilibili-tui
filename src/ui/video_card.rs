@@ -436,6 +436,8 @@ pub struct VideoCardGrid {
     pub pending_downloads: HashSet<usize>,
     pub cached_visible_rows: usize,
     pub list_layout: bool,
+    /// When true, `start_cover_downloads` re-scans visible items.
+    covers_dirty: bool,
 }
 
 impl VideoCardGrid {
@@ -455,6 +457,7 @@ impl VideoCardGrid {
             pending_downloads: HashSet::new(),
             cached_visible_rows: 3,
             list_layout: false,
+            covers_dirty: true,
         }
     }
 
@@ -471,10 +474,12 @@ impl VideoCardGrid {
         self.selected_index = 0;
         self.scroll_row = 0;
         self.pending_downloads.clear();
+        self.covers_dirty = true;
     }
 
     pub fn add_card(&mut self, card: VideoCard) {
         self.cards.push(card);
+        self.covers_dirty = true;
     }
 
     pub fn visible_rows(&self, height: u16) -> usize {
@@ -492,10 +497,14 @@ impl VideoCardGrid {
 
     pub fn update_scroll(&mut self, visible_rows: usize) {
         let current_row = self.selected_row();
+        let old_scroll = self.scroll_row;
         if current_row < self.scroll_row {
             self.scroll_row = current_row;
         } else if current_row >= self.scroll_row + visible_rows {
             self.scroll_row = current_row - visible_rows + 1;
+        }
+        if self.scroll_row != old_scroll {
+            self.covers_dirty = true;
         }
     }
 
@@ -581,6 +590,10 @@ impl VideoCardGrid {
 
     /// Start background downloads for visible covers
     pub fn start_cover_downloads(&mut self) {
+        if !self.covers_dirty {
+            return;
+        }
+        self.covers_dirty = false;
         if self.cards.is_empty() {
             return;
         }
@@ -617,7 +630,12 @@ impl VideoCardGrid {
                             img = img.crop_imm(x, y, side, side);
                             img = img.resize(384, 384, image::imageops::FilterType::Triangle);
                         }
+                        let t_rp = std::time::Instant::now();
                         let protocol = picker.new_resize_protocol(img);
+                        crate::infrastructure::image_cache::img_log(&format!(
+                            "[IMG] resize_protocol time={}ms",
+                            t_rp.elapsed().as_millis()
+                        ));
                         let _ = tx
                             .send(CoverResult {
                                 index: idx,

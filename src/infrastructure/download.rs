@@ -284,7 +284,12 @@ pub async fn save_cover_and_danmaku(
     if !pic_url.is_empty() {
         let cover_path = PathBuf::from(format!("{stem}.jpg"));
         if !cover_path.exists() {
-            let resp = reqwest::Client::new()
+            let resp = reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .timeout(std::time::Duration::from_secs(300))
+                .tcp_keepalive(std::time::Duration::from_secs(60))
+                .build()
+                .expect("download client")
                 .get(pic_url)
                 .header("User-Agent", crate::api::client::UA)
                 .send()

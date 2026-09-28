@@ -161,12 +161,18 @@ impl Sidebar {
         area: Rect,
         theme: &Theme,
         user: Option<(&crate::api::auth::CurrentUser, &mut Option<ratatui_image::protocol::StatefulProtocol>)>,
+        active: bool,
     ) {
-        // Main block with subtle right border
+        // Main block with subtle right border; when focused, use pink accent.
+        let border_style = if active {
+            Style::default().fg(theme.bilibili_pink).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.border_subtle)
+        };
         let block = Block::default()
             .borders(Borders::RIGHT)
             .border_type(BorderType::Plain)
-            .border_style(Style::default().fg(theme.border_subtle));
+            .border_style(border_style);
 
         let inner = block.inner(area);
         frame.render_widget(block, area);
@@ -182,6 +188,27 @@ impl Sidebar {
                 Constraint::Length(1),        // Footer separator
             ])
             .split(inner);
+        // When focused, show "◀ 侧边栏" at the top-right corner of the area.
+        if active {
+            let label = "◀ 侧边栏";
+            // ◀ is fullwidth (2 cols), space(1), 侧边栏(3×2=6) = 9 columns total.
+            let label_w: u16 = 9;
+            let indicator_area = Rect {
+                x: area.x + area.width.saturating_sub(label_w),
+                y: area.y,
+                width: label_w,
+                height: 1,
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    label,
+                    Style::default()
+                        .fg(theme.bilibili_pink)
+                        .add_modifier(Modifier::BOLD),
+                ))),
+                indicator_area,
+            );
+        }
 
         // Inner header split: brand (4) / divider (1) / user info (4)
         let header_chunks = if user.is_some() {

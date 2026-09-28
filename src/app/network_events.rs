@@ -20,6 +20,8 @@ impl App {
                     return;
                 }
                 if let Page::Home(page) = &mut self.current_page {
+                    page.set_api_client(self.api_client.clone());
+                    page.set_use_guest_feed(self.credentials.is_none());
                     page.apply_recommendations(feed, videos);
                 }
             }
@@ -32,6 +34,8 @@ impl App {
                     return;
                 }
                 if let Page::Home(page) = &mut self.current_page {
+                    page.set_api_client(self.api_client.clone());
+                    page.set_use_guest_feed(self.credentials.is_none());
                     page.apply_load_more(feed, videos);
                 }
             }
@@ -351,10 +355,27 @@ impl App {
                     }
                 }
             }
-            network::NetworkEvent::VideoDetailLoaded {
+            // ── Phase 1: video_info arrived → render player immediately ──
+            network::NetworkEvent::VideoInfoLoaded {
                 req_id,
                 bvid,
                 video_info,
+            } => {
+                if !self.is_latest_request("video_detail", req_id) {
+                    return;
+                }
+                if let Page::VideoDetail(page) = &mut self.current_page {
+                    if page.bvid != bvid {
+                        return;
+                    }
+                    page.video_info = Some(video_info);
+                    page.loading = false;
+                    page.error_message = None;
+                }
+            }
+            network::NetworkEvent::VideoDetailLoaded {
+                req_id,
+                bvid,
                 comments,
                 has_more_comments,
                 related_videos,
@@ -384,7 +405,6 @@ impl App {
                     if page.bvid != bvid {
                         return;
                     }
-                    page.video_info = Some(video_info);
                     page.comments = comments;
                     page.comment_page = 1;
                     page.has_more_comments = has_more_comments;

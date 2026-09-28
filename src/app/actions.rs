@@ -224,6 +224,8 @@ impl App {
                     req_id,
                     bvid,
                     aid: 0,
+                    preheat_cid: None,
+                    preheat_playback: None,
                 });
             }
             AppAction::LoadMoreNotifications => {
@@ -560,6 +562,25 @@ impl App {
                     req_id,
                     bvid,
                     aid,
+                    preheat_cid: None,
+                    preheat_playback: None,
+                });
+            }
+            AppAction::PrefetchVideoDetails { bvids } => {
+                // Background prefetch: fetch video_info for all visible videos
+                // so the 30s cache is warm when the user presses Enter.
+                let api = self.api_client.clone();
+                tokio::spawn(async move {
+                // Fetch up to 4 in parallel to avoid rate-limiting.
+                use futures_util::StreamExt;
+                futures_util::stream::iter(bvids)
+                    .for_each_concurrent(4, |bvid: String| {
+                        let api = api.clone();
+                        async move {
+                            let _ = api.get_video_info(&bvid).await;
+                            }
+                        })
+                        .await;
                 });
             }
             AppAction::OpenVideoDetailPreheat(bvid, aid, cid) => {
@@ -584,6 +605,8 @@ impl App {
                     req_id,
                     bvid: bvid.clone(),
                     aid,
+                    preheat_cid: None,
+                    preheat_playback: None,
                 });
                 if cid > 0 {
                     self.send_network_command(network::NetworkCommand::PreheatStream {

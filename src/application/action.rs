@@ -139,6 +139,8 @@ pub enum AppAction {
     RefreshDynamic,
     /// Open video detail page (bvid, aid)
     OpenVideoDetail(String, i64),
+    /// Prefetch video_info for visible videos so pressing Enter is instant.
+    PrefetchVideoDetails { bvids: Vec<String> },
     /// Open video detail page AND immediately pre-warm the media proxy using a
     /// known cid (e.g. from watch history, which already carries the video's
     /// cid). This starts the proxy ~one network round-trip earlier than

@@ -56,6 +56,16 @@ pub struct HomePage {
     pub selected_source: usize,
     /// Current ranking section (rid). 0 = 全站.
     ranking_rid: i64,
+    /// Video to prefetch when the app layer gets around to it.
+    prefetch_pending: Vec<String>,
+    /// When true, `start_cover_downloads` re-scans visible items.
+    covers_dirty: bool,
+    /// Guard to prevent duplicate background prefetch tasks.
+    prefetch_inflight: bool,
+    /// Shared API client for background prefetching (set by the app layer).
+    api_client: Option<std::sync::Arc<crate::api::client::ApiClient>>,
+    /// Whether the current session is using guest (unauthenticated) feed.
+    use_guest_feed: bool,
 }
 
 /// Common Bilibili ranking sections: (rid, label).
@@ -241,6 +251,106 @@ impl HomePage {
             focus_sources: true,
             selected_source: 1,
             ranking_rid: 0,
+            prefetch_pending: Vec::new(),
+            covers_dirty: true,
+            prefetch_inflight: false,
+            api_client: None,
+            use_guest_feed: true,
+        }
+    }
+
+    /// Store the shared API client reference so background prefetch tasks can
+    /// use it without requiring the caller to pass it on every call.
+    pub fn set_api_client(&mut self, client: std::sync::Arc<crate::api::client::ApiClient>) {
+        self.api_client = Some(client);
+    }
+
+    /// Mark whether the current session uses guest (unauthenticated) feed.
+    pub fn set_use_guest_feed(&mut self, guest: bool) {
+        self.use_guest_feed = guest;
+    }
+
+    /// Spawn a background task that fetches the *next* page of recommended
+    /// videos and pre-downloads their cover images into the image cache.
+    /// This is non-blocking: the task runs on the tokio runtime and results
+    /// are consumed by the normal `start_cover_downloads` flow once the
+    /// videos are eventually added to `self.videos`.
+    fn spawn_prefetch_next_page(&mut self) {
+        // Guard: don't duplicate in-flight prefetches.
+        if self.prefetch_inflight {
+            return;
+        }
+        // Only prefetch for feeds that support infinite-scroll pagination.
+        if !matches!(self.feed, HomeFeed::Recommended | HomeFeed::Popular) {
+            return;
+        }
+        // Need videos loaded and an API client available.
+        if self.videos.is_empty() || self.api_client.is_none() {
+            return;
+        }
+        self.prefetch_inflight = true;
+        let next_fresh_idx = self.fresh_idx + 1;
+        let feed = self.feed;
+        let use_guest_feed = self.use_guest_feed;
+        let rid = self.ranking_rid;
+        let api_client = self.api_client.clone().unwrap();
+        crate::infrastructure::image_cache::img_log(&format!(
+            "[PREFETCH] spawning prefetch for page {} feed={:?}",
+            next_fresh_idx, feed
+        ));
+        tokio::spawn(async move {
+            Self::prefetch_page(api_client, next_fresh_idx, feed, use_guest_feed, rid).await;
+        });
+    }
+
+    /// The actual async prefetch work: fetch video metadata for the given
+    /// page, then warm the image cache with every cover URL.
+    async fn prefetch_page(
+        api_client: std::sync::Arc<crate::api::client::ApiClient>,
+        fresh_idx: i32,
+        feed: HomeFeed,
+        use_guest_feed: bool,
+        rid: i64,
+    ) {
+        let t0 = std::time::Instant::now();
+        let result = match (feed, use_guest_feed) {
+            (HomeFeed::Recommended, false) => {
+                api_client.get_recommendations_paged(fresh_idx).await
+            }
+            (HomeFeed::Recommended, true) | (HomeFeed::Popular, _) => {
+                api_client.get_popular_videos(fresh_idx, 20).await
+            }
+            _ => api_client.get_home_feed(feed, fresh_idx, 20, rid).await,
+        };
+        match result {
+            Ok(videos) => {
+                crate::infrastructure::image_cache::img_log(&format!(
+                    "[PREFETCH] page {} fetched {} videos in {}ms",
+                    fresh_idx,
+                    videos.len(),
+                    t0.elapsed().as_millis()
+                ));
+                let cache = crate::infrastructure::image_cache::instance();
+                for video in &videos {
+                    if let Some(pic_url) = &video.pic {
+                        // Warm both memory and disk cache.  `image_cache::get`
+                        // handles deduplication internally, so concurrent
+                        // requests for the same URL are coalesced.
+                        cache.get(pic_url).await;
+                    }
+                }
+                crate::infrastructure::image_cache::img_log(&format!(
+                    "[PREFETCH] page {} covers cached in {}ms",
+                    fresh_idx,
+                    t0.elapsed().as_millis()
+                ));
+            }
+            Err(e) => {
+                crate::infrastructure::image_cache::img_log(&format!(
+                    "[PREFETCH] page {} failed: {}",
+                    fresh_idx, e
+                ));
+            }
         }
     }
 
@@ -278,6 +388,7 @@ impl HomePage {
                 self.loading = false;
                 self.selected_index = 0;
                 self.scroll_row = 0;
+                self.covers_dirty = true;
             }
             Err(e) => {
                 self.error_message = Some(format!("加载推荐视频失败: {}", e));
@@ -291,6 +402,7 @@ impl HomePage {
         self.error_message = None;
         self.pending_downloads.clear();
         self.fresh_idx = 1;
+        self.prefetch_inflight = false;
     }
 
     pub fn apply_recommendations(&mut self, feed: HomeFeed, videos: Vec<VideoItem>) {
@@ -305,11 +417,14 @@ impl HomePage {
         self.selected_index = 0;
         self.scroll_row = 0;
         self.error_message = None;
+        self.covers_dirty = true;
+        self.spawn_prefetch_next_page();
     }
 
     pub fn apply_recommendations_error(&mut self, msg: String) {
         self.error_message = Some(msg);
         self.loading = false;
+        self.prefetch_inflight = false;
     }
 
     pub fn begin_load_more(&mut self) -> Option<i32> {
@@ -329,11 +444,14 @@ impl HomePage {
             self.videos.push(VideoCard { video, cover: None });
         }
         self.loading_more = false;
+        self.covers_dirty = true;
+        self.spawn_prefetch_next_page();
     }
 
     pub fn apply_load_more_error(&mut self) {
         self.fresh_idx -= 1;
         self.loading_more = false;
+        self.prefetch_inflight = false;
     }
 
     pub async fn load_more(&mut self, api_client: &ApiClient) {
@@ -343,6 +461,7 @@ impl HomePage {
 
         self.loading_more = true;
         self.fresh_idx += 1;
+        self.prefetch_inflight = false;
 
         match api_client.get_recommendations_paged(self.fresh_idx).await {
             Ok(videos) => {
@@ -350,6 +469,7 @@ impl HomePage {
                     self.videos.push(VideoCard { video, cover: None });
                 }
                 self.loading_more = false;
+                self.covers_dirty = true;
             }
             Err(_) => {
                 self.fresh_idx -= 1;
@@ -377,6 +497,10 @@ impl HomePage {
 
     /// Start background downloads for visible covers (non-blocking)
     pub fn start_cover_downloads(&mut self) {
+        if !self.covers_dirty {
+            return;
+        }
+        self.covers_dirty = false;
         if !self.videos.is_empty() {
             // Calculate visible range using current viewport rows + small buffer
             let start = self.scroll_row * self.columns;
@@ -397,7 +521,12 @@ impl HomePage {
                     // Spawn background task
                     tokio::spawn(async move {
                         if let Some(img) = Self::download_image(&pic_url).await {
+                            let t_rp = std::time::Instant::now();
                             let protocol = picker.new_resize_protocol(img);
+                            crate::infrastructure::image_cache::img_log(&format!(
+                                "[IMG] resize_protocol time={}ms",
+                                t_rp.elapsed().as_millis()
+                            ));
                             let _ = tx
                                 .send(CoverResult {
                                     index: idx,
@@ -439,10 +568,14 @@ impl HomePage {
 
     fn update_scroll(&mut self, visible_rows: usize) {
         let current_row = self.selected_row();
+        let old_scroll = self.scroll_row;
         if current_row < self.scroll_row {
             self.scroll_row = current_row;
         } else if current_row >= self.scroll_row + visible_rows {
             self.scroll_row = current_row - visible_rows + 1;
+        }
+        if self.scroll_row != old_scroll {
+            self.covers_dirty = true;
         }
     }
 
@@ -465,6 +598,25 @@ impl HomePage {
         }
         self.update_scroll(self.cached_visible_rows.max(1));
         true
+    }
+
+    /// Queue a prefetch for all visible video cards.
+    fn schedule_prefetch(&mut self) {
+        let start = self.scroll_row * self.columns;
+        let visible_count = (self.cached_visible_rows.max(1) as usize) * self.columns;
+        let end = (start + visible_count).min(self.videos.len());
+        let mut bvids = Vec::with_capacity(end.saturating_sub(start));
+        for card in &self.videos[start..end] {
+            if let Some(bvid) = &card.video.bvid {
+                bvids.push(bvid.clone());
+            }
+        }
+        self.prefetch_pending = bvids;
+    }
+
+    /// Take the pending prefetch targets, clearing them.
+    pub fn take_prefetch(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.prefetch_pending)
     }
 
     fn total_rows(&self) -> usize {
@@ -549,6 +701,7 @@ impl HomePage {
         self.selected_index = 0;
         self.scroll_row = 0;
         self.loading_more = false;
+        self.prefetch_inflight = false;
     }
 }
 
@@ -625,6 +778,7 @@ impl Component for HomePage {
                     return Some(AppAction::LoadMoreRecommendations);
                 }
             }
+            self.schedule_prefetch();
             return Some(AppAction::None);
         }
         if keys.matches_up(key) {
@@ -632,6 +786,7 @@ impl Component for HomePage {
                 self.selected_index -= self.columns;
                 self.update_scroll(self.cached_visible_rows);
             }
+            self.schedule_prefetch();
             return Some(AppAction::None);
         }
         if key == KeyCode::Char('u')
@@ -705,6 +860,7 @@ impl Component for HomePage {
                     if new_idx < self.videos.len() {
                         self.selected_index = new_idx;
                         self.update_scroll(self.cached_visible_rows);
+                        self.schedule_prefetch();
                         // Check for pagination only when actually moved
                         if self.is_near_bottom(self.cached_visible_rows) && !self.loading_more {
                             return Some(AppAction::LoadMoreRecommendations);
@@ -718,6 +874,7 @@ impl Component for HomePage {
                 if !self.videos.is_empty() && self.selected_index >= self.columns {
                     self.selected_index -= self.columns;
                     self.update_scroll(self.cached_visible_rows);
+                    self.schedule_prefetch();
                 }
                 None
             }
@@ -760,6 +917,7 @@ impl Component for HomePage {
                             self.update_scroll(self.cached_visible_rows);
                             self.last_click_time = Some(now);
                             self.last_click_index = Some(click_idx);
+                            self.schedule_prefetch();
                         }
                     }
                 }

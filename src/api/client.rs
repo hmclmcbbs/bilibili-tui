@@ -59,6 +59,7 @@ pub struct ApiClient {
     /// Deduplicates concurrent identical cached GETs so rapid navigation back
     /// and forth to the same screen only hits the network once.
     api_inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<serde_json::Value>>>>>,
+    video_info_cache: RwLock<HashMap<String, (Instant, super::video::VideoInfo)>>,
 }
 
 impl ApiClient {
@@ -121,6 +122,7 @@ impl ApiClient {
                 .connect_timeout(std::time::Duration::from_secs(5))
                 .timeout(std::time::Duration::from_secs(20))
                 .tcp_keepalive(std::time::Duration::from_secs(60))
+                .tcp_nodelay(true)
                 .pool_max_idle_per_host(16)
                 .pool_idle_timeout(std::time::Duration::from_secs(30))
                 .build()
@@ -129,6 +131,7 @@ impl ApiClient {
             wbi_keys: RwLock::new(None),
             api_cache: RwLock::new(HashMap::new()),
             api_inflight: Mutex::new(HashMap::new()),
+            video_info_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -173,6 +176,7 @@ impl ApiClient {
     /// a cached response for a previous account is never reused.
     pub fn clear_api_cache(&self) {
         self.api_cache.write().expect("api cache lock poisoned").clear();
+        self.video_info_cache.write().expect("video_info cache lock").clear();
     }
 
     fn build_url(&self, domain: BilibiliApiDomain, endpoint: &str) -> String {
@@ -206,7 +210,7 @@ impl ApiClient {
             let resp = match req.send().await {
                 Ok(resp) => resp,
                 Err(_) if attempt < 2 => {
-                    let backoff = 150 * (attempt as u64 + 1);
+                    let backoff = 150 * (1u64 << attempt);
                     tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
                     continue;
                 }
@@ -229,7 +233,7 @@ impl ApiClient {
 
             if !status.is_success() {
                 if attempt < 2 && (status.is_server_error() || status.as_u16() == 429) {
-                    let backoff = if status.as_u16() == 429 { 1000 } else { 150 * (attempt as u64 + 1) };
+                    let backoff = if status.as_u16() == 429 { 1000 } else { 150 * (1u64 << attempt) };
                     tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
                     continue;
                 }
@@ -812,9 +816,24 @@ impl ApiClient {
             BilibiliApiDomain::Main.as_str(),
             bvid
         );
+        // 30s cache: avoids re-fetching on rapid navigation.
+        let now = std::time::Instant::now();
+        {
+            let cache = self.video_info_cache.read().expect("video_info cache lock");
+            if let Some((at, info)) = cache.get(&url) {
+                if now.duration_since(*at) < Duration::from_secs(30) {
+                    return Ok(info.clone());
+                }
+            }
+        }
         let resp: ApiResponse<super::video::VideoInfo> = self.get(&url).await?;
-        resp.data
-            .ok_or_else(|| anyhow::anyhow!("No data in video info response"))
+        let info = resp.data
+            .ok_or_else(|| anyhow::anyhow!("No data in video info response"))?;
+        {
+            let mut cache = self.video_info_cache.write().expect("video_info cache lock");
+            cache.insert(url, (now, info.clone()));
+        }
+        Ok(info)
     }
 
     pub async fn get_play_url(
@@ -1560,7 +1579,7 @@ impl ApiClient {
     // Bangumi API
     pub async fn get_bangumi_timeline(&self) -> Result<Vec<super::bangumi::TimelineDay>> {
         let url = self.build_url(BilibiliApiDomain::Main, "/pgc/web/timeline?types=1");
-        let value = self.get_json(&url).await?;
+        let value = self.get_json_cached(&url, Duration::from_secs(300)).await?;
         Self::check_code(&value)?;
         let result = value
             .get("result")
@@ -1574,7 +1593,7 @@ impl ApiClient {
             "{}/pgc/web/rank/list?day=3&season_type=1",
             BilibiliApiDomain::Main.as_str(),
         );
-        let value = self.get_json(&url).await?;
+        let value = self.get_json_cached(&url, Duration::from_secs(300)).await?;
         Self::check_code(&value)?;
         let list = value
             .get("result")
@@ -1590,7 +1609,7 @@ impl ApiClient {
             BilibiliApiDomain::Main.as_str(),
             season_id,
         );
-        let value = self.get_json(&url).await?;
+        let value = self.get_json_cached(&url, Duration::from_secs(120)).await?;
         Self::check_code(&value)?;
         let result_val = value
             .get("result")
@@ -1612,7 +1631,7 @@ impl ApiClient {
             BilibiliApiDomain::Main.as_str(),
             ep_id,
         );
-        let value = self.get_json(&url).await?;
+        let value = self.get_json_cached(&url, Duration::from_secs(120)).await?;
         Self::check_code(&value)?;
         let result_val = value
             .get("result")

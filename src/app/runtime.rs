@@ -169,7 +169,7 @@ impl App {
                 .as_ref()
                 .map(|u| (u, &mut self.user_avatar));
             self.sidebar
-                .draw(frame, chunks[0], &self.theme, user);
+                .draw(frame, chunks[0], &self.theme, user, self.sidebar_active);
             self.draw_page(frame, chunks[1]);
         } else {
             self.draw_page(frame, chunks[0]);
@@ -508,6 +508,14 @@ impl App {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        // Prefetch: when user scrolls in home grid, background-fetch video_info.
+        if let Page::Home(page) = &mut self.current_page {
+            let bvids = page.take_prefetch();
+            if !bvids.is_empty() {
+                self.handle_action(crate::application::AppAction::PrefetchVideoDetails { bvids }).await;
             }
         }
 
