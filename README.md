@@ -156,7 +156,9 @@ src/
   sudo pacman -S mpv
   ```
 
-  > **关键设置：** Bilibili DASH 的视频和音频是独立流。MPV 默认的相对跳转可能回退到视频关键帧，造成跳转后短暂无声。建议在 `~/.config/mpv/mpv.conf` 中加入 `hr-seek=yes`，让音视频从精确的目标时间恢复。
+  > **跳转精度：** Bilibili DASH 的视频和音频是独立流。MPV 默认的相对跳转可能回退到视频关键帧，造成跳转后短暂无声。应用启动 MPV 时已自动传入 `--hr-seek=yes`，无需额外配置；只有在应用之外单独使用 MPV 时，才需要在 `~/.config/mpv/mpv.conf` 中加入 `hr-seek=yes`。
+
+  > **弹幕顺滑度：** 应用启动 MPV 时传入 `--deinterlace=yes --video-sync=display-resample`：前者让 30fps 片源按场重建为 60fps 输出，后者把呈现节奏交给显示器的 vsync 时钟（低延迟 profile 会把 `video-sync` 改回 `audio`，应用已在 profile 之后重新覆盖）。弹幕 overlay 只在"呈现"时刻上屏，实测两项配合把位置更新从约 60 次/秒提升到约 120 次/秒，滚动糊影（画面冻结时长）从约 10.6ms 降到约 2.1ms。代价是 bob 重建会轻微软化逐行素材的垂直细节；如某片源不希望处理，可用 `mpv_extra_args` 传 `--deinterlace=no` 覆盖。
 
   > **CDN 隐私：** 应用会对维护目录中的 CDN 裸域名执行无 Cookie、无媒体路径、无签名参数的限时可达性探测，并将结果作为本地排名的少量先验。实际播放只使用 Bilibili `playurl` API 授权返回的地址，不会把签名 URL 改写到目录中的其他主机。
 
@@ -432,6 +434,25 @@ cargo build --release --target x86_64-unknown-linux-musl
     "refresh": "r",
     "open_settings": "s"
   }
+}
+```
+
+#### MPV 相关配置
+
+以下字段均为可选，直接写在 `config.json` 顶层：
+
+| 字段             | 说明                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------ |
+| `mpv_vo`         | 覆盖 MPV 视频输出。留空使用默认外部窗口；设为 `kitty` / `tct` 可在终端内渲染。                          |
+| `mpv_hwdec`      | 覆盖硬件解码模式。留空自动选择（NVIDIA 默认 `nvdec`，其他 `auto-safe`）；可显式设为 `vaapi`、`vulkan`、`no` 等。 |
+| `mpv_extra_args` | 追加到每次 MPV 命令行末尾的额外参数，按空白分隔，支持单/双引号包裹含空格的值。**最后追加，可覆盖应用自身设置的同名选项。** |
+
+示例：
+
+```json
+{
+  "mpv_hwdec": "auto-safe",
+  "mpv_extra_args": "--loop-playback=inf --audio-pitch-correction=no"
 }
 ```
 

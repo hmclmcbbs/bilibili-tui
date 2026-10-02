@@ -3,8 +3,8 @@ use crate::api::history::HistoryKey;
 use crate::api::recommend::HomeFeed;
 use crate::api::space::SpaceVideoOrder;
 use crate::api::video::VideoPage;
-use crate::domain::playback::{PlayOrder, PlaylistItem, PlaylistSource};
 use crate::domain::playback::PlaybackOptions;
+use crate::domain::playback::{PlayOrder, PlaylistItem, PlaylistSource};
 use crate::infrastructure::persistence::{Credentials, DanmakuConfig, Keybindings, VideoQuality};
 use crate::presentation::tui::DynamicTab;
 use crate::presentation::tui::NavItem;
@@ -96,6 +96,9 @@ pub enum AppAction {
         aid: i64,
         cid: i64,
         duration: i64,
+        /// Video title for the mpv window title; None when the caller has
+        /// not loaded video metadata.
+        title: Option<String>,
         playback: PlaybackOptions,
     },
     /// Play a video with page info for auto-play next episode
@@ -104,6 +107,8 @@ pub enum AppAction {
         aid: i64,
         pages: Vec<VideoPage>,
         current_index: usize,
+        /// Video title for the mpv window title.
+        title: Option<String>,
         playback: PlaybackOptions,
     },
     PlayPlaylist {
@@ -140,7 +145,9 @@ pub enum AppAction {
     /// Open video detail page (bvid, aid)
     OpenVideoDetail(String, i64),
     /// Prefetch video_info for visible videos so pressing Enter is instant.
-    PrefetchVideoDetails { bvids: Vec<String> },
+    PrefetchVideoDetails {
+        bvids: Vec<String>,
+    },
     /// Open video detail page AND immediately pre-warm the media proxy using a
     /// known cid (e.g. from watch history, which already carries the video's
     /// cid). This starts the proxy ~one network round-trip earlier than
@@ -228,9 +235,13 @@ pub enum AppAction {
     /// Load the user's favorite folders list (for the folder picker in video detail).
     LoadUserFavoriteFolders,
     /// Toggle the current video in the user's watch-later list (aid)
-    ToggleWatchLater { aid: i64 },
+    ToggleWatchLater {
+        aid: i64,
+    },
     /// Remove a video from the watch-later list (used from the favorites page)
-    RemoveFromWatchLater { aid: i64 },
+    RemoveFromWatchLater {
+        aid: i64,
+    },
     /// Add a comment (oid, comment_type, message, optional root rpid for replies)
     AddComment {
         oid: i64,
@@ -239,9 +250,13 @@ pub enum AppAction {
         root: Option<i64>,
     },
     /// Toggle follow/unfollow an uploader (mid)
-    ToggleFollow { mid: i64 },
+    ToggleFollow {
+        mid: i64,
+    },
     /// Toggle follow/unfollow a bangumi season (追番)
-    ToggleBangumiFollow { season_id: i64 },
+    ToggleBangumiFollow {
+        season_id: i64,
+    },
     /// Switch to live page
     SwitchToLive,
     /// Open live room detail
@@ -271,7 +286,9 @@ pub enum AppAction {
     /// Switch bangumi tab
     SwitchBangumiTab(BangumiTab),
     /// Search bangumi by keyword
-    SearchBangumi { keyword: String },
+    SearchBangumi {
+        keyword: String,
+    },
     /// Open bangumi detail page
     OpenBangumiDetail(i64),
     /// Load more bangumi index items

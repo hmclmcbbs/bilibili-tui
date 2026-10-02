@@ -549,6 +549,12 @@ pub struct AppConfig {
     /// (e.g. "vaapi", "nvdec", "vulkan", "no") to force a mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mpv_hwdec: Option<String>,
+    /// Extra command-line arguments appended to every spawned mpv process.
+    /// Split on whitespace with optional single/double quotes, e.g.
+    /// `--loop-playback=inf --audio-pitch-correction=no`. Appended last, so
+    /// these override the options this app sets itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mpv_extra_args: Option<String>,
     #[serde(default)]
     pub video_quality: VideoQuality,
     /// When true, downloading a bangumi episode also pulls the whole season
@@ -566,6 +572,7 @@ impl Default for AppConfig {
             auto_play: true,
             mpv_vo: None,
             mpv_hwdec: None,
+            mpv_extra_args: None,
             video_quality: VideoQuality::default(),
             download_whole_season: false,
         }
@@ -655,7 +662,6 @@ fn default_sixteen() -> u64 {
 fn default_one() -> f64 {
     1.0
 }
-
 
 /// Get the config directory path
 fn get_config_dir() -> Result<PathBuf> {
@@ -846,6 +852,27 @@ mod config_tests {
         let config: AppConfig = serde_json::from_value(value).expect("legacy config");
         assert_eq!(config.danmaku, DanmakuConfig::default());
         assert_eq!(config.video_quality, VideoQuality::Best);
+        assert_eq!(config.mpv_extra_args, None);
+        assert_eq!(AppConfig::default().mpv_extra_args, None);
+    }
+
+    #[test]
+    fn mpv_extra_args_round_trips_and_is_skipped_when_unset() {
+        let mut config = AppConfig::default();
+        assert!(
+            !serde_json::to_value(&config)
+                .expect("serialize config")
+                .get("mpv_extra_args")
+                .is_some(),
+            "unset mpv_extra_args must not appear in serialized config"
+        );
+        config.mpv_extra_args = Some("--loop-playback=inf".to_string());
+        let value = serde_json::to_value(&config).expect("serialize config");
+        let parsed: AppConfig = serde_json::from_value(value).expect("deserialize config");
+        assert_eq!(
+            parsed.mpv_extra_args.as_deref(),
+            Some("--loop-playback=inf")
+        );
     }
 
     #[test]

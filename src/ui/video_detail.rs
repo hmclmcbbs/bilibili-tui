@@ -4,8 +4,8 @@ use super::video_card::{VideoCard, VideoCardGrid};
 use super::{Component, Theme, shortcut_footer};
 use crate::api::client::ApiClient;
 use crate::api::comment::CommentItem;
-use crate::api::video::{RelatedVideoItem, VideoInfo};
 use crate::api::favorite::FavoriteFolder;
+use crate::api::video::{RelatedVideoItem, VideoInfo};
 use crate::application::AppAction;
 use crate::domain::playback::PlaybackOptions;
 use crate::storage::{Keybindings, VideoQuality};
@@ -229,6 +229,21 @@ impl VideoDetailPage {
         }
     }
 
+    /// Title for the mpv window: the video title, plus the page part for
+    /// multi-part videos. None until video metadata has loaded.
+    fn playback_title(&self) -> Option<String> {
+        let info = self.video_info.as_ref()?;
+        let part = self
+            .get_pages()
+            .and_then(|pages| pages.get(self.current_page_index))
+            .filter(|page| !page.part.is_empty())
+            .map(|page| page.part.clone());
+        Some(match part {
+            Some(part) => format!("{} · {}", info.title, part),
+            None => info.title.clone(),
+        })
+    }
+
     pub fn play_action(&self) -> AppAction {
         if let Some(pages) = self.get_pages() {
             if pages.len() > 1 {
@@ -237,6 +252,7 @@ impl VideoDetailPage {
                     aid: self.aid,
                     pages: pages.clone(),
                     current_index: self.current_page_index,
+                    title: self.playback_title(),
                     playback: self.playback,
                 };
             }
@@ -246,6 +262,7 @@ impl VideoDetailPage {
                     aid: self.aid,
                     cid: page.cid,
                     duration: page.duration,
+                    title: self.playback_title(),
                     playback: self.playback,
                 };
             }
@@ -259,6 +276,7 @@ impl VideoDetailPage {
             aid: self.aid,
             cid,
             duration,
+            title: self.playback_title(),
             playback: self.playback,
         }
     }
@@ -278,7 +296,10 @@ impl VideoDetailPage {
                     .unwrap_or(info.cid);
                 self.video_info = Some(info);
                 self.streams_probing = true;
-                match api_client.get_play_url(&self.bvid, cid, self.playback).await {
+                match api_client
+                    .get_play_url(&self.bvid, cid, self.playback)
+                    .await
+                {
                     Ok(data) => {
                         self.hdr_supported = Some(data.dash.video.iter().any(|s| s.id >= 125));
                         self.hires_supported = Some(
@@ -560,10 +581,8 @@ impl VideoDetailPage {
                 ),
             ];
             if let Some(msg) = &self.interaction_msg {
-                interaction_spans.push(Span::styled(
-                    " · ",
-                    Style::default().fg(theme.fg_secondary),
-                ));
+                interaction_spans
+                    .push(Span::styled(" · ", Style::default().fg(theme.fg_secondary)));
                 interaction_spans.push(Span::styled(
                     msg.clone(),
                     Style::default()
@@ -611,8 +630,16 @@ impl VideoDetailPage {
         frame.render_widget(block, area);
 
         let quality_label = PlaybackOptions::quality_label(self.playback.quality);
-        let hdr_label = if self.playback.prefer_hdr { "开" } else { "关" };
-        let hires_label = if self.playback.prefer_hires { "开" } else { "关" };
+        let hdr_label = if self.playback.prefer_hdr {
+            "开"
+        } else {
+            "关"
+        };
+        let hires_label = if self.playback.prefer_hires {
+            "开"
+        } else {
+            "关"
+        };
         let mut lines = vec![Line::from(vec![
             Span::styled("画质:", Style::default().fg(theme.fg_primary)),
             Span::styled(
@@ -638,10 +665,7 @@ impl VideoDetailPage {
                         .add_modifier(Modifier::BOLD),
                 ),
             ];
-            spans.push(Span::styled(
-                "[h]",
-                Style::default().fg(theme.fg_secondary),
-            ));
+            spans.push(Span::styled("[h]", Style::default().fg(theme.fg_secondary)));
             lines.push(Line::from(spans));
         }
         if show_hires {
@@ -654,10 +678,7 @@ impl VideoDetailPage {
                         .add_modifier(Modifier::BOLD),
                 ),
             ];
-            spans.push(Span::styled(
-                "[f]",
-                Style::default().fg(theme.fg_secondary),
-            ));
+            spans.push(Span::styled("[f]", Style::default().fg(theme.fg_secondary)));
             lines.push(Line::from(spans));
         }
         if self.streams_probing {
@@ -746,13 +767,14 @@ impl VideoDetailPage {
                     ),
                     Span::styled(
                         comment.author_name(),
-                        Style::default().bg(bg).fg(theme.bilibili_pink).add_modifier(
-                            if is_selected {
+                        Style::default()
+                            .bg(bg)
+                            .fg(theme.bilibili_pink)
+                            .add_modifier(if is_selected {
                                 Modifier::BOLD
                             } else {
                                 Modifier::empty()
-                            },
-                        ),
+                            }),
                     ),
                     Span::styled(
                         format!("  {}", comment.format_time()),
@@ -989,7 +1011,8 @@ impl VideoDetailPage {
 impl Component for VideoDetailPage {
     fn draw(&mut self, frame: &mut Frame, area: Rect, theme: &Theme, keys: &Keybindings) {
         // Adjust layout based on input mode
-        let show_extra_pane = self.input_mode || self.folder_picker_mode || self.download_quality_picker;
+        let show_extra_pane =
+            self.input_mode || self.folder_picker_mode || self.download_quality_picker;
         let chunks = if show_extra_pane {
             Layout::default()
                 .direction(Direction::Vertical)
@@ -1063,13 +1086,13 @@ impl Component for VideoDetailPage {
             }
         }
 
-         // Input box (only in input mode)
-         if self.input_mode {
-             let input_title = if self.expanded_comment.is_some() {
-                 " 💬 回复评论 "
-             } else {
-                 " ✏️ 发表评论 "
-             };
+        // Input box (only in input mode)
+        if self.input_mode {
+            let input_title = if self.expanded_comment.is_some() {
+                " 💬 回复评论 "
+            } else {
+                " ✏️ 发表评论 "
+            };
             let input_block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
@@ -1093,9 +1116,7 @@ impl Component for VideoDetailPage {
                 .border_style(Style::default().fg(theme.info))
                 .title(Span::styled(
                     " 收藏到文件夹 [1-9] 选择, 0 取消收藏, v/Esc 取消 ",
-                    Style::default()
-                        .fg(theme.info)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
                 ));
             let mut items: Vec<ListItem> = Vec::new();
             if self.favorited
@@ -1208,11 +1229,7 @@ impl Component for VideoDetailPage {
                 playback_label.push_str("/Hi-Res");
             }
             items.push((playback_keys, playback_label, theme.fg_accent));
-            items.push((
-                "x".into(),
-                self.download_quality_label(),
-                theme.fg_accent,
-            ));
+            items.push(("x".into(), self.download_quality_label(), theme.fg_accent));
             items.push(("Space".into(), "多选".into(), theme.fg_accent));
             items.push(("d/D".into(), "下载/批量下载".into(), theme.fg_accent));
             items.push((keys.play.clone(), "播放".into(), theme.success));
@@ -1345,8 +1362,10 @@ impl Component for VideoDetailPage {
                     }
                 }
                 KeyCode::Enter => {
-                    self.download_quality =
-                        Self::quality_options().get(self.download_quality_index).copied().flatten();
+                    self.download_quality = Self::quality_options()
+                        .get(self.download_quality_index)
+                        .copied()
+                        .flatten();
                     self.download_quality_picker = false;
                 }
                 _ => {}
@@ -1360,9 +1379,7 @@ impl Component for VideoDetailPage {
                 KeyCode::Enter => {
                     self.download_confirm = false;
                     let item = self.current_download_item();
-                    return Some(AppAction::DownloadMedia {
-                        items: vec![item],
-                    });
+                    return Some(AppAction::DownloadMedia { items: vec![item] });
                 }
                 KeyCode::Esc | KeyCode::Char('d') => {
                     self.download_confirm = false;
@@ -1414,7 +1431,8 @@ impl Component for VideoDetailPage {
         }
         if key == KeyCode::Char('D') {
             // Download everything selected, or current if nothing selected.
-            let items: Vec<crate::application::DownloadItem> = if self.download_selection.is_empty() {
+            let items: Vec<crate::application::DownloadItem> = if self.download_selection.is_empty()
+            {
                 vec![self.current_download_item()]
             } else {
                 self.download_selection
@@ -1468,9 +1486,7 @@ impl Component for VideoDetailPage {
             // Enter comment input mode
             self.input_mode = true;
             self.input_buffer.clear();
-            if self.focus == DetailFocus::Comments
-                && self.comment_scroll < self.comments.len()
-            {
+            if self.focus == DetailFocus::Comments && self.comment_scroll < self.comments.len() {
                 let comment = &self.comments[self.comment_scroll];
                 if comment.reply_count() > 0 {
                     self.expanded_comment = Some(comment.rpid);
@@ -1586,6 +1602,7 @@ impl Component for VideoDetailPage {
                             aid: self.aid,
                             pages,
                             current_index: self.episode_scroll,
+                            title: self.playback_title(),
                             playback: self.playback,
                         });
                     }

@@ -1,16 +1,16 @@
-use crate::app::{App, PreviousPage};
 use crate::api::favorite::FavoriteSource;
+use crate::app::{App, PreviousPage};
 use crate::application::{AppAction, DownloadItem, network};
+use crate::infrastructure::download::{DownloadPhase, DownloadTarget, download, set_status};
 use crate::infrastructure::{media, persistence};
-use crate::infrastructure::download::{download, set_status, DownloadPhase, DownloadTarget};
-use tokio::sync::mpsc;
 use crate::presentation::tui::{
-    ArticleDetailPage, BangumiDetailPage, BangumiPage, DynamicDetailPage, DynamicPage,
-    DownloadsPage, FavoritesPage, HistoryPage, HomePage, LiveDetailPage, LivePage, LoginPage,
-    MallPage, NavItem, NotificationsPage, NotifTab, Page, SearchPage, SectionPage, SettingsPage,
+    ArticleDetailPage, BangumiDetailPage, BangumiPage, DownloadsPage, DynamicDetailPage,
+    DynamicPage, FavoritesPage, HistoryPage, HomePage, LiveDetailPage, LivePage, LoginPage,
+    MallPage, NavItem, NotifTab, NotificationsPage, Page, SearchPage, SectionPage, SettingsPage,
     Theme, UpPage,
 };
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 impl App {
     fn cache_home_page(&mut self, page: HomePage) {
@@ -198,9 +198,7 @@ impl App {
                     page.chat_view = false;
                     page.begin_loading();
                     let req_id = self.next_request_id("notifications");
-                    self.send_network_command(network::NetworkCommand::LoadChatSessions {
-                        req_id,
-                    });
+                    self.send_network_command(network::NetworkCommand::LoadChatSessions { req_id });
                 }
             }
             AppAction::SendChatMessage { talker_id, content } => {
@@ -274,6 +272,7 @@ impl App {
                 aid,
                 cid,
                 duration,
+                title,
                 playback,
             } => {
                 let session_id = self.allocate_playback_session();
@@ -304,6 +303,7 @@ impl App {
                         duration,
                         start_position,
                         None,
+                        title,
                         playback,
                         credentials.as_ref(),
                         danmaku,
@@ -331,6 +331,7 @@ impl App {
                 aid,
                 pages,
                 current_index,
+                title,
                 playback,
             } => {
                 // Play only the selected episode
@@ -369,15 +370,16 @@ impl App {
                             page.duration,
                             start_position,
                             Some(page.page),
+                            title,
                             playback,
                             credentials.as_ref(),
                             danmaku,
                             video_quality,
-                        tx.clone(),
-                        session_id,
-                        preheat,
-                    )
-                    .await;
+                            tx.clone(),
+                            session_id,
+                            preheat,
+                        )
+                        .await;
                         let (success, error) = match result {
                             Ok(()) => (true, None),
                             Err(error) => (false, Some(format!("启动播放器失败: {error:#}"))),
@@ -571,13 +573,13 @@ impl App {
                 // so the 30s cache is warm when the user presses Enter.
                 let api = self.api_client.clone();
                 tokio::spawn(async move {
-                // Fetch up to 4 in parallel to avoid rate-limiting.
-                use futures_util::StreamExt;
-                futures_util::stream::iter(bvids)
-                    .for_each_concurrent(4, |bvid: String| {
-                        let api = api.clone();
-                        async move {
-                            let _ = api.get_video_info(&bvid).await;
+                    // Fetch up to 4 in parallel to avoid rate-limiting.
+                    use futures_util::StreamExt;
+                    futures_util::stream::iter(bvids)
+                        .for_each_concurrent(4, |bvid: String| {
+                            let api = api.clone();
+                            async move {
+                                let _ = api.get_video_info(&bvid).await;
                             }
                         })
                         .await;
@@ -593,8 +595,7 @@ impl App {
                 // The duplicate preheat fired later by VideoDetailLoaded is
                 // idempotent (do_preheat overwrites the store with the same
                 // proxy), so no harm is done.
-                let detail_page =
-                    crate::presentation::tui::VideoDetailPage::new(bvid.clone(), aid);
+                let detail_page = crate::presentation::tui::VideoDetailPage::new(bvid.clone(), aid);
                 let previous = std::mem::replace(
                     &mut self.current_page,
                     Page::VideoDetail(Box::new(detail_page)),
@@ -774,15 +775,13 @@ impl App {
                         let mid = page.mid;
                         let is_series = page.pending_series_is_series;
                         let req_id = self.next_request_id("series_archives");
-                        self.send_network_command(
-                            network::NetworkCommand::LoadSeriesArchives {
-                                req_id,
-                                mid,
-                                series_id,
-                                is_series,
-                                page: 1,
-                            },
-                        );
+                        self.send_network_command(network::NetworkCommand::LoadSeriesArchives {
+                            req_id,
+                            mid,
+                            series_id,
+                            is_series,
+                            page: 1,
+                        });
                     }
                 }
             }
@@ -795,15 +794,13 @@ impl App {
                     let mid = page.mid;
                     let is_series = page.active_series_is_series;
                     let req_id = self.next_request_id("series_archives");
-                    self.send_network_command(
-                        network::NetworkCommand::LoadSeriesArchives {
-                            req_id,
-                            mid,
-                            series_id,
-                            is_series,
-                            page: next_page,
-                        },
-                    );
+                    self.send_network_command(network::NetworkCommand::LoadSeriesArchives {
+                        req_id,
+                        mid,
+                        series_id,
+                        is_series,
+                        page: next_page,
+                    });
                 }
             }
             AppAction::LoadUpArticles => {
@@ -1347,10 +1344,7 @@ impl App {
                     // Clear old state and set picker
                     page.folder_picker_mode = true;
                     page.folder_list = folders;
-                    page.set_interaction_msg(format!(
-                        "选择收藏夹 [1-{}]",
-                        page.folder_list.len()
-                    ));
+                    page.set_interaction_msg(format!("选择收藏夹 [1-{}]", page.folder_list.len()));
                 }
             }
             AppAction::FavoriteVideo { bvid: _, aid } => {
@@ -1439,7 +1433,8 @@ impl App {
                 oid,
                 comment_type,
                 message,
-                root,            } => {
+                root,
+            } => {
                 if self.credentials.is_none() {
                     self.apply_login_required_hint();
                     return;
@@ -1535,15 +1530,17 @@ impl App {
                         if let Page::Up(page) = &mut self.current_page {
                             let new_state = !followed;
                             page.is_followed = Some(new_state);
-                            page.follow_msg =
-                                Some(if new_state { "已关注".to_string() } else { "已取消关注".to_string() });
+                            page.follow_msg = Some(if new_state {
+                                "已关注".to_string()
+                            } else {
+                                "已取消关注".to_string()
+                            });
                             page.follow_msg_set_at = Some(std::time::Instant::now());
                         }
                     }
                     Err(e) => {
                         if let Page::Up(page) = &mut self.current_page {
-                            page.follow_msg =
-                                Some(format!("操作失败: {e}"));
+                            page.follow_msg = Some(format!("操作失败: {e}"));
                             page.follow_msg_set_at = Some(std::time::Instant::now());
                         }
                     }
@@ -1649,7 +1646,7 @@ impl App {
                     self.send_network_command(network::NetworkCommand::LoadLiveMore { req_id });
                 }
             }
-            AppAction::PlayLive { room_id, title: _ } => {
+            AppAction::PlayLive { room_id, title } => {
                 let session_id = self.allocate_playback_session();
                 self.playback.session_id = None;
                 self.playback.status = crate::domain::playback::PlaybackStatus::Starting;
@@ -1665,9 +1662,8 @@ impl App {
                 // Run the live startup (hub connect + stream resolve) on a
                 // background task so the TUI keeps rendering.
                 tokio::spawn(async move {
-                    let start_result = tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        async {
+                    let start_result =
+                        tokio::time::timeout(std::time::Duration::from_secs(30), async {
                             let danmaku_hub = if existing_hub.is_some() {
                                 existing_hub
                             } else {
@@ -1677,12 +1673,8 @@ impl App {
                                         credentials.dede_user_id.parse::<i64>().ok()
                                     })
                                     .unwrap_or(0);
-                                match crate::api::LiveDanmakuHub::connect(
-                                    &api_client,
-                                    room_id,
-                                    uid,
-                                )
-                                .await
+                                match crate::api::LiveDanmakuHub::connect(&api_client, room_id, uid)
+                                    .await
                                 {
                                     Ok(hub) => Some(hub),
                                     Err(error) => {
@@ -1693,14 +1685,14 @@ impl App {
                             media::play_live(
                                 api_client,
                                 room_id,
+                                &title,
                                 danmaku_hub,
                                 danmaku_config_tx.subscribe(),
                             )
                             .await
                             .map_err(|error| format!("启动直播失败: {error:#}"))
-                        },
-                    )
-                    .await;
+                        })
+                        .await;
                     let (success, error) = match start_result {
                         Ok(Ok(())) => (true, None),
                         Ok(Err(error)) => (false, Some(error)),
@@ -1818,7 +1810,11 @@ impl App {
                     }
                 }
             }
-            AppAction::CreateFavoriteFolder { title, intro, privacy } => {
+            AppAction::CreateFavoriteFolder {
+                title,
+                intro,
+                privacy,
+            } => {
                 if self.credentials.is_none() {
                     self.apply_login_required_hint();
                     return;
@@ -1834,10 +1830,7 @@ impl App {
                             let mid = page.mid;
                             let req_id = self.next_request_id("favorites_refresh");
                             self.send_network_command(
-                                network::NetworkCommand::RefreshFavoriteFolders {
-                                    req_id,
-                                    mid,
-                                },
+                                network::NetworkCommand::RefreshFavoriteFolders { req_id, mid },
                             );
                         }
                     }
@@ -1862,10 +1855,7 @@ impl App {
                             let mid = page.mid;
                             let req_id = self.next_request_id("favorites_refresh");
                             self.send_network_command(
-                                network::NetworkCommand::RefreshFavoriteFolders {
-                                    req_id,
-                                    mid,
-                                },
+                                network::NetworkCommand::RefreshFavoriteFolders { req_id, mid },
                             );
                         }
                     }
@@ -1890,10 +1880,7 @@ impl App {
                             let mid = page.mid;
                             let req_id = self.next_request_id("favorites_refresh");
                             self.send_network_command(
-                                network::NetworkCommand::RefreshFavoriteFolders {
-                                    req_id,
-                                    mid,
-                                },
+                                network::NetworkCommand::RefreshFavoriteFolders { req_id, mid },
                             );
                         }
                     }
@@ -1954,11 +1941,8 @@ impl App {
             AppAction::PlayLocalFile { path } => {
                 let danmaku_config = self.config.danmaku.clone();
                 tokio::spawn(async move {
-                    let _ = media::play_local_file(
-                        std::path::PathBuf::from(path),
-                        danmaku_config,
-                    )
-                    .await;
+                    let _ = media::play_local_file(std::path::PathBuf::from(path), danmaku_config)
+                        .await;
                 });
             }
             AppAction::DownloadMedia { items } => {
@@ -1986,8 +1970,8 @@ impl App {
                     let out_dir = out_dir.clone();
                     let api_client = self.api_client.clone();
                     let item_title = item.title.clone();
-                    let whole_playlist = item.kind == "bangumi"
-                        && self.config.download_whole_season;
+                    let whole_playlist =
+                        item.kind == "bangumi" && self.config.download_whole_season;
                     tokio::spawn(async move {
                         // Bilibili answers HTTP 412 to yt-dlp unless the
                         // buvid3/buvid4 fingerprint cookies are present. Fetch
@@ -1998,14 +1982,15 @@ impl App {
                         let target = if item.kind == "bangumi" {
                             DownloadTarget::Bangumi { ep_id: item.ep_id }
                         } else {
-                            DownloadTarget::Video { bvid: item.bvid.clone() }
+                            DownloadTarget::Video {
+                                bvid: item.bvid.clone(),
+                            }
                         };
                         // Reuse the app's full cookie string (incl. buvid3/buvid4
                         // fingerprint cookies) so yt-dlp is not hit with HTTP 412.
-                        let cookie_path =
-                            api_client.cookies_for_ytdlp().and_then(|cookies| {
-                                crate::storage::write_cookies_for_ytdlp(&cookies).ok()
-                            });
+                        let cookie_path = api_client.cookies_for_ytdlp().and_then(|cookies| {
+                            crate::storage::write_cookies_for_ytdlp(&cookies).ok()
+                        });
                         let save_quality = quality.clone();
                         let height = quality.max_height().unwrap_or(1080);
                         // Spawn the download future so it starts running and
@@ -2141,10 +2126,7 @@ impl App {
                 self.open_home_feed(crate::api::recommend::HomeFeed::Recommended)
                     .await;
             }
-            NavItem::Popular
-            | NavItem::Weekly
-            | NavItem::Ranking
-            | NavItem::MustWatch => {
+            NavItem::Popular | NavItem::Weekly | NavItem::Ranking | NavItem::MustWatch => {
                 let feed = target.home_feed().expect("hot feed has a HomeFeed");
                 self.open_home_feed(feed).await;
             }
@@ -2391,9 +2373,7 @@ impl App {
                 page.begin_loading();
                 let req_id = self.next_request_id("notifications");
                 if is_chat {
-                    self.send_network_command(network::NetworkCommand::LoadChatSessions {
-                        req_id,
-                    });
+                    self.send_network_command(network::NetworkCommand::LoadChatSessions { req_id });
                 } else {
                     self.send_network_command(network::NetworkCommand::LoadNotificationsInit {
                         req_id,

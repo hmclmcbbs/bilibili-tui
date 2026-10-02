@@ -2,8 +2,8 @@ use crate::api::client::ApiClient;
 use crate::api::danmaku::VideoDanmaku;
 use crate::api::live_danmaku_hub::LiveDanmakuHub;
 use crate::api::live_ws::LiveMessage;
-use crate::domain::playback::{PlayOrder, PlaybackEvent, PlaylistItem};
 use crate::domain::playback::PlaybackOptions;
+use crate::domain::playback::{PlayOrder, PlaybackEvent, PlaylistItem};
 use crate::storage::{Credentials, DanmakuConfig, VideoQuality};
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
@@ -28,6 +28,16 @@ pub mod proxy;
 static LIVE_SESSION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 static MPV_IPC_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 const LIVE_DANMAKU_SCRIPT: &str = include_str!("live_danmaku.lua");
+/// How many seconds before the current playlist item ends to start preparing
+/// the next one. Long enough to hide playurl + proxy startup, short enough
+/// that the prefetched signed URLs cannot expire while waiting.
+const PLAYLIST_PREFETCH_LEAD_SECS: i64 = 45;
+/// Prefetched next item: the in-flight preparation task plus when it started
+/// (used to discard a stale result whose signed URLs may have expired).
+type PlaylistPrefetch = Option<(
+    tokio::task::JoinHandle<(Option<(usize, PreparedPlaylistItem)>, Vec<String>)>,
+    Instant,
+)>;
 
 fn mpv_stdout() -> Stdio {
     let terminal_vo = crate::storage::load_config()
@@ -104,6 +114,103 @@ fn apply_mpv_vo(cmd: &mut tokio::process::Command) {
     }
 }
 
+/// Arguments shared by every mpv session this app spawns.
+///
+/// Kept in one place so the VOD / playlist / bangumi / local / live entry
+/// points cannot drift apart again (they previously disagreed on
+/// `--input-terminal`, `--hr-seek`, and `--msg-level`).
+fn apply_mpv_common(cmd: &mut tokio::process::Command) {
+    cmd.arg("--force-window=immediate");
+    // The TUI owns the terminal; mpv's window receives keyboard via the
+    // display server. Never let mpv read our stdin.
+    cmd.arg("--input-terminal=no");
+    // Bilibili DASH serves video and audio as separate streams. mpv's default
+    // relative seek lands on a keyframe of the video stream while the audio
+    // keeps its old position, which shows up as a brief silence after every
+    // seek. `hr-seek=yes` resumes both streams at the exact target time.
+    // This used to be a README-only recommendation for the user's mpv.conf;
+    // passing it here fixes it for everyone.
+    cmd.arg("--hr-seek=yes");
+    // mpv's default network timeout is 60s. On a dead CDN edge that is a
+    // minute of frozen UI before anything fails; 15s keeps live failover
+    // responsive without tripping on slow but working connections.
+    cmd.arg("--network-timeout=15");
+    // Force bob deinterlacing: bwdif rebuilds every field as a full frame, so
+    // a 30 fps Bilibili source is presented at 60 fps. That doubles the
+    // present points the ASS danmaku overlay can ride, and present cadence is
+    // what decides whether overlay scrolling looks smooth — measured on this
+    // setup: presentation freeze 16.7 ms -> 7.1 ms versus audio-paced 30 fps
+    // output. Trade-off: bob interpolation slightly softens vertical detail
+    // on progressive content (mpv manual warns about this). Override via
+    // mpv_extra_args (`--deinterlace=no`) if a source looks over-processed.
+    cmd.arg("--deinterlace=yes");
+    // Pace presents to the display's vsync clock instead of the audio clock.
+    // The overlay is composited at present time, so in audio-sync mode its
+    // updates only reach the screen when a video frame happens to be due —
+    // on a 165 Hz panel that means uneven gaps and frozen text between
+    // presents (the "smear"). Together with the overlay's own render-rate
+    // fix this raised on-screen position updates from ~60/s to ~140/s.
+    // Note: `--profile=low-latency` (applied after this function at the VOD/
+    // bangumi/live entry points) sets `video-sync=audio`; those call sites
+    // re-assert display-resample afterwards because mpv's last argument wins.
+    cmd.arg("--video-sync=display-resample");
+    cmd.arg("--msg-level=ffmpeg=error,vd=warn");
+    // Default window title follows media-title (which we set per session via
+    // --force-media-title) and brands the fallback as bilibili-tui instead of
+    // mpv. Expansion happens when the file loads, so playlist switches update
+    // the title automatically.
+    cmd.arg("--title=${?media-title:${media-title} - bilibili-tui}${!media-title:bilibili-tui}");
+}
+
+/// Split a user-supplied argument string on whitespace, honoring single and
+/// double quotes so values like `--term-status-msg='a b'` stay one argument.
+/// Unterminated quotes consume the rest of the string.
+fn split_mpv_extra_args(input: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let mut started = false;
+    for ch in input.chars() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => current.push(ch),
+            None if ch == '"' || ch == '\'' => {
+                quote = Some(ch);
+                started = true;
+            }
+            None if ch.is_whitespace() => {
+                if started || !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            None => {
+                current.push(ch);
+                started = true;
+            }
+        }
+    }
+    if started || !current.is_empty() {
+        args.push(current);
+    }
+    args
+}
+
+/// Append `mpv_extra_args` from the config, if set. Called last for every
+/// spawn so user-supplied options win over the ones this app sets (mpv keeps
+/// the last value for duplicate options).
+fn apply_mpv_extra_args(cmd: &mut tokio::process::Command) {
+    let configured = crate::storage::load_config()
+        .ok()
+        .and_then(|config| config.mpv_extra_args)
+        .filter(|value| !value.trim().is_empty());
+    if let Some(extra) = configured {
+        for arg in split_mpv_extra_args(&extra) {
+            cmd.arg(arg);
+        }
+    }
+}
+
 /// Play a video using mpv with yt-dlp and report watch progress
 /// This function spawns mpv in a background task to avoid blocking the TUI
 #[allow(clippy::too_many_arguments)]
@@ -115,6 +222,9 @@ pub async fn play_video(
     duration: i64,
     start_position: Option<f64>,
     page_num: Option<i32>,
+    // Video title shown in the mpv window title; the caller already has it,
+    // so setting the window title costs no extra request.
+    title: Option<String>,
     playback: PlaybackOptions,
     credentials: Option<&Credentials>,
     danmaku_config: DanmakuConfig,
@@ -177,50 +287,51 @@ pub async fn play_video(
         (Some(p_proxy), Some(p_url))
     } else {
         (async {
-        let t0 = load_t0;
-        log_load("pur_req", t0);
-        match api_client.get_play_url(bvid, cid, playback).await {
-            Ok(play_url) => {
-                log_load("pur_resp", t0);
-                let rerank = play_url.clone();
-                let streams = crate::api::cdn::RankedStreams::from_unranked(&play_url, playback);
-                let streams = match streams {
-                    Ok(mut s) => {
-                        if let Some(best) = s.best_cached_index() {
-                            s.video.swap(0, best);
-                        } else {
-                            log_load("cold_start", t0);
-                            if let Ok(Ok(ranked)) = tokio::time::timeout(
-                                Duration::from_millis(1500),
-                                crate::api::cdn::rank_streams(&play_url, playback),
-                            )
-                            .await
-                            {
-                                if !ranked.video.is_empty() {
-                                    s.video = ranked.video;
+            let t0 = load_t0;
+            log_load("pur_req", t0);
+            match api_client.get_play_url(bvid, cid, playback).await {
+                Ok(play_url) => {
+                    log_load("pur_resp", t0);
+                    let rerank = play_url.clone();
+                    let streams =
+                        crate::api::cdn::RankedStreams::from_unranked(&play_url, playback);
+                    let streams = match streams {
+                        Ok(mut s) => {
+                            if let Some(best) = s.best_cached_index() {
+                                s.video.swap(0, best);
+                            } else {
+                                log_load("cold_start", t0);
+                                if let Ok(Ok(ranked)) = tokio::time::timeout(
+                                    Duration::from_millis(1500),
+                                    crate::api::cdn::rank_streams(&play_url, playback),
+                                )
+                                .await
+                                {
+                                    if !ranked.video.is_empty() {
+                                        s.video = ranked.video;
+                                    }
+                                    if !ranked.audio.is_empty() {
+                                        s.audio = ranked.audio;
+                                    }
                                 }
-                                if !ranked.audio.is_empty() {
-                                    s.audio = ranked.audio;
-                                }
+                                log_load("cold_done", t0);
                             }
-                            log_load("cold_done", t0);
+                            Ok(s)
                         }
-                        Ok(s)
-                    }
-                    Err(e) => Err(e),
-                };
-                log_load("proxy_start", t0);
-                let proxy = match streams {
-                    Ok(streams) => proxy::MediaProxy::start(streams).await.ok(),
-                    Err(_) => None,
-                };
-                log_load("proxy_done", t0);
-                (proxy, Some(rerank))
+                        Err(e) => Err(e),
+                    };
+                    log_load("proxy_start", t0);
+                    let proxy = match streams {
+                        Ok(streams) => proxy::MediaProxy::start(streams).await.ok(),
+                        Err(_) => None,
+                    };
+                    log_load("proxy_done", t0);
+                    (proxy, Some(rerank))
+                }
+                Err(_) => (None, None),
             }
-            Err(_) => (None, None),
-        }
-    })
-    .await
+        })
+        .await
     };
     let ipc_path = mpv_ipc_path("bilibili-tui-mpv", &cid.to_string());
     remove_stale_mpv_ipc(&ipc_path);
@@ -242,12 +353,22 @@ pub async fn play_video(
         None
     };
 
-    cmd.arg("--force-window=immediate");
-    // The TUI owns the terminal; mpv's window receives keyboard via the
-    // display server. Never let mpv read our stdin.
-    cmd.arg("--input-terminal=no");
+    // Window title: show the video title instead of a raw stream URL. Passed
+    // in from the detail page, which already loaded it; no extra request on
+    // the first-frame critical path.
+    let media_title = title;
+    if let Some(title) = &media_title {
+        cmd.arg(format!("--force-media-title={title}"));
+    }
+
+    apply_mpv_common(&mut cmd);
     // Use MPV's low-latency profile for Bilibili VOD playback.
     cmd.arg("--profile=low-latency");
+    // The profile forces `video-sync=audio`, undoing apply_mpv_common's
+    // display-paced presentation (mpv last-argument-wins). Re-assert it: the
+    // danmaku overlay only updates at present time, and audio-paced presents
+    // follow the 30 fps video cadence, which is what froze scrolling text.
+    cmd.arg("--video-sync=display-resample");
     // The low-latency profile is tuned for real-time/live streams, and two of
     // its settings are actively harmful when mpv plays through the local
     // loopback MediaProxy:
@@ -279,7 +400,6 @@ pub async fn play_video(
     cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
     cmd.arg(format!("--script={}", danmaku_script_path.display()));
     cmd.arg("--script-opts-append=double_video_fps=no");
-    cmd.arg("--msg-level=ffmpeg=error,vd=warn");
     // Start directly on the resolved (warm-cache or primary) stream. This
     // avoids the slow yt-dlp page parse that --ytdl-format would trigger.
     if let Some(proxy) = &media_proxy {
@@ -291,6 +411,7 @@ pub async fn play_video(
         cmd.arg(&webpage_url);
     }
     apply_mpv_vo(&mut cmd);
+    apply_mpv_extra_args(&mut cmd);
 
     let first_frame_ipc = ipc_path.clone();
     let first_frame_t0 = load_t0;
@@ -363,7 +484,10 @@ pub async fn play_video(
         // Danmaku is fed to mpv position-by-position below; subtitles are
         // attached over IPC once the player socket is up (a spawned child
         // retries until the socket answers).
-        let danmaku = api_client.get_video_danmaku(cid, Some(aid), duration).await.unwrap_or_default();
+        let danmaku = api_client
+            .get_video_danmaku(cid, Some(aid), duration)
+            .await
+            .unwrap_or_default();
         // 抓取总量诊断：无条件写盘（调试期，每次播放 append 一行，开销极小）。
         {
             let mut counts = std::collections::HashMap::<i32, usize>::new();
@@ -377,7 +501,11 @@ pub async fn play_video(
                 }
             }
             line.push('\n');
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/bili_danmaku.log") {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open("/tmp/bili_danmaku.log")
+            {
                 let _ = f.write_all(line.as_bytes());
             }
         }
@@ -388,14 +516,12 @@ pub async fn play_video(
             attach_subtitle_files(&attach_ipc, &subtitle_for_attach).await;
         });
 
-
         // Level-3 fast start: probe the CDN in the background and, if a
         // better edge than the primary is found, seamlessly switch to it
         // mid-playback. The primary edge is already playing, so this only
         // adds a brief reload when the switch actually happens.
-        let (rerank_tx, rerank_rx) = tokio::sync::oneshot::channel::<
-            Option<crate::api::cdn::RankedStreams>,
-        >();
+        let (rerank_tx, rerank_rx) =
+            tokio::sync::oneshot::channel::<Option<crate::api::cdn::RankedStreams>>();
         let mut rerank_rx = Some(rerank_rx);
         let mut rerank_applied = false;
         if let Some(play_url) = play_url_for_rerank.clone() {
@@ -413,7 +539,9 @@ pub async fn play_video(
                 let ranked = if warm {
                     None
                 } else {
-                    crate::api::cdn::rank_streams(&play_url, playback).await.ok()
+                    crate::api::cdn::rank_streams(&play_url, playback)
+                        .await
+                        .ok()
                 };
                 log_load("rank_done", load_t0);
                 let _ = rerank_tx.send(ranked);
@@ -683,8 +811,8 @@ async fn fetch_and_render_subtitles(
                     && !cues.is_empty()
                 {
                     let srt = crate::api::subtitle::render_srt(&cues);
-                    let path = std::env::temp_dir()
-                        .join(format!("bilibili-tui-sub-{cid}-{index}.srt"));
+                    let path =
+                        std::env::temp_dir().join(format!("bilibili-tui-sub-{cid}-{index}.srt"));
                     if tokio::fs::write(&path, srt).await.is_ok() {
                         return Some((zh, path));
                     }
@@ -693,8 +821,11 @@ async fn fetch_and_render_subtitles(
             }
         })
         .collect();
-    let mut entries: Vec<(bool, std::path::PathBuf)> =
-        futures_util::future::join_all(tasks).await.into_iter().flatten().collect();
+    let mut entries: Vec<(bool, std::path::PathBuf)> = futures_util::future::join_all(tasks)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
     entries.sort_by(|left, right| right.0.cmp(&left.0));
     entries.into_iter().map(|(_, path)| path).collect()
 }
@@ -702,10 +833,7 @@ async fn fetch_and_render_subtitles(
 /// Attach already-rendered subtitle files to a running mpv instance over its
 /// IPC socket. Retries briefly because the socket may not be up yet right
 /// after spawn. Failures are ignored: subtitles are optional.
-async fn attach_subtitle_files(
-    ipc_path: &std::path::Path,
-    paths: &[std::path::PathBuf],
-) {
+async fn attach_subtitle_files(ipc_path: &std::path::Path, paths: &[std::path::PathBuf]) {
     // `paths` is ordered with the Chinese track first (fetch_and_render_
     // subtitles sorts entries by the zh flag, and play_playlist sorts the same
     // way). Select only that first track so the displayed caption defaults to
@@ -739,7 +867,11 @@ fn is_corrupt_video_log(line: &str) -> bool {
 
 fn log_load(tag: &str, t0: std::time::Instant) {
     let el = t0.elapsed().as_millis() as u64;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/bili_load.log") {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/bili_load.log")
+    {
         let _ = writeln!(f, "[load] {} ms={}", tag, el);
     }
 }
@@ -763,7 +895,14 @@ fn create_live_danmaku_script() -> Result<std::path::PathBuf> {
 }
 
 fn live_danmaku_value(message: &LiveMessage) -> Option<serde_json::Value> {
-    let LiveMessage::Danmaku { uid, content, color, mode, .. } = message else {
+    let LiveMessage::Danmaku {
+        uid,
+        content,
+        color,
+        mode,
+        ..
+    } = message
+    else {
         return None;
     };
 
@@ -1061,18 +1200,16 @@ pub async fn play_playlist(
     let mut cmd = Command::new("mpv");
     cmd.stdout(mpv_stdout());
     cmd.stderr(Stdio::piped());
+    apply_mpv_common(&mut cmd);
     cmd.arg("--idle=yes");
-    cmd.arg("--force-window=immediate");
-    cmd.arg("--input-terminal=no");
-    cmd.arg("--input-terminal=no");
     apply_mpv_hwdec(&mut cmd);
-    cmd.arg("--msg-level=ffmpeg=error,vd=warn");
     cmd.arg("--ytdl=no");
     cmd.arg("--script-opts-append=double_video_fps=yes");
     let ipc_path = mpv_ipc_path("bilibili-tui-playlist", &session_id.to_string());
     remove_stale_mpv_ipc(&ipc_path);
     cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
     apply_mpv_vo(&mut cmd);
+    apply_mpv_extra_args(&mut cmd);
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -1139,10 +1276,15 @@ async fn prepare_playlist_item(
         }
     };
     let play_url = api_client
-        .get_play_url(&item.bvid, cid, playback_options_from_quality(video_quality))
+        .get_play_url(
+            &item.bvid,
+            cid,
+            playback_options_from_quality(video_quality),
+        )
         .await?;
-    let streams = crate::api::cdn::rank_streams(&play_url, playback_options_from_quality(video_quality))
-        .await?;
+    let streams =
+        crate::api::cdn::rank_streams(&play_url, playback_options_from_quality(video_quality))
+            .await?;
     let proxy = proxy::MediaProxy::start(streams).await?;
     Ok(PreparedPlaylistItem {
         cid,
@@ -1248,6 +1390,11 @@ async fn run_playlist(
     let mut item_started = Instant::now();
     let mut start_ts = chrono::Utc::now().timestamp();
     let mut played_any = false;
+    // Next-item preparation (playurl + CDN ranking + proxy startup) kicked off
+    // shortly before the current item ends, so the transition does not stall
+    // on network latency. Carries its spawn time: a stale prefetch is thrown
+    // away at consumption because signed stream URLs may have expired.
+    let mut prefetch: PlaylistPrefetch = None;
     start_playlist_media(ipc_path, &items[index], &prepared).await?;
     let _ = tx.send(PlaybackEvent::ItemChanged {
         session_id,
@@ -1278,6 +1425,20 @@ async fn run_playlist(
             }
             _ = position.tick() => {
                 if let Some(value) = mpv_time_pos(ipc_path).await { played_time = value.max(0.0) as i64; }
+                let remaining = prepared.duration.saturating_sub(played_time);
+                if prefetch.is_none()
+                    && index + 1 < items.len()
+                    && prepared.duration > 0
+                    && remaining <= PLAYLIST_PREFETCH_LEAD_SECS
+                {
+                    let api = api_client.clone();
+                    let pending = items.clone();
+                    let start = index + 1;
+                    let handle = tokio::spawn(async move {
+                        prepare_next_playlist_item(&api, &pending, start, video_quality).await
+                    });
+                    prefetch = Some((handle, Instant::now()));
+                }
             }
             status = child.wait() => {
                 report_playlist_heartbeat(
@@ -1320,12 +1481,36 @@ async fn run_playlist(
                     played_any = true;
                     if !corrupted { prepared.proxy.record_success(); }
                 }
-                let (next, skipped) = prepare_next_playlist_item(
-                    &api_client,
-                    &items,
-                    index + 1,
-                    video_quality,
-                ).await;
+                // Reuse the prefetched next item when it is still fresh;
+                // otherwise prepare inline as before. A JoinError (panicked
+                // task) also falls back to the inline path.
+                let prefetched = match prefetch.take() {
+                    Some((handle, at)) if at.elapsed() <= Duration::from_secs(300) => {
+                        Some(handle)
+                    }
+                    Some((handle, _)) => {
+                        handle.abort();
+                        None
+                    }
+                    None => None,
+                };
+                let (next, skipped) = match prefetched {
+                    Some(handle) => match handle.await {
+                        Ok(result) => result,
+                        Err(_) => prepare_next_playlist_item(
+                            &api_client,
+                            &items,
+                            index + 1,
+                            video_quality,
+                        ).await,
+                    },
+                    None => prepare_next_playlist_item(
+                        &api_client,
+                        &items,
+                        index + 1,
+                        video_quality,
+                    ).await,
+                };
                 log_skipped_playlist_items(&skipped);
                 let Some((next_index, next_prepared)) = next else {
                     let _ = mpv_ipc(ipc_path, serde_json::json!(["quit"])).await;
@@ -1372,6 +1557,9 @@ async fn run_playlist(
             }
         }
     };
+    if let Some((handle, _)) = prefetch {
+        handle.abort();
+    }
     event_task.abort();
     result
 }
@@ -1400,6 +1588,13 @@ async fn start_playlist_media(
         _ => format!("https://www.bilibili.com/video/{}", item.bvid),
     };
     let _ = mpv_ipc(path, serde_json::json!(["set_property", "referrer", page])).await;
+    // Window title follows the playlist item now playing. Best-effort: the
+    // title is cosmetic, so a failed IPC write must not abort the load.
+    let _ = mpv_ipc(
+        path,
+        serde_json::json!(["set_property", "force-media-title", item.title]),
+    )
+    .await;
     let _ = mpv_ipc(
         path,
         serde_json::json!([
@@ -1545,14 +1740,10 @@ pub async fn play_bangumi_episode(
                                 && !cues.is_empty()
                             {
                                 let srt = crate::api::subtitle::render_srt(&cues);
-                                let path = std::env::temp_dir().join(format!(
-                                    "bilibili-tui-bangumi-sub-{ep_id}-{index}.srt"
-                                ));
+                                let path = std::env::temp_dir()
+                                    .join(format!("bilibili-tui-bangumi-sub-{ep_id}-{index}.srt"));
                                 if tokio::fs::write(&path, srt).await.is_ok() {
-                                    entries.push((
-                                        track.lan.to_lowercase().contains("zh"),
-                                        path,
-                                    ));
+                                    entries.push((track.lan.to_lowercase().contains("zh"), path));
                                 }
                             }
                         }
@@ -1592,8 +1783,17 @@ pub async fn play_bangumi_episode(
         None
     };
 
-    cmd.arg("--force-window=immediate");
-    cmd.arg("--input-terminal=no");
+    apply_mpv_common(&mut cmd);
+    // Same low-latency profile treatment as VOD playback: bangumi also plays
+    // through the local MediaProxy, so the profile's 4k stream buffer and
+    // single-threaded decode need the same overrides (see play_video).
+    cmd.arg("--profile=low-latency");
+    // Re-assert display-paced presentation after the profile's video-sync=audio
+    // (mpv last-argument-wins); see play_video for the overlay rationale.
+    cmd.arg("--video-sync=display-resample");
+    cmd.arg("--stream-buffer-size=4M");
+    cmd.arg("--vd-lavc-threads=0");
+    cmd.arg(format!("--force-media-title={}", episode.display_title()));
     apply_mpv_hwdec(&mut cmd);
     cmd.arg("--script-opts-append=double_video_fps=no");
     cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
@@ -1612,6 +1812,7 @@ pub async fn play_bangumi_episode(
         cmd.arg(&video_url);
     }
     apply_mpv_vo(&mut cmd);
+    apply_mpv_extra_args(&mut cmd);
 
     let mut child = match cmd.spawn() {
         Ok(child) => child,
@@ -1712,7 +1913,7 @@ pub async fn play_bangumi_episode(
         let _ = playback_event_tx.send(event);
     });
 
-Ok(())
+    Ok(())
 }
 
 /// Play a downloaded local file with mpv.
@@ -1721,7 +1922,10 @@ Ok(())
 /// the danmaku are loaded and rendered exactly like online playback (same
 /// live_danmaku.lua script + IPC batch feeding). Without a sidecar this is a
 /// plain local mpv playback.
-pub async fn play_local_file(path: std::path::PathBuf, danmaku_config: DanmakuConfig) -> Result<()> {
+pub async fn play_local_file(
+    path: std::path::PathBuf,
+    danmaku_config: DanmakuConfig,
+) -> Result<()> {
     let danmaku = load_local_danmaku(&path).await.unwrap_or_default();
 
     let ipc_suffix = path
@@ -1735,11 +1939,17 @@ pub async fn play_local_file(path: std::path::PathBuf, danmaku_config: DanmakuCo
     let mut cmd = Command::new("mpv");
     cmd.stdout(mpv_stdout());
     cmd.stderr(Stdio::null());
-    cmd.arg("--force-window=immediate");
-    cmd.arg("--input-terminal=no");
-    cmd.arg("--profile=low-latency");
-    cmd.arg("--stream-buffer-size=4M");
-    cmd.arg("--vd-lavc-threads=0");
+    apply_mpv_common(&mut cmd);
+    // Local disk playback: mpv's defaults (including hardware-accelerated
+    // demux readahead) are correct here; the low-latency profile only exists
+    // to compensate for network streaming and would cap the stream buffer at
+    // 4k and force single-threaded decode.
+    cmd.arg(format!(
+        "--force-media-title={}",
+        path.file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "bilibili-tui".to_string())
+    ));
     apply_mpv_hwdec(&mut cmd);
     apply_mpv_vo(&mut cmd);
     cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
@@ -1747,7 +1957,6 @@ pub async fn play_local_file(path: std::path::PathBuf, danmaku_config: DanmakuCo
         cmd.arg(format!("--script={}", danmaku_script_path.display()));
         cmd.arg("--script-opts-append=double_video_fps=no");
     }
-    cmd.arg("--msg-level=ffmpeg=error,vd=warn");
     cmd.arg("--ytdl=no");
     // Offline subtitle sidecar: `<name>.srt` saved by the downloader.
     let mp4_name = path.to_string_lossy();
@@ -1757,10 +1966,9 @@ pub async fn play_local_file(path: std::path::PathBuf, danmaku_config: DanmakuCo
         cmd.arg(format!("--sub-file={}", srt_path.display()));
     }
     cmd.arg(&path);
+    apply_mpv_extra_args(&mut cmd);
 
-    let mut child = cmd
-        .spawn()
-        .context("启动 mpv 播放本地文件失败")?;
+    let mut child = cmd.spawn().context("启动 mpv 播放本地文件失败")?;
     wait_for_ipc(&ipc_path, &mut child).await?;
 
     let mut danmaku_ready = false;
@@ -1835,6 +2043,8 @@ async fn load_local_danmaku(path: &std::path::Path) -> Result<Vec<VideoDanmaku>>
 pub async fn play_live(
     api_client: Arc<ApiClient>,
     room_id: i64,
+    // Room title shown in the mpv window title; may be empty.
+    title: &str,
     danmaku_hub: Option<Arc<LiveDanmakuHub>>,
     mut danmaku_config_rx: tokio::sync::watch::Receiver<DanmakuConfig>,
 ) -> Result<()> {
@@ -1846,7 +2056,7 @@ pub async fn play_live(
     let ipc_path = mpv_ipc_path("bilibili-tui-live", &format!("{room_id}-{sequence}"));
     remove_stale_mpv_ipc(&ipc_path);
     let danmaku_script_path = create_live_danmaku_script()?;
-    let mut child = match spawn_live_mpv(&ipc_path, &danmaku_script_path) {
+    let mut child = match spawn_live_mpv(&ipc_path, &danmaku_script_path, title) {
         Ok(child) => child,
         Err(error) => {
             let _ = tokio::fs::remove_file(&danmaku_script_path).await;
@@ -1905,8 +2115,9 @@ pub async fn play_live(
         let mut consecutive_failures = 0usize;
         let mut loaded_at = Instant::now();
         let mut danmaku_config_open = true;
-        let mut danmaku_flush =
-            tokio::time::interval(Duration::from_millis(initial_danmaku_config.live_batch_ms.clamp(16, 1000)));
+        let mut danmaku_flush = tokio::time::interval(Duration::from_millis(
+            initial_danmaku_config.live_batch_ms.clamp(16, 1000),
+        ));
         let mut pending_danmaku = Vec::new();
         'playback: loop {
             tokio::select! {
@@ -2069,19 +2280,29 @@ async fn shutdown_live_child(
 fn spawn_live_mpv(
     ipc_path: &std::path::Path,
     danmaku_script_path: &std::path::Path,
+    title: &str,
 ) -> Result<tokio::process::Child> {
     let mut cmd = Command::new("mpv");
     cmd.stdout(mpv_stdout());
     cmd.stderr(Stdio::null());
     configure_live_mpv(&mut cmd, ipc_path);
+    if !title.trim().is_empty() {
+        cmd.arg(format!("--force-media-title={title}"));
+    }
     cmd.arg(format!("--script={}", danmaku_script_path.display()));
+    apply_mpv_extra_args(&mut cmd);
     Ok(cmd.spawn()?)
 }
 
 fn configure_live_mpv(cmd: &mut Command, ipc_path: &std::path::Path) {
+    // Applied first so the live-specific overrides below (tighter network
+    // timeout, low-latency profile) win by mpv's last-value-wins rule.
+    apply_mpv_common(cmd);
     cmd.arg("--idle=yes");
-    cmd.arg("--force-window=immediate");
     cmd.arg("--profile=low-latency");
+    // Re-assert display-paced presentation after the profile's video-sync=audio
+    // (mpv last-argument-wins); the danmaku overlay updates at present time.
+    cmd.arg("--video-sync=display-resample");
     cmd.arg("--keep-open=yes");
     // A live HLS window must always start at its live edge. Inheriting the
     // user's watch-later state resumes near the end of a finite playlist and
@@ -2326,6 +2547,11 @@ mod playlist_tests {
         assert!(LIVE_DANMAKU_SCRIPT.contains("add_periodic_timer(1 / rate"));
         assert!(LIVE_DANMAKU_SCRIPT.contains("get_property_number(\"display-fps\""));
         assert!(LIVE_DANMAKU_SCRIPT.contains("video-reconfig"));
+        // The rebuild ceiling must follow the panel (up to 165 fps), not a
+        // flat 60: overlay motion only reaches the screen at present time,
+        // so a 60 fps rebuild cap froze text between presents on 165 Hz.
+        assert!(LIVE_DANMAKU_SCRIPT.contains("math.min(fps or 60, 165)"));
+        assert!(!LIVE_DANMAKU_SCRIPT.contains("math.min(fps or 60, 60)"));
         assert!(!LIVE_DANMAKU_SCRIPT.contains("sub-reload"));
     }
 
@@ -2345,6 +2571,123 @@ mod playlist_tests {
         assert!(args.iter().any(|arg| arg == "--log-file="));
         assert!(args.iter().any(|arg| arg.ends_with("/tmp/live-test.sock")));
         assert!(!args.iter().any(|arg| arg.contains("bilivideo.com")));
+        // Live keeps its tighter timeout: apply_mpv_common runs first and the
+        // live-specific value must win mpv's last-argument-wins rule.
+        assert!(args.iter().any(|arg| arg == "--network-timeout=10"));
+        let last_timeout = args
+            .iter()
+            .rposition(|arg| arg.starts_with("--network-timeout="))
+            .expect("network-timeout present");
+        assert_eq!(args[last_timeout], "--network-timeout=10");
+        // Shared session defaults applied to every entry point.
+        assert!(args.iter().any(|arg| arg == "--hr-seek=yes"));
+        assert!(args.iter().any(|arg| arg == "--input-terminal=no"));
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--msg-level=ffmpeg=error,vd=warn")
+        );
+        // `--profile=low-latency` sets video-sync=audio; the profile sites
+        // must re-assert display-resample *after* it or the overlay reverts
+        // to audio-paced presents (mpv last-argument-wins).
+        let last_sync = args
+            .iter()
+            .rposition(|arg| arg.starts_with("--video-sync="))
+            .expect("video-sync present");
+        assert_eq!(args[last_sync], "--video-sync=display-resample");
+        let profile = args
+            .iter()
+            .position(|arg| arg == "--profile=low-latency")
+            .expect("low-latency profile present");
+        assert!(
+            last_sync > profile,
+            "display-resample must follow the profile"
+        );
+    }
+
+    #[test]
+    fn common_mpv_args_cover_seek_and_window_title_defaults() {
+        let mut command = Command::new("mpv");
+        apply_mpv_common(&mut command);
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(args.iter().any(|arg| arg == "--hr-seek=yes"));
+        assert!(args.iter().any(|arg| arg == "--network-timeout=15"));
+        assert!(args.iter().any(|arg| arg == "--force-window=immediate"));
+        assert!(args.iter().any(|arg| arg == "--deinterlace=yes"));
+        // Display-paced presentation: the danmaku overlay only reaches the
+        // screen at present time, so its update rate follows video-sync.
+        assert!(
+            args.iter()
+                .any(|arg| arg == "--video-sync=display-resample")
+        );
+        assert!(
+            args.iter()
+                .any(|arg| arg.starts_with("--title=") && arg.contains("bilibili-tui"))
+        );
+        // Exactly one of each: entry points must not re-add these themselves.
+        let count = |needle: &str| args.iter().filter(|arg| *arg == needle).count();
+        assert_eq!(count("--input-terminal=no"), 1);
+        assert_eq!(count("--force-window=immediate"), 1);
+        assert_eq!(count("--hr-seek=yes"), 1);
+    }
+
+    #[test]
+    fn split_mpv_extra_args_honors_quotes_and_whitespace() {
+        assert_eq!(split_mpv_extra_args(""), Vec::<String>::new());
+        assert_eq!(split_mpv_extra_args("   "), Vec::<String>::new());
+        assert_eq!(
+            split_mpv_extra_args("--loop=inf --keep-open=always"),
+            vec!["--loop=inf".to_string(), "--keep-open=always".to_string()]
+        );
+        assert_eq!(
+            split_mpv_extra_args("--term-status-msg='a b'  --osd-msg=\"c d\""),
+            vec![
+                "--term-status-msg=a b".to_string(),
+                "--osd-msg=c d".to_string()
+            ]
+        );
+        // Unterminated quotes consume the rest of the string.
+        assert_eq!(
+            split_mpv_extra_args("--title='unterminated rest"),
+            vec!["--title=unterminated rest".to_string()]
+        );
+        // Backslashes are kept verbatim (Windows paths must survive); use
+        // quotes instead of escapes to embed whitespace.
+        assert_eq!(
+            split_mpv_extra_args("--audio-file='/path/with space/x.flac'"),
+            vec!["--audio-file=/path/with space/x.flac".to_string()]
+        );
+        assert_eq!(
+            split_mpv_extra_args(r"--sub-file=C:\Users\test\v.srt"),
+            vec![r"--sub-file=C:\Users\test\v.srt".to_string()]
+        );
+    }
+
+    #[test]
+    fn extra_args_override_app_defaults_via_last_wins() {
+        let mut command = Command::new("mpv");
+        apply_mpv_common(&mut command);
+        // Simulate the config without touching the user's config file by
+        // appending exactly what apply_mpv_extra_args would append.
+        for arg in split_mpv_extra_args("--network-timeout=3 --hr-seek=no") {
+            command.arg(arg);
+        }
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        let last = |prefix: &str| {
+            args.iter()
+                .rposition(|arg| arg.starts_with(prefix))
+                .map(|index| args[index].clone())
+                .expect("option present")
+        };
+        assert_eq!(last("--network-timeout="), "--network-timeout=3");
+        assert_eq!(last("--hr-seek="), "--hr-seek=no");
     }
 
     #[cfg(unix)]
