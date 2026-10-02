@@ -81,7 +81,12 @@ pub struct VideoDetailPage {
     /// (or an episode identifier for multi-part videos).
     pub download_selection: std::collections::HashSet<String>,
     /// Download resolution override. `None` = follow the global setting.
-    pub download_quality: Option<VideoQuality>,
+    /// Raw qn override for downloads (`None` = follow the global setting).
+    pub download_quality: Option<i64>,
+    /// `(qn, label)` qualities this video actually offers, from playurl's
+    /// `accept_quality`/`accept_description`. Drives the resolution picker
+    /// so it only lists what the video has (incl. 杜比视界/HDR/8K when present).
+    pub available_qualities: Vec<(i64, String)>,
     /// Whether the download-quality picker popup is open.
     pub download_quality_picker: bool,
     download_quality_index: usize,
@@ -136,42 +141,77 @@ impl VideoDetailPage {
             interaction_msg_set_at: None,
             download_selection: std::collections::HashSet::new(),
             download_quality: None,
+            available_qualities: Vec::new(),
             download_quality_picker: false,
             download_quality_index: 0,
             download_confirm: false,
         }
     }
 
+    /// Cycle the playback quality (`m` key). When the playurl probe reported
+    /// what this video offers, cycle only through those qns (incl. 杜比视界/
+    /// HDR/8K when present); otherwise fall back to the fixed list.
+    fn cycle_playback_quality(&mut self) {
+        let mut cycle: Vec<i64> = vec![0];
+        cycle.extend(self.available_qualities.iter().map(|(qn, _)| *qn));
+        let pos = cycle
+            .iter()
+            .position(|&qn| qn == self.playback.quality)
+            .unwrap_or(0);
+        self.playback.quality = cycle[(pos + 1) % cycle.len()];
+    }
+
     fn download_quality_label(&self) -> String {
         match self.download_quality {
-            Some(q) => format!("下载:{}", q.label()),
+            Some(qn) => format!("下载:{}", self.quality_label_for(qn)),
             None => "下载:跟随".to_string(),
         }
     }
 
-    fn quality_options() -> [Option<VideoQuality>; 8] {
-        use crate::storage::VideoQuality as VQ;
-        [
-            None,
-            Some(VQ::Best),
-            Some(VQ::Q4k),
-            Some(VQ::Q1080pHigh),
-            Some(VQ::Q1080p),
-            Some(VQ::Q720p),
-            Some(VQ::Q480p),
-            Some(VQ::Q360p),
-        ]
+    /// Label for a qn: prefer the description the playurl API returned for
+    /// this video ("超清 4K", "杜比视界"...), fall back to the static table.
+    fn quality_label_for(&self, qn: i64) -> String {
+        self.available_qualities
+            .iter()
+            .find(|(q, _)| *q == qn)
+            .map(|(_, label)| label.clone())
+            .unwrap_or_else(|| PlaybackOptions::quality_label(qn).to_string())
     }
 
-    fn quality_option_label(index: usize) -> String {
-        match Self::quality_options().get(index).copied().flatten() {
-            Some(q) => q.label().to_string(),
+    /// Resolution options for the picker: 跟随全局 + every quality the video
+    /// offers. Falls back to a static list before the playurl probe lands.
+    fn quality_options(&self) -> Vec<Option<i64>> {
+        if self.available_qualities.is_empty() {
+            return vec![
+                None,
+                Some(127),
+                Some(120),
+                Some(116),
+                Some(80),
+                Some(64),
+                Some(32),
+                Some(16),
+            ];
+        }
+        let mut opts = vec![None];
+        opts.extend(self.available_qualities.iter().map(|(qn, _)| Some(*qn)));
+        opts
+    }
+
+    fn quality_option_label(&self, index: usize) -> String {
+        match self.quality_options().get(index).copied().flatten() {
+            Some(qn) => self
+                .available_qualities
+                .iter()
+                .find(|(q, _)| *q == qn)
+                .map(|(_, label)| label.clone())
+                .unwrap_or_else(|| PlaybackOptions::quality_label(qn).to_string()),
             None => "跟随全局".to_string(),
         }
     }
 
     fn current_quality_index(&self) -> usize {
-        Self::quality_options()
+        self.quality_options()
             .iter()
             .position(|opt| *opt == self.download_quality)
             .unwrap_or(0)
@@ -302,6 +342,10 @@ impl VideoDetailPage {
                 {
                     Ok(data) => {
                         self.hdr_supported = Some(data.dash.video.iter().any(|s| s.id >= 125));
+                        let accept = data.accept_list();
+                        if !accept.is_empty() {
+                            self.available_qualities = accept;
+                        }
                         self.hires_supported = Some(
                             data.dash.audio.iter().any(|s| s.id == 30252)
                                 || data
@@ -1147,9 +1191,9 @@ impl Component for VideoDetailPage {
                         .fg(theme.fg_accent)
                         .add_modifier(Modifier::BOLD),
                 ));
-            let items: Vec<ListItem> = (0..Self::quality_options().len())
+            let items: Vec<ListItem> = (0..self.quality_options().len())
                 .map(|i| {
-                    let label = Self::quality_option_label(i);
+                    let label = self.quality_option_label(i);
                     if i == self.download_quality_index {
                         ListItem::new(format!("▶ {label}"))
                     } else {
@@ -1356,13 +1400,14 @@ impl Component for VideoDetailPage {
                     }
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
-                    let last = Self::quality_options().len() - 1;
+                    let last = self.quality_options().len() - 1;
                     if self.download_quality_index < last {
                         self.download_quality_index += 1;
                     }
                 }
                 KeyCode::Enter => {
-                    self.download_quality = Self::quality_options()
+                    self.download_quality = self
+                        .quality_options()
                         .get(self.download_quality_index)
                         .copied()
                         .flatten();
@@ -1404,7 +1449,7 @@ impl Component for VideoDetailPage {
         }
         // Playback quality / HDR / Hi-Res toggles
         if key == KeyCode::Char('m') {
-            self.playback.cycle_quality();
+            self.cycle_playback_quality();
             return Some(AppAction::None);
         }
         if key == KeyCode::Char('h') && self.focus != DetailFocus::Related {

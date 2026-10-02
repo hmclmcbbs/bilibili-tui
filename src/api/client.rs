@@ -1,7 +1,7 @@
 //! Bilibili API Client with cookie management and WBI signing
 
 use super::wbi;
-use crate::storage::{Credentials, VideoQuality};
+use crate::storage::Credentials;
 use anyhow::{Context, Result, anyhow};
 use futures_util::StreamExt;
 use reqwest::Client;
@@ -869,12 +869,12 @@ impl ApiClient {
     pub async fn get_bangumi_play_url(
         &self,
         ep_id: i64,
-        quality: crate::storage::VideoQuality,
+        quality_qn: i64,
     ) -> Result<super::cdn::PlayUrlData> {
         let url = format!(
             "{}/pgc/player/web/v2/playurl?ep_id={ep_id}&qn={}&otype=json&fnval=4048&fourk=1&from_client=BROWSER&is_main_page=false&need_fragment=false&isGaiaAvoided=true&web_location=1315873",
             BilibiliApiDomain::Main.as_str(),
-            quality.qn()
+            quality_qn
         );
         let value = self.get_json(&url).await?;
         Self::parse_bangumi_play_url(&value)

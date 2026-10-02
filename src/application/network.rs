@@ -347,6 +347,8 @@ pub enum NetworkEvent {
         related_videos: Vec<RelatedVideoItem>,
         hdr_supported: Option<bool>,
         hires_supported: Option<bool>,
+        /// `(qn, label)` qualities this video offers, from playurl.
+        available_qualities: Vec<(i64, String)>,
         liked: bool,
         coined: i32,
         favorited: bool,
@@ -359,6 +361,7 @@ pub enum NetworkEvent {
         bvid: String,
         hdr_supported: Option<bool>,
         hires_supported: Option<bool>,
+        available_qualities: Vec<(i64, String)>,
     },
     UpPageLoaded {
         req_id: u64,
@@ -607,7 +610,7 @@ pub fn start_network_worker(
                         let (
                             (comments, has_more_comments),
                             related_videos,
-                            (hdr_supported, hires_supported),
+                            (hdr_supported, hires_supported, available_qualities),
                             like_result,
                             coin_result,
                             fav_result,
@@ -686,6 +689,7 @@ pub fn start_network_worker(
                             related_videos,
                             hdr_supported,
                             hires_supported,
+                            available_qualities,
                             liked,
                             coined,
                             favorited,
@@ -826,7 +830,7 @@ async fn probe_stream_support(
     api_client: &ApiClient,
     bvid: &str,
     cid: i64,
-) -> (Option<bool>, Option<bool>) {
+) -> (Option<bool>, Option<bool>, Vec<(i64, String)>) {
     let options = crate::domain::playback::PlaybackOptions::default();
     match api_client.get_play_url(bvid, cid, options).await {
         Ok(data) => {
@@ -839,9 +843,9 @@ async fn probe_stream_support(
                     .as_ref()
                     .and_then(|flac| flac.audio.as_ref())
                     .is_some();
-            (Some(hdr), Some(hires))
+            (Some(hdr), Some(hires), data.accept_list())
         }
-        Err(_) => (None, None),
+        Err(_) => (None, None, Vec::new()),
     }
 }
 
@@ -1518,7 +1522,7 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
             let (
                 (comments, has_more_comments),
                 related_videos,
-                (hdr_supported, hires_supported),
+                (hdr_supported, hires_supported, available_qualities),
                 like_result,
                 coin_result,
                 fav_result,
@@ -1602,6 +1606,7 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 related_videos,
                 hdr_supported,
                 hires_supported,
+                available_qualities,
                 liked,
                 coined,
                 favorited,
@@ -1611,13 +1616,14 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
             }
         }
         NetworkCommand::ProbeVideoStreams { req_id, bvid, cid } => {
-            let (hdr_supported, hires_supported) =
+            let (hdr_supported, hires_supported, available_qualities) =
                 probe_stream_support(&api_client, &bvid, cid).await;
             NetworkEvent::VideoStreamSupportLoaded {
                 req_id,
                 bvid,
                 hdr_supported,
                 hires_supported,
+                available_qualities,
             }
         }
         NetworkCommand::LoadDynamicDetail { req_id, dynamic_id } => {

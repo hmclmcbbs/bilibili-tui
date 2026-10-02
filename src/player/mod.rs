@@ -1716,46 +1716,47 @@ pub async fn play_bangumi_episode(
     };
 
     let video_url = format!("https://www.bilibili.com/bangumi/play/ep{}", ep_id);
-    let (media_proxy, subtitle_paths) =
-        match api_client.get_bangumi_play_url(ep_id, video_quality).await {
-            Ok(play_url) => {
-                let proxy = match crate::api::cdn::rank_streams(
-                    &play_url,
-                    playback_options_from_quality(video_quality),
-                )
-                .await
-                {
-                    Ok(streams) => proxy::MediaProxy::start(streams).await.ok(),
-                    Err(_) => None,
-                };
-                // Bangumi AI subtitles ride along in the playurl response
-                // (`result.subtitle.subtitles`). Render them to SRT files
-                // exactly like play_video does for regular videos.
-                let paths = match play_url.subtitle {
-                    Some(block) => {
-                        let mut entries: Vec<(bool, std::path::PathBuf)> = Vec::new();
-                        for (index, track) in block.subtitles.iter().take(8).enumerate() {
-                            if let Ok(cues) =
-                                api_client.fetch_subtitle_cues(&track.subtitle_url).await
-                                && !cues.is_empty()
-                            {
-                                let srt = crate::api::subtitle::render_srt(&cues);
-                                let path = std::env::temp_dir()
-                                    .join(format!("bilibili-tui-bangumi-sub-{ep_id}-{index}.srt"));
-                                if tokio::fs::write(&path, srt).await.is_ok() {
-                                    entries.push((track.lan.to_lowercase().contains("zh"), path));
-                                }
+    let (media_proxy, subtitle_paths) = match api_client
+        .get_bangumi_play_url(ep_id, video_quality.qn())
+        .await
+    {
+        Ok(play_url) => {
+            let proxy = match crate::api::cdn::rank_streams(
+                &play_url,
+                playback_options_from_quality(video_quality),
+            )
+            .await
+            {
+                Ok(streams) => proxy::MediaProxy::start(streams).await.ok(),
+                Err(_) => None,
+            };
+            // Bangumi AI subtitles ride along in the playurl response
+            // (`result.subtitle.subtitles`). Render them to SRT files
+            // exactly like play_video does for regular videos.
+            let paths = match play_url.subtitle {
+                Some(block) => {
+                    let mut entries: Vec<(bool, std::path::PathBuf)> = Vec::new();
+                    for (index, track) in block.subtitles.iter().take(8).enumerate() {
+                        if let Ok(cues) = api_client.fetch_subtitle_cues(&track.subtitle_url).await
+                            && !cues.is_empty()
+                        {
+                            let srt = crate::api::subtitle::render_srt(&cues);
+                            let path = std::env::temp_dir()
+                                .join(format!("bilibili-tui-bangumi-sub-{ep_id}-{index}.srt"));
+                            if tokio::fs::write(&path, srt).await.is_ok() {
+                                entries.push((track.lan.to_lowercase().contains("zh"), path));
                             }
                         }
-                        entries.sort_by(|left, right| right.0.cmp(&left.0));
-                        entries.into_iter().map(|(_, path)| path).collect()
                     }
-                    None => Vec::new(),
-                };
-                (proxy, paths)
-            }
-            Err(_) => (None, Vec::new()),
-        };
+                    entries.sort_by(|left, right| right.0.cmp(&left.0));
+                    entries.into_iter().map(|(_, path)| path).collect()
+                }
+                None => Vec::new(),
+            };
+            (proxy, paths)
+        }
+        Err(_) => (None, Vec::new()),
+    };
 
     // Fetch the danmaku history before spawning mpv; the Lua script renders
     // it incrementally over IPC once playback starts.

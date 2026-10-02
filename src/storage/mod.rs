@@ -651,6 +651,21 @@ impl VideoQuality {
     }
 }
 
+/// Max height cap for a raw Bilibili `qn`, used to build the yt-dlp format
+/// selector. HDR/Dolby/8K/qn-100 (AI repair) streams are uncapped (4320) so
+/// the selector never accidentally excludes the stream the qn refers to.
+pub fn qn_max_height(qn: i64) -> u16 {
+    match qn {
+        6 => 240,
+        16 => 360,
+        32 => 480,
+        64 | 74 => 720,
+        80 | 112 | 116 => 1080,
+        120 => 2160,
+        _ => 4320,
+    }
+}
+
 fn default_true() -> bool {
     true
 }

@@ -79,6 +79,11 @@ pub struct App {
     pub previous_page: Option<PreviousPage>,
     /// Full page instances for nested detail navigation (list -> video -> UP).
     pub navigation_stack: Vec<Page>,
+    /// Sidebar list pages stashed when navigating away, keyed by the Page
+    /// variant's discriminant. Switching back restores the instance — with
+    /// its loaded covers, scroll position and data — instead of rebuilding a
+    /// fresh page and re-downloading everything the user had already seen.
+    pub page_cache: std::collections::HashMap<std::mem::Discriminant<Page>, Page>,
     pub theme: Theme,
     pub theme_id: String,
     /// Last observed mtime of the matugen color file (auto theme refresh).
@@ -171,6 +176,7 @@ impl App {
             user_refresh_rx: None,
             previous_page: None,
             navigation_stack: Vec::new(),
+            page_cache: std::collections::HashMap::new(),
             theme,
             theme_id,
             last_matugen_mtime: std::fs::metadata(crate::ui::Theme::matugen_path())
@@ -435,7 +441,9 @@ mod tests {
     use super::{App, RequestTracker};
     use crate::application::AppAction;
     use crate::domain::playback::PlaybackEvent;
-    use crate::presentation::tui::{FavoritesPage, HomePage, NavItem, Page, VideoDetailPage};
+    use crate::presentation::tui::{
+        FavoritesPage, HomePage, NavItem, Page, SearchPage, VideoDetailPage,
+    };
 
     #[test]
     fn request_tracking_latest_wins_per_key() {
@@ -488,6 +496,47 @@ mod tests {
         assert!(matches!(app.current_page, Page::Home(_)));
         assert!(app.navigation_stack.is_empty());
         assert!(app.auto_return_after_playback.is_none());
+    }
+
+    #[tokio::test]
+    async fn sidebar_hop_restores_search_instance_with_query() {
+        let mut app = App::new();
+        let mut search = SearchPage::new();
+        search.query = "cached-query".to_string();
+        app.current_page = Page::Search(search);
+
+        // Hop away and back: the stashed instance must come back with its
+        // state instead of a fresh page (which would have an empty query and
+        // force the user to re-type + re-fetch).
+        app.handle_action(AppAction::NavSelect(NavItem::Sections))
+            .await;
+        assert!(matches!(app.current_page, Page::Sections(_)));
+        app.handle_action(AppAction::NavSelect(NavItem::Search))
+            .await;
+        match &app.current_page {
+            Page::Search(page) => assert_eq!(page.query, "cached-query"),
+            _ => panic!("expected restored Search page"),
+        }
+    }
+
+    #[tokio::test]
+    async fn busy_page_is_not_stashed() {
+        let mut app = App::new();
+        let mut search = SearchPage::new();
+        search.query = "in-flight".to_string();
+        search.loading = true; // mid-request: its response would be dropped
+        app.current_page = Page::Search(search);
+
+        app.handle_action(AppAction::NavSelect(NavItem::Sections))
+            .await;
+        // The busy Search page must NOT be cached (its req is orphaned), so
+        // returning builds a fresh one rather than a permanently-spinning one.
+        app.handle_action(AppAction::NavSelect(NavItem::Search))
+            .await;
+        match &app.current_page {
+            Page::Search(page) => assert_eq!(page.query, ""),
+            _ => panic!("expected fresh Search page"),
+        }
     }
 
     #[tokio::test]

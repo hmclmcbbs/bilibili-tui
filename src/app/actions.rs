@@ -1,7 +1,7 @@
 use crate::api::favorite::FavoriteSource;
 use crate::app::{App, PreviousPage};
-use crate::application::{AppAction, DownloadItem, network};
-use crate::infrastructure::download::{DownloadPhase, DownloadTarget, download, set_status};
+use crate::application::{AppAction, network};
+use crate::infrastructure::download::{DownloadPhase, DownloadTarget, download};
 use crate::infrastructure::{media, persistence};
 use crate::presentation::tui::{
     ArticleDetailPage, BangumiDetailPage, BangumiPage, DownloadsPage, DynamicDetailPage,
@@ -24,6 +24,97 @@ impl App {
 
     fn clear_home_caches(&mut self) {
         self.cached_home_feeds.clear();
+        // Stashed sidebar pages hold the previous account's data (history,
+        // favorites, notifications); drop them on logout too.
+        self.page_cache.clear();
+    }
+
+    /// Sidebar list pages worth stashing when navigating away: they carry
+    /// loaded covers, scroll position and fetched data that would otherwise
+    /// be thrown away and re-downloaded on return. Detail pages are excluded
+    /// (they travel on `navigation_stack` / `previous_page`), and Home/Bangumi
+    /// keep their own dedicated caches.
+    fn is_cacheable_page(page: &Page) -> bool {
+        matches!(
+            page,
+            Page::Search(_)
+                | Page::Sections(_)
+                | Page::Dynamic(_)
+                | Page::History(_)
+                | Page::Favorites(_)
+                | Page::Live(_)
+                | Page::Notifications(_)
+        )
+    }
+
+    /// Move `page` out of the hot seat into its instance cache (Home feed
+    /// cache, bangumi cache, or the generic `page_cache`). Anything else —
+    /// detail pages, settings, in-flight placeholders — is dropped, which
+    /// matches the previous behaviour.
+    fn stash_page(&mut self, page: Page) {
+        match page {
+            // Guard against placeholder instances (fresh `HomePage::new()` /
+            // `BangumiPage::default()` mid-switch): caching them would
+            // overwrite the real cached copy with an empty spinner page.
+            Page::Home(home_page) if !home_page.needs_initial_load() => {
+                self.cache_home_page(home_page)
+            }
+            Page::Bangumi(bangumi_page) if !bangumi_page.loading => {
+                self.cached_bangumi = Some(*bangumi_page)
+            }
+            // Mid-request pages are dropped instead of stashed: their
+            // response is discarded while they aren't current, and a restored
+            // copy would sit on a spinner forever. Rebuilding on the next
+            // visit is cheaper than tracking orphaned requests.
+            other if Self::is_cacheable_page(&other) && !Self::page_needs_init(&other) => {
+                let key = std::mem::discriminant(&other);
+                self.page_cache.insert(key, other);
+            }
+            _ => {}
+        }
+    }
+
+    /// True when a restored page still needs its initial network load
+    /// (it was stashed mid-request, so the response was dropped while it
+    /// wasn't the current page). Re-issuing the request prevents a stuck
+    /// loading spinner.
+    fn page_needs_init(page: &Page) -> bool {
+        match page {
+            Page::Search(p) => {
+                p.loading
+                    || p.user_loading
+                    || p.loading_more
+                    || p.user_loading_more
+                    || p.hotword_loading
+            }
+            Page::Sections(p) => p.loading,
+            Page::Dynamic(p) => p.loading || p.loading_more || p.loading_up_list,
+            Page::History(p) => p.loading,
+            Page::Favorites(p) => p.loading || p.loading_more,
+            Page::Live(p) => p.loading || p.loading_more,
+            Page::Notifications(p) => {
+                p.loading || p.loading_more || p.chat_loading || p.chat_sending
+            }
+            _ => false,
+        }
+    }
+
+    /// Install `fresh` as the current page — unless a previously stashed
+    /// instance of the same variant exists, in which case restore that one
+    /// (keeping its covers/scroll). The outgoing page is stashed on the way
+    /// out; fresh instances get their initial load issued.
+    async fn restore_or_new(&mut self, fresh: Page) {
+        let key = std::mem::discriminant(&fresh);
+        let old = std::mem::replace(&mut self.current_page, fresh);
+        self.stash_page(old);
+        if let Some(cached) = self.page_cache.remove(&key) {
+            self.current_page = cached;
+            if Self::page_needs_init(&self.current_page) {
+                self.init_current_page().await;
+            }
+        } else {
+            self.init_current_page().await;
+        }
     }
 
     fn login_required_message() -> String {
@@ -128,8 +219,8 @@ impl App {
             AppAction::SwitchToSections => {
                 self.sidebar.select(NavItem::Sections);
                 if !matches!(self.current_page, Page::Sections(_)) {
-                    self.current_page = Page::Sections(SectionPage::new());
-                    self.init_current_page().await;
+                    self.restore_or_new(Page::Sections(SectionPage::new()))
+                        .await;
                 }
             }
             AppAction::SelectSection(rid) => {
@@ -145,8 +236,8 @@ impl App {
             AppAction::SwitchToNotifications => {
                 self.sidebar.select(NavItem::Notifications);
                 if !matches!(self.current_page, Page::Notifications(_)) {
-                    self.current_page = Page::Notifications(NotificationsPage::new());
-                    self.init_current_page().await;
+                    self.restore_or_new(Page::Notifications(NotificationsPage::new()))
+                        .await;
                 }
             }
             AppAction::SwitchNotifTab(tab) => {
@@ -859,14 +950,14 @@ impl App {
             }
             AppAction::OpenDynamicDetail(dynamic_id) => {
                 self.save_previous_page();
-                // Cache home page before navigating to dynamic detail
-                if let Page::Home(home_page) =
-                    std::mem::replace(&mut self.current_page, Page::Home(HomePage::new()))
-                {
-                    self.cache_home_page(home_page);
-                }
                 let detail_page = DynamicDetailPage::new(dynamic_id.clone());
-                self.current_page = Page::DynamicDetail(Box::new(detail_page));
+                // Stash the outgoing list page (Home feed cache / page_cache)
+                // so returning restores covers instead of reloading.
+                let old = std::mem::replace(
+                    &mut self.current_page,
+                    Page::DynamicDetail(Box::new(detail_page)),
+                );
+                self.stash_page(old);
                 let req_id = self.next_request_id("dynamic_detail");
                 self.send_network_command(network::NetworkCommand::LoadDynamicDetail {
                     req_id,
@@ -900,13 +991,11 @@ impl App {
                     }
                     Some(PreviousPage::Dynamic) => {
                         self.sidebar.select(NavItem::Dynamic);
-                        self.current_page = Page::Dynamic(DynamicPage::new());
-                        self.init_current_page().await;
+                        self.restore_or_new(Page::Dynamic(DynamicPage::new())).await;
                     }
                     Some(PreviousPage::History) => {
                         self.sidebar.select(NavItem::History);
-                        self.current_page = Page::History(HistoryPage::new());
-                        self.init_current_page().await;
+                        self.restore_or_new(Page::History(HistoryPage::new())).await;
                     }
                     Some(PreviousPage::Favorites) => {
                         self.sidebar.select(NavItem::Favorites);
@@ -915,14 +1004,13 @@ impl App {
                             .as_ref()
                             .and_then(|credentials| credentials.dede_user_id.parse::<i64>().ok());
                         if let Some(mid) = mid {
-                            self.current_page = Page::Favorites(FavoritesPage::new(mid));
-                            self.init_current_page().await;
+                            self.restore_or_new(Page::Favorites(FavoritesPage::new(mid)))
+                                .await;
                         }
                     }
                     Some(PreviousPage::Live) => {
                         self.sidebar.select(NavItem::Live);
-                        self.current_page = Page::Live(LivePage::new());
-                        self.init_current_page().await;
+                        self.restore_or_new(Page::Live(LivePage::new())).await;
                     }
                     Some(PreviousPage::Bangumi) => {
                         self.sidebar.select(NavItem::Bangumi);
@@ -1111,8 +1199,7 @@ impl App {
             }
             AppAction::SwitchToHistory => {
                 self.sidebar.select(NavItem::History);
-                self.current_page = Page::History(HistoryPage::new());
-                self.init_current_page().await;
+                self.restore_or_new(Page::History(HistoryPage::new())).await;
             }
             AppAction::LoadMoreComments => {
                 if let Page::VideoDetail(page) = &mut self.current_page {
@@ -1597,8 +1684,7 @@ impl App {
             }
             AppAction::SwitchToLive => {
                 self.sidebar.select(NavItem::Live);
-                self.current_page = Page::Live(LivePage::new());
-                self.init_current_page().await;
+                self.restore_or_new(Page::Live(LivePage::new())).await;
             }
             AppAction::OpenLiveDetail(room_id) => {
                 self.save_previous_page();
@@ -1629,7 +1715,11 @@ impl App {
                         detail_page.set_ws_error(format!("WS连接失败: {error}"));
                     }
                 }
-                self.current_page = Page::LiveDetail(Box::new(detail_page));
+                let old = std::mem::replace(
+                    &mut self.current_page,
+                    Page::LiveDetail(Box::new(detail_page)),
+                );
+                self.stash_page(old);
             }
             AppAction::RefreshLive => {
                 if let Page::Live(page) = &mut self.current_page {
@@ -1766,14 +1856,12 @@ impl App {
             }
             AppAction::OpenBangumiDetail(season_id) => {
                 self.save_previous_page();
-                if let Page::Bangumi(bangumi_page) = std::mem::replace(
-                    &mut self.current_page,
-                    Page::Bangumi(Box::<BangumiPage>::default()),
-                ) {
-                    self.cached_bangumi = Some(*bangumi_page);
-                }
                 let detail_page = BangumiDetailPage::new(season_id);
-                self.current_page = Page::BangumiDetail(Box::new(detail_page));
+                let old = std::mem::replace(
+                    &mut self.current_page,
+                    Page::BangumiDetail(Box::new(detail_page)),
+                );
+                self.stash_page(old);
                 let req_id = self.next_request_id("bangumi_detail");
                 self.send_network_command(network::NetworkCommand::LoadBangumiDetail {
                     req_id,
@@ -1966,7 +2054,9 @@ impl App {
                 crate::infrastructure::download::begin_batch(items.len());
                 for item in items {
                     let credentials = credentials.clone();
-                    let quality = item.quality.unwrap_or(default_quality);
+                    // `quality` is a raw qn override; fall back to the global
+                    // VideoQuality setting when the page didn't pin one.
+                    let quality_qn = item.quality.unwrap_or_else(|| default_quality.qn());
                     let out_dir = out_dir.clone();
                     let api_client = self.api_client.clone();
                     let item_title = item.title.clone();
@@ -1991,8 +2081,8 @@ impl App {
                         let cookie_path = api_client.cookies_for_ytdlp().and_then(|cookies| {
                             crate::storage::write_cookies_for_ytdlp(&cookies).ok()
                         });
-                        let save_quality = quality.clone();
-                        let height = quality.max_height().unwrap_or(1080);
+                        let save_quality = quality_qn;
+                        let height = crate::storage::qn_max_height(quality_qn);
                         // Spawn the download future so it starts running and
                         // feeds progress through `tx`. Awaiting it only AFTER
                         // `rx.recv()` would deadlock (the worker never runs
@@ -2107,21 +2197,28 @@ impl App {
         // The cache is keyed by HomeFeed so each feed keeps its own scroll
         // position and loaded videos.
         let target = self.sidebar.selected;
+        // The group header is toggled by Sidebar::select; it never opens a
+        // page on its own — bail before touching current_page so the visible
+        // page survives a group expand/collapse.
+        if matches!(target, NavItem::HotGroup) {
+            return;
+        }
         let staying_on_same_feed = match &self.current_page {
             Page::Home(page) => target.home_feed() == Some(page.feed()),
             _ => false,
         };
-        if !staying_on_same_feed
-            && let Page::Home(home_page) =
-                std::mem::replace(&mut self.current_page, Page::Home(HomePage::new()))
-        {
-            self.cache_home_page(home_page);
+        if !staying_on_same_feed {
+            // Stash the outgoing page (Home feed cache / generic page cache)
+            // so switching back restores covers instead of reloading. The old
+            // code only pattern-matched Home here, silently dropping e.g. an
+            // already-loaded History page on every sidebar hop.
+            let old = std::mem::replace(&mut self.current_page, Page::Home(HomePage::new()));
+            self.stash_page(old);
         }
 
         match target {
-            // The group header is toggled by Sidebar::select; it never opens a
-            // page on its own.
-            NavItem::HotGroup => return,
+            // Handled by the early return above.
+            NavItem::HotGroup => {}
             NavItem::Home => {
                 self.open_home_feed(crate::api::recommend::HomeFeed::Recommended)
                     .await;
@@ -2132,26 +2229,23 @@ impl App {
             }
             NavItem::Search => {
                 if !matches!(self.current_page, Page::Search(_)) {
-                    self.current_page = Page::Search(SearchPage::new());
-                    self.init_current_page().await;
+                    self.restore_or_new(Page::Search(SearchPage::new())).await;
                 }
             }
             NavItem::Sections => {
                 if !matches!(self.current_page, Page::Sections(_)) {
-                    self.current_page = Page::Sections(SectionPage::new());
-                    self.init_current_page().await;
+                    self.restore_or_new(Page::Sections(SectionPage::new()))
+                        .await;
                 }
             }
             NavItem::Dynamic => {
                 if !matches!(self.current_page, Page::Dynamic(_)) {
-                    self.current_page = Page::Dynamic(DynamicPage::new());
-                    self.init_current_page().await;
+                    self.restore_or_new(Page::Dynamic(DynamicPage::new())).await;
                 }
             }
             NavItem::History => {
                 if !matches!(self.current_page, Page::History(_)) {
-                    self.current_page = Page::History(HistoryPage::new());
-                    self.init_current_page().await;
+                    self.restore_or_new(Page::History(HistoryPage::new())).await;
                 }
             }
             NavItem::Favorites => {
@@ -2161,8 +2255,8 @@ impl App {
                     .and_then(|credentials| credentials.dede_user_id.parse::<i64>().ok());
                 if let Some(mid) = mid {
                     if !matches!(self.current_page, Page::Favorites(_)) {
-                        self.current_page = Page::Favorites(FavoritesPage::new(mid));
-                        self.init_current_page().await;
+                        self.restore_or_new(Page::Favorites(FavoritesPage::new(mid)))
+                            .await;
                     }
                 } else {
                     self.current_page = Page::Settings(Box::new(SettingsPage::new(
@@ -2205,8 +2299,7 @@ impl App {
             }
             NavItem::Live => {
                 if !matches!(self.current_page, Page::Live(_)) {
-                    self.current_page = Page::Live(LivePage::new());
-                    self.init_current_page().await;
+                    self.restore_or_new(Page::Live(LivePage::new())).await;
                 }
             }
             NavItem::Bangumi => {
@@ -2221,8 +2314,8 @@ impl App {
             }
             NavItem::Notifications => {
                 if !matches!(self.current_page, Page::Notifications(_)) {
-                    self.current_page = Page::Notifications(NotificationsPage::new());
-                    self.init_current_page().await;
+                    self.restore_or_new(Page::Notifications(NotificationsPage::new()))
+                        .await;
                 }
             }
         }

@@ -40,6 +40,10 @@ pub struct SearchPage {
     /// Search query backup taken when re-entering edit mode, so Esc can
     /// restore the previously shown results instead of staying in the picker.
     pub edit_backup: String,
+    /// Caret position inside `query`, counted in chars. ←/→ move it while
+    /// `input_mode` is active so arrow keys edit text instead of injecting
+    /// the nav-key letters ('h'/'l').
+    cursor: usize,
     pub hotwords: Vec<HotwordItem>,
     pub hotword_error: Option<String>,
     pub hotword_loading: bool,
@@ -74,6 +78,7 @@ impl SearchPage {
             user_error: None,
             input_mode: false,
             edit_backup: String::new(),
+            cursor: 0,
             hotwords: Vec::new(),
             hotword_error: None,
             hotword_loading: false,
@@ -440,6 +445,7 @@ impl SearchPage {
             }
         };
         self.query = keyword.clone();
+        self.cursor = self.query.chars().count();
         self.loading = true;
         self.page = 1;
         self.show_hot_list = false;
@@ -686,6 +692,140 @@ impl SearchPage {
         let mut state = ListState::default().with_selected(self.hot_selected);
         frame.render_stateful_widget(list, area, &mut state);
     }
+
+    fn handle_input_edit(
+        &mut self,
+        key: KeyCode,
+        keys: &crate::storage::Keybindings,
+    ) -> Option<AppAction> {
+        match key {
+            KeyCode::Char(c) => {
+                // 输入模式下所有可打印字符都进入搜索词（下拉栏导航请用
+                // 方向键 ↑/↓，删除历史用 Delete 键）。
+                let byte_idx = self
+                    .query
+                    .char_indices()
+                    .nth(self.cursor)
+                    .map(|(i, _)| i)
+                    .unwrap_or(self.query.len());
+                self.query.insert(byte_idx, c);
+                self.cursor += 1;
+                self.show_hot_list = true;
+                match self.picker_focus {
+                    PickerFocus::History => {
+                        if self.history_selected.is_none() && !self.history.is_empty() {
+                            self.history_selected = Some(0);
+                        }
+                    }
+                    PickerFocus::Hotwords => {
+                        if self.hot_selected.is_none() && !self.hotwords.is_empty() {
+                            self.hot_selected = Some(0);
+                        }
+                    }
+                }
+                Some(AppAction::None)
+            }
+            KeyCode::Backspace => {
+                if self.cursor > 0 {
+                    let start = self
+                        .query
+                        .char_indices()
+                        .nth(self.cursor - 1)
+                        .map(|(i, _)| i)
+                        .unwrap_or(0);
+                    let end = self
+                        .query
+                        .char_indices()
+                        .nth(self.cursor)
+                        .map(|(i, _)| i)
+                        .unwrap_or(self.query.len());
+                    self.query.replace_range(start..end, "");
+                    self.cursor -= 1;
+                }
+                self.show_hot_list = true;
+                match self.picker_focus {
+                    PickerFocus::History => {
+                        if self.history_selected.is_none() && !self.history.is_empty() {
+                            self.history_selected = Some(0);
+                        }
+                    }
+                    PickerFocus::Hotwords => {
+                        if self.hot_selected.is_none() && !self.hotwords.is_empty() {
+                            self.hot_selected = Some(0);
+                        }
+                    }
+                }
+                Some(AppAction::None)
+            }
+            KeyCode::Up => {
+                if self.show_hot_list {
+                    self.picker_nav(-1);
+                }
+                Some(AppAction::None)
+            }
+            KeyCode::Down => {
+                if self.show_hot_list {
+                    self.picker_nav(1);
+                }
+                Some(AppAction::None)
+            }
+            KeyCode::Left => {
+                // Move the caret left instead of injecting 'h'.
+                self.cursor = self.cursor.saturating_sub(1);
+                return Some(AppAction::None);
+            }
+            KeyCode::Right => {
+                if self.cursor < self.query.chars().count() {
+                    self.cursor += 1;
+                }
+                return Some(AppAction::None);
+            }
+            KeyCode::Enter => {
+                if !self.query.trim().is_empty() {
+                    self.show_hot_list = false;
+                    match self.mode {
+                        SearchMode::Video => {
+                            self.loading = true;
+                            self.page = 1;
+                            Some(AppAction::Search(self.query.clone()))
+                        }
+                        SearchMode::User => {
+                            self.user_loading = true;
+                            self.user_page = 1;
+                            Some(AppAction::SearchUsers(self.query.clone()))
+                        }
+                    }
+                } else if self.show_hot_list {
+                    self.search_selected_picker()
+                } else {
+                    Some(AppAction::None)
+                }
+            }
+            KeyCode::Delete => {
+                if self.show_hot_list
+                    && self.query.is_empty()
+                    && self.picker_focus == PickerFocus::History
+                    && !self.history.is_empty()
+                {
+                    self.clear_history();
+                    return Some(AppAction::None);
+                }
+                Some(AppAction::None)
+            }
+            KeyCode::Esc => {
+                // First Esc: leave edit mode, drop the in-progress edit and
+                // go back to the history/hotword state.
+                self.input_mode = false;
+                self.query = self.edit_backup.clone();
+                self.cursor = self.query.chars().count();
+                self.show_hot_list = true;
+                Some(AppAction::None)
+            }
+            _ if keys.matches_nav_next(key) => Some(AppAction::NavNext),
+            _ if keys.matches_nav_prev(key) => Some(AppAction::NavPrev),
+            _ => Some(AppAction::None),
+        }
+    }
 }
 
 impl Default for SearchPage {
@@ -729,8 +869,20 @@ impl Component for SearchPage {
                 Style::default().fg(theme.bilibili_pink),
             ));
 
-        let cursor_char = if self.input_mode { "▌" } else { "" };
-        let input = Paragraph::new(format!("{}{}", self.query, cursor_char))
+        let input_text = if self.input_mode {
+            // Render the caret at the actual cursor position inside the text.
+            let byte_idx = self
+                .query
+                .char_indices()
+                .nth(self.cursor)
+                .map(|(i, _)| i)
+                .unwrap_or(self.query.len());
+            let (before, after) = self.query.split_at(byte_idx);
+            format!("{before}▌{after}")
+        } else {
+            self.query.clone()
+        };
+        let input = Paragraph::new(input_text)
             .style(input_style)
             .block(input_block);
         frame.render_widget(input, chunks[0]);
@@ -999,11 +1151,19 @@ impl Component for SearchPage {
         key: KeyCode,
         keys: &crate::storage::Keybindings,
     ) -> Option<AppAction> {
+        // While editing the query every printable key (including '1'/'2' and
+        // tab-switch hotkeys) belongs to the text. The tab shortcuts below
+        // must not fire from inside the input box — typing "12" used to
+        // switch tabs and swallow the digits.
+        if self.input_mode {
+            return self.handle_input_edit(key, keys);
+        }
+
         // Tab switching: 1 = video, 2 = user
         if key == KeyCode::Char('1') && self.mode != SearchMode::Video {
             self.mode = SearchMode::Video;
             self.show_hot_list = false;
-            if !self.query.trim().is_empty() && !self.input_mode {
+            if !self.query.trim().is_empty() {
                 self.loading = true;
                 self.page = 1;
                 return Some(AppAction::Search(self.query.clone()));
@@ -1013,7 +1173,7 @@ impl Component for SearchPage {
         if key == KeyCode::Char('2') && self.mode != SearchMode::User {
             self.mode = SearchMode::User;
             self.show_hot_list = false;
-            if !self.query.trim().is_empty() && !self.input_mode {
+            if !self.query.trim().is_empty() {
                 self.user_loading = true;
                 self.user_page = 1;
                 return Some(AppAction::SearchUsers(self.query.clone()));
@@ -1021,113 +1181,7 @@ impl Component for SearchPage {
             return Some(AppAction::None);
         }
 
-        if self.input_mode {
-            match key {
-                KeyCode::Char(c) => {
-                    // 输入模式下所有可打印字符都进入搜索词（下拉栏导航请用
-                    // 方向键 ↑/↓，删除历史用 Delete 键）。
-                    self.query.push(c);
-                    self.show_hot_list = true;
-                    match self.picker_focus {
-                        PickerFocus::History => {
-                            if self.history_selected.is_none() && !self.history.is_empty() {
-                                self.history_selected = Some(0);
-                            }
-                        }
-                        PickerFocus::Hotwords => {
-                            if self.hot_selected.is_none() && !self.hotwords.is_empty() {
-                                self.hot_selected = Some(0);
-                            }
-                        }
-                    }
-                    Some(AppAction::None)
-                }
-                KeyCode::Backspace => {
-                    self.query.pop();
-                    self.show_hot_list = true;
-                    match self.picker_focus {
-                        PickerFocus::History => {
-                            if self.history_selected.is_none() && !self.history.is_empty() {
-                                self.history_selected = Some(0);
-                            }
-                        }
-                        PickerFocus::Hotwords => {
-                            if self.hot_selected.is_none() && !self.hotwords.is_empty() {
-                                self.hot_selected = Some(0);
-                            }
-                        }
-                    }
-                    Some(AppAction::None)
-                }
-                KeyCode::Up => {
-                    if self.show_hot_list {
-                        self.picker_nav(-1);
-                    }
-                    Some(AppAction::None)
-                }
-                KeyCode::Down => {
-                    if self.show_hot_list {
-                        self.picker_nav(1);
-                    }
-                    Some(AppAction::None)
-                }
-                KeyCode::Left => {
-                    // 下拉栏可见时回侧边栏由外层处理；否则作为字符输入
-                    self.query.push('h');
-                    self.show_hot_list = true;
-                    return Some(AppAction::None);
-                }
-                KeyCode::Right => {
-                    // 不再用于切换栏，作为字符输入
-                    self.query.push('l');
-                    self.show_hot_list = true;
-                    return Some(AppAction::None);
-                }
-                KeyCode::Enter => {
-                    if !self.query.trim().is_empty() {
-                        self.show_hot_list = false;
-                        match self.mode {
-                            SearchMode::Video => {
-                                self.loading = true;
-                                self.page = 1;
-                                Some(AppAction::Search(self.query.clone()))
-                            }
-                            SearchMode::User => {
-                                self.user_loading = true;
-                                self.user_page = 1;
-                                Some(AppAction::SearchUsers(self.query.clone()))
-                            }
-                        }
-                    } else if self.show_hot_list {
-                        self.search_selected_picker()
-                    } else {
-                        Some(AppAction::None)
-                    }
-                }
-                KeyCode::Delete => {
-                    if self.show_hot_list
-                        && self.query.is_empty()
-                        && self.picker_focus == PickerFocus::History
-                        && !self.history.is_empty()
-                    {
-                        self.clear_history();
-                        return Some(AppAction::None);
-                    }
-                    Some(AppAction::None)
-                }
-                KeyCode::Esc => {
-                    // First Esc: leave edit mode, drop the in-progress edit and
-                    // go back to the history/hotword state.
-                    self.input_mode = false;
-                    self.query = self.edit_backup.clone();
-                    self.show_hot_list = true;
-                    Some(AppAction::None)
-                }
-                _ if keys.matches_nav_next(key) => Some(AppAction::NavNext),
-                _ if keys.matches_nav_prev(key) => Some(AppAction::NavPrev),
-                _ => Some(AppAction::None),
-            }
-        } else if self.show_hot_list {
+        if self.show_hot_list {
             if keys.matches_up(key) || key == KeyCode::Char('k') {
                 self.picker_nav(-1);
                 return Some(AppAction::None);
@@ -1148,6 +1202,7 @@ impl Component for SearchPage {
             if key == KeyCode::Char('i') {
                 self.edit_backup = self.query.clone();
                 self.input_mode = true;
+                self.cursor = self.query.chars().count();
                 self.show_hot_list = true;
                 return Some(AppAction::None);
             }
@@ -1155,6 +1210,7 @@ impl Component for SearchPage {
             if key == KeyCode::Esc {
                 if !self.edit_backup.trim().is_empty() {
                     self.query = self.edit_backup.clone();
+                    self.cursor = self.query.chars().count();
                     self.show_hot_list = false;
                 }
                 return Some(AppAction::None);
@@ -1219,6 +1275,7 @@ impl Component for SearchPage {
                     if key == KeyCode::Char('i') {
                         self.edit_backup = self.query.clone();
                         self.input_mode = true;
+                        self.cursor = self.query.chars().count();
                         self.show_hot_list = true;
                         if self.hot_selected.is_none() && !self.hotwords.is_empty() {
                             self.hot_selected = Some(0);
@@ -1287,6 +1344,7 @@ impl Component for SearchPage {
                     if key == KeyCode::Char('i') {
                         self.edit_backup = self.query.clone();
                         self.input_mode = true;
+                        self.cursor = self.query.chars().count();
                         self.show_hot_list = true;
                         if self.hot_selected.is_none() && !self.hotwords.is_empty() {
                             self.hot_selected = Some(0);
@@ -1479,5 +1537,102 @@ impl Component for SearchPage {
             }
             _ => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::{Component, SearchPage};
+    use crate::storage::Keybindings;
+    use crossterm::event::KeyCode;
+
+    fn edit_mode_page() -> SearchPage {
+        let mut page = SearchPage::new();
+        page.input_mode = true;
+        page.cursor = page.query.chars().count();
+        page
+    }
+
+    #[test]
+    fn digits_type_into_query_instead_of_switching_tabs() {
+        let keys = Keybindings::default();
+        let mut page = edit_mode_page();
+        page.mode = super::SearchMode::User; // '1' would switch to Video outside edit mode
+
+        page.handle_input(KeyCode::Char('1'), &keys);
+        page.handle_input(KeyCode::Char('2'), &keys);
+
+        assert_eq!(page.query, "12");
+        assert!(
+            matches!(page.mode, super::SearchMode::User),
+            "mode must not change while typing"
+        );
+    }
+
+    #[test]
+    fn digits_still_switch_tabs_outside_edit_mode() {
+        let keys = Keybindings::default();
+        let mut page = SearchPage::new();
+        page.mode = super::SearchMode::User;
+
+        page.handle_input(KeyCode::Char('1'), &keys);
+        assert!(matches!(page.mode, super::SearchMode::Video));
+    }
+
+    #[test]
+    fn arrow_keys_move_caret_without_injecting_vi_letters() {
+        let keys = Keybindings::default();
+        let mut page = edit_mode_page();
+        page.query = "abcd".to_string();
+        page.cursor = 4;
+
+        page.handle_input(KeyCode::Left, &keys);
+        page.handle_input(KeyCode::Left, &keys);
+        page.handle_input(KeyCode::Right, &keys);
+
+        assert_eq!(
+            page.query, "abcd",
+            "left/right must not push h/l into the query"
+        );
+        assert_eq!(page.cursor, 3);
+    }
+
+    #[test]
+    fn backspace_deletes_at_caret() {
+        let keys = Keybindings::default();
+        let mut page = edit_mode_page();
+        page.query = "abcd".to_string();
+        page.cursor = 2;
+
+        page.handle_input(KeyCode::Backspace, &keys);
+        assert_eq!(page.query, "acd");
+        assert_eq!(page.cursor, 1);
+    }
+
+    #[test]
+    fn char_inserts_at_caret() {
+        let keys = Keybindings::default();
+        let mut page = edit_mode_page();
+        page.query = "ac".to_string();
+        page.cursor = 1;
+
+        page.handle_input(KeyCode::Char('b'), &keys);
+        assert_eq!(page.query, "abc");
+        assert_eq!(page.cursor, 2);
+    }
+
+    #[test]
+    fn caret_never_runs_past_query_bounds() {
+        let keys = Keybindings::default();
+        let mut page = edit_mode_page();
+        page.query = "x".to_string();
+        page.cursor = 1;
+
+        page.handle_input(KeyCode::Right, &keys);
+        assert_eq!(page.cursor, 1);
+
+        page.handle_input(KeyCode::Left, &keys);
+        page.handle_input(KeyCode::Left, &keys);
+        assert_eq!(page.cursor, 0);
     }
 }

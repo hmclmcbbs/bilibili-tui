@@ -46,7 +46,7 @@ pub struct HistoryPage {
     filter_input: String,
     selected: usize,
     scroll_offset: usize,
-    loading: bool,
+    pub loading: bool,
     error: Option<String>,
     picker: Arc<Picker>,
     cursor: Option<HistoryCursor>,

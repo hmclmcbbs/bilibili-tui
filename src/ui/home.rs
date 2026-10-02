@@ -911,7 +911,14 @@ impl Component for HomePage {
 impl HomePage {
     fn render_grid(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let visible_rows = self.visible_rows(area.height);
-        self.cached_visible_rows = visible_rows;
+        if self.cached_visible_rows != visible_rows {
+            // The cover scan ran with the old (possibly stale initial) row
+            // count and may have skipped rows that are on screen. Re-arm the
+            // scan so covers below the old horizon (e.g. the 6th card before
+            // the first real frame) start downloading.
+            self.cached_visible_rows = visible_rows;
+            self.covers_dirty = true;
+        }
 
         let row_constraints: Vec<Constraint> = (0..visible_rows)
             .map(|_| Constraint::Min(self.card_height))

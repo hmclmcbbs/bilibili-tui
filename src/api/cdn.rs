@@ -24,6 +24,27 @@ pub struct PlayUrlData {
     /// `data.subtitle.subtitles`; both are deserialized into this field.
     #[serde(default)]
     pub subtitle: Option<SubtitleBlock>,
+    /// Qualities this *specific* video actually offers, e.g.
+    /// `[(126, "杜比视界"), (120, "超清 4K"), ...]`. The detail page builds
+    /// its quality picker from this instead of a hardcoded list, so videos
+    /// without 4K no longer show a 4K entry and Dolby Vision/HDR appear when
+    /// present. Empty when the API omits the fields (older bangumi payload).
+    #[serde(default)]
+    pub accept_quality: Vec<i64>,
+    #[serde(default)]
+    pub accept_description: Vec<String>,
+}
+
+impl PlayUrlData {
+    /// `(qn, label)` pairs zipped from `accept_quality`/`accept_description`,
+    /// in the API's descending-quality order.
+    pub fn accept_list(&self) -> Vec<(i64, String)> {
+        self.accept_quality
+            .iter()
+            .copied()
+            .zip(self.accept_description.iter().cloned())
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -572,17 +593,14 @@ fn pick_video<'a>(
     streams: &'a [DashStream],
     options: crate::domain::playback::PlaybackOptions,
 ) -> Option<&'a DashStream> {
+    // HDR/Dolby/8K family (id >= 125) is gated behind prefer_hdr, EXCEPT when
+    // the user explicitly selected such a quality — otherwise choosing
+    // 杜比视界 in the picker would filter its own stream out.
+    let quality_requests_hdr_family = options.quality >= HDR_STREAM_MIN_ID;
     let mut candidates: Vec<&DashStream> = streams
         .iter()
         .filter(|stream| {
-            if options.prefer_hdr {
-                // Prefer HDR family streams when enabled; ordinary streams are
-                // still allowed as a fallback for videos without HDR.
-                true
-            } else {
-                // Skip HDR / Dolby Vision / 8K when HDR is disabled.
-                stream.id < HDR_STREAM_MIN_ID
-            }
+            options.prefer_hdr || quality_requests_hdr_family || stream.id < HDR_STREAM_MIN_ID
         })
         .collect();
     if options.quality > 0 {

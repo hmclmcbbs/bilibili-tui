@@ -34,7 +34,7 @@ pub struct LivePage {
     selected_index: usize,
     columns: usize,
     scroll_offset: usize,
-    loading: bool,
+    pub loading: bool,
     error: Option<String>,
     cached_visible_rows: usize,
 
@@ -44,7 +44,7 @@ pub struct LivePage {
     cover_rx: mpsc::Receiver<CoverResult>,
     pending_downloads: HashSet<i64>,
     last_load_time: Option<Instant>,
-    loading_more: bool,
+    pub loading_more: bool,
 }
 
 impl LivePage {

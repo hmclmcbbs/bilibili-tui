@@ -6,7 +6,6 @@
 //! fetched from /x/msgfeed.
 
 use super::{Component, Theme, shortcut_footer};
-use crate::api::client::ApiClient;
 use crate::api::msg::session_last_text;
 use crate::api::msg::{ChatMessage, ChatSession, NotificationItem};
 use crate::application::AppAction;

@@ -279,7 +279,7 @@ pub async fn save_cover_and_danmaku(
     duration_secs: i64,
     bvid: &str,
     ep_id: i64,
-    quality: crate::storage::VideoQuality,
+    quality_qn: i64,
 ) -> Result<()> {
     // Path::with_extension truncates multi-dot Chinese titles
     // ("a.b.c.mp4" -> "a.b.jpg"), which breaks sidecar lookup. Build the
@@ -329,7 +329,7 @@ pub async fn save_cover_and_danmaku(
         let mut cues = Vec::new();
         if ep_id > 0 {
             // Bangumi subtitles ride along in the playurl response.
-            if let Ok(play_url) = api_client.get_bangumi_play_url(ep_id, quality).await
+            if let Ok(play_url) = api_client.get_bangumi_play_url(ep_id, quality_qn).await
                 && let Some(block) = play_url.subtitle
                 && let Some(track) = block
                     .subtitles

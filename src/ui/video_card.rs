@@ -656,7 +656,13 @@ impl VideoCardGrid {
     /// Render the grid
     pub fn render(&mut self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let visible_rows = self.visible_rows(area.height);
-        self.cached_visible_rows = visible_rows;
+        if self.cached_visible_rows != visible_rows {
+            // Re-arm the cover scan when the viewport grows: the previous
+            // scan may have skipped rows beyond the stale row count (the
+            // initial value is used before the first real frame).
+            self.cached_visible_rows = visible_rows;
+            self.covers_dirty = true;
+        }
 
         let row_constraints: Vec<Constraint> = (0..visible_rows)
             .map(|_| Constraint::Min(self.card_height))

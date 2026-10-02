@@ -29,8 +29,12 @@ pub struct DownloadItem {
     pub pic_url: String,
     /// Media duration in seconds (0 when unknown).
     pub duration_secs: i64,
-    /// Download resolution override. `None` = follow the global setting.
-    pub quality: Option<VideoQuality>,
+    /// Download resolution override as a raw Bilibili `qn` value (16=360P,
+    /// 120=4K, 126=Dolby Vision, ...). `None` = follow the global setting.
+    /// Kept as a bare qn (not `VideoQuality`) so the detail page can offer
+    /// exactly what the playurl API reported for this video, including
+    /// qualities the enum doesn't model.
+    pub quality: Option<i64>,
 }
 
 /// Actions that can be triggered from UI components

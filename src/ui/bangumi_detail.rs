@@ -5,11 +5,7 @@ use crate::api::bangumi::{BangumiEpisode, SeasonResult};
 use crate::api::client::ApiClient;
 use crate::application::AppAction;
 use crate::storage::{Keybindings, VideoQuality};
-use ratatui::{
-    crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind},
-    prelude::*,
-    widgets::*,
-};
+use ratatui::{crossterm::event::KeyCode, prelude::*, widgets::*};
 use std::time::Instant;
 
 pub struct BangumiDetailPage {
@@ -613,7 +609,7 @@ impl Component for BangumiDetailPage {
                     cid: ep.episode.cid,
                     pic_url: ep.episode.cover_url(),
                     duration_secs: ep.episode.duration / 1000,
-                    quality: self.download_quality,
+                    quality: self.download_quality.map(|q| q.qn()),
                 };
                 return Some(AppAction::DownloadMedia { items: vec![item] });
             }
@@ -634,7 +630,7 @@ impl Component for BangumiDetailPage {
                         cid: ep.episode.cid,
                         pic_url: ep.episode.cover_url(),
                         duration_secs: ep.episode.duration / 1000,
-                        quality: self.download_quality,
+                        quality: self.download_quality.map(|q| q.qn()),
                     })
                     .into_iter()
                     .collect()
@@ -654,7 +650,7 @@ impl Component for BangumiDetailPage {
                                 cid: ep.episode.cid,
                                 pic_url: ep.episode.cover_url(),
                                 duration_secs: ep.episode.duration / 1000,
-                                quality: self.download_quality,
+                                quality: self.download_quality.map(|q| q.qn()),
                             })
                     })
                     .collect()

@@ -386,6 +386,7 @@ impl App {
                 related_videos,
                 hdr_supported,
                 hires_supported,
+                available_qualities,
                 liked,
                 coined,
                 favorited,
@@ -437,6 +438,9 @@ impl App {
                     page.error_message = None;
                     page.hdr_supported = hdr_supported;
                     page.hires_supported = hires_supported;
+                    if !available_qualities.is_empty() {
+                        page.available_qualities = available_qualities;
+                    }
                     page.streams_probing = false;
                     page.playback.prefer_hdr = page.hdr_supported == Some(true);
                     page.playback.prefer_hires = page.hires_supported == Some(true);
@@ -466,6 +470,7 @@ impl App {
                 bvid,
                 hdr_supported,
                 hires_supported,
+                available_qualities,
             } => {
                 if !self.is_latest_request("video_detail", req_id) {
                     return;
@@ -476,6 +481,9 @@ impl App {
                     }
                     page.hdr_supported = hdr_supported;
                     page.hires_supported = hires_supported;
+                    if !available_qualities.is_empty() {
+                        page.available_qualities = available_qualities;
+                    }
                     page.streams_probing = false;
                     page.playback.prefer_hdr = page.hdr_supported == Some(true);
                     page.playback.prefer_hires = page.hires_supported == Some(true);

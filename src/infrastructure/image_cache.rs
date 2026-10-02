@@ -335,7 +335,12 @@ async fn decode_svg(bytes: Vec<u8>) -> Option<DynamicImage> {
 }
 
 /// Append Bilibili CDN thumbnail size parameters to reduce download size.
-/// `foo.jpg` → `foo.jpg@480w_300h.jpg` (only for hdslb.com/bfs/ URLs).
+/// `foo.jpg` → `foo.jpg@480w_270h_1c.jpg` (only for hdslb.com/bfs/ URLs).
+///
+/// The `_1c` flag makes the CDN *crop* to exactly 480x270 instead of merely
+/// fitting inside the box: without it a 4:3 cover shrinks to 360x270 while a
+/// 16:9 one becomes 480x270, and the grid then rendered covers at visibly
+/// different sizes. Cropping to a fixed 16:9 frame makes every card uniform.
 fn thumbnail_url(url: &str) -> String {
     if !url.contains("hdslb.com/bfs/") || url.contains('@') {
         return url.to_string();
@@ -343,7 +348,7 @@ fn thumbnail_url(url: &str) -> String {
     if url.ends_with(".svg") || url.contains(".svg?") {
         return url.to_string();
     }
-    format!("{url}@480w_300h.jpg")
+    format!("{url}@480w_270h_1c.jpg")
 }
 
 async fn fetch_and_store(cache: &ImageCache, url: &str) -> Option<DynamicImage> {
