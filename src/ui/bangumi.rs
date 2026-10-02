@@ -105,7 +105,9 @@ impl BangumiPage {
         self.search_grid.clear();
         self.search_season_ids.clear();
         for item in items {
-            let Some(season_id) = item.season_id else { continue };
+            let Some(season_id) = item.season_id else {
+                continue;
+            };
             self.search_season_ids.push(season_id);
             let card = VideoCard::new(
                 None,
@@ -133,7 +135,9 @@ impl BangumiPage {
         self.follow_season_ids.clear();
         for item in items {
             let Some(meta) = &item.meta else { continue };
-            let Some(season_id) = meta.season_id else { continue };
+            let Some(season_id) = meta.season_id else {
+                continue;
+            };
             let title = meta
                 .title
                 .clone()
@@ -258,10 +262,7 @@ impl BangumiPage {
             ],
         );
         if !self.follow_mode {
-            help_line.push_span(Span::styled(
-                "   / 搜索",
-                Style::default().fg(theme.info),
-            ));
+            help_line.push_span(Span::styled("   / 搜索", Style::default().fg(theme.info)));
         }
         let help = Paragraph::new(help_line).alignment(Alignment::Center);
         frame.render_widget(help, area);
@@ -301,10 +302,7 @@ impl Component for BangumiPage {
                     .fg(theme.fg_primary)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(
-                "  [Tab] 切换",
-                Style::default().fg(theme.fg_secondary),
-            ),
+            Span::styled("  [Tab] 切换", Style::default().fg(theme.fg_secondary)),
         ];
         if self.search_input_mode {
             title_spans.push(Span::styled(
@@ -346,10 +344,7 @@ impl Component for BangumiPage {
                     .enumerate()
                     .map(|(idx, kw)| {
                         ListItem::new(Line::from(vec![
-                            Span::styled(
-                                "历史 ",
-                                Style::default().fg(theme.fg_muted),
-                            ),
+                            Span::styled("历史 ", Style::default().fg(theme.fg_muted)),
                             Span::styled(kw.as_str(), Style::default().fg(theme.fg_primary)),
                         ]))
                         .style(if Some(idx) == self.history_selected {
@@ -516,7 +511,8 @@ impl Component for BangumiPage {
                     if self.search_input.is_empty() && !self.search_history.is_empty() {
                         let len = self.search_history.len();
                         let current = self.history_selected.unwrap_or(0);
-                        self.history_selected = Some(if current == 0 { len - 1 } else { current - 1 });
+                        self.history_selected =
+                            Some(if current == 0 { len - 1 } else { current - 1 });
                     }
                 }
                 KeyCode::Down => {

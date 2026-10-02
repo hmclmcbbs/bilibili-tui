@@ -400,7 +400,6 @@ impl DynamicItem {
             .unwrap_or(false)
     }
 
-
     /// Forwarded (转发) dynamics: the top-level type is DYNAMIC_TYPE_FORWARD
     /// and the original content is nested under `orig` (not parsed here).
     pub fn is_forward(&self) -> bool {

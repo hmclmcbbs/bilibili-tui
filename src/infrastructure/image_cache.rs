@@ -15,8 +15,8 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -225,16 +225,29 @@ impl ImageCache {
     /// Fetch a decoded image, consulting memory -> disk -> network in order.
     /// Returns `None` only when the network fetch or decode fails.
     pub async fn get(&self, url: &str) -> Option<DynamicImage> {
-        let short: String = url.chars().rev().take(40).collect::<String>().chars().rev().collect();
+        let short: String = url
+            .chars()
+            .rev()
+            .take(40)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
         // 1. memory
         let img = {
             let t = Instant::now();
             let mem = self.memory.lock().unwrap();
             let result = mem.get(url).map(|(img, _)| img.clone());
             if result.is_some() {
-                img_log(&format!("[IMG] memory_hit url={short} time={}ms", t.elapsed().as_millis()));
+                img_log(&format!(
+                    "[IMG] memory_hit url={short} time={}ms",
+                    t.elapsed().as_millis()
+                ));
             } else {
-                img_log(&format!("[IMG] memory_miss url={short} time={}ms", t.elapsed().as_millis()));
+                img_log(&format!(
+                    "[IMG] memory_miss url={short} time={}ms",
+                    t.elapsed().as_millis()
+                ));
             }
             result
         };
@@ -281,7 +294,10 @@ impl ImageCache {
                 self.touch_disk(url);
                 drop(g);
                 self.finish_fetch(url, img.clone());
-                img_log(&format!("[IMG] disk_hit url={short} time={}ms", t.elapsed().as_millis()));
+                img_log(&format!(
+                    "[IMG] disk_hit url={short} time={}ms",
+                    t.elapsed().as_millis()
+                ));
                 return Some(img);
             }
         }
@@ -289,7 +305,10 @@ impl ImageCache {
         // 4. network
         let t = Instant::now();
         let fetched = fetch_and_store(self, url).await;
-        img_log(&format!("[IMG] network_total url={short} time={}ms", t.elapsed().as_millis()));
+        img_log(&format!(
+            "[IMG] network_total url={short} time={}ms",
+            t.elapsed().as_millis()
+        ));
         let mut g = holder.lock().await;
         *g = fetched.clone();
         drop(g);
@@ -308,7 +327,10 @@ async fn decode_image(bytes: Vec<u8>) -> Option<DynamicImage> {
     tokio::task::spawn_blocking(move || {
         let t = std::time::Instant::now();
         let result = image::load_from_memory(&bytes).ok();
-        img_log(&format!("[IMG] decode_image time={}ms", t.elapsed().as_millis()));
+        img_log(&format!(
+            "[IMG] decode_image time={}ms",
+            t.elapsed().as_millis()
+        ));
         result
     })
     .await
@@ -382,8 +404,18 @@ async fn fetch_and_store(cache: &ImageCache, url: &str) -> Option<DynamicImage> 
     let t = Instant::now();
     let response = cache.http.get(&thumbnail_url(url)).send().await.ok()?;
     let bytes = response.bytes().await.ok()?;
-    let short_dl: String = url.chars().rev().take(40).collect::<String>().chars().rev().collect();
-    img_log(&format!("[IMG] http_download url={short_dl} time={}ms", t.elapsed().as_millis()));
+    let short_dl: String = url
+        .chars()
+        .rev()
+        .take(40)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    img_log(&format!(
+        "[IMG] http_download url={short_dl} time={}ms",
+        t.elapsed().as_millis()
+    ));
     // Bilibili mathjax formula images are served as SVG, which the `image`
     // crate cannot decode. Rasterize them to PNG first.
     let t = Instant::now();
@@ -392,14 +424,20 @@ async fn fetch_and_store(cache: &ImageCache, url: &str) -> Option<DynamicImage> 
     } else {
         decode_image(bytes.to_vec()).await?
     };
-    img_log(&format!("[IMG] decode url={short_dl} time={}ms", t.elapsed().as_millis()));
+    img_log(&format!(
+        "[IMG] decode url={short_dl} time={}ms",
+        t.elapsed().as_millis()
+    ));
     let img = decoded;
     // Store raw bytes on disk for next run.
     let t = Instant::now();
     let path = cache.disk_path(url);
     let _ = tokio::fs::create_dir_all(cache.dir.clone()).await;
     let _ = tokio::fs::write(&path, &bytes).await;
-    img_log(&format!("[IMG] disk_write url={short_dl} time={}ms", t.elapsed().as_millis()));
+    img_log(&format!(
+        "[IMG] disk_write url={short_dl} time={}ms",
+        t.elapsed().as_millis()
+    ));
     {
         let mut meta = cache.meta.lock().unwrap();
         meta.insert(
@@ -463,15 +501,21 @@ mod tests {
         let img = image::RgbaImage::new(4, 4);
         let dynimg = DynamicImage::ImageRgba8(img);
         // Insert entries with distinct timestamps (a oldest, c newest).
-        cache.memory.lock().unwrap().insert(
-            "a".to_string(),
-            (dynimg.clone(), 1),
-        );
-        cache.memory.lock().unwrap().insert(
-            "b".to_string(),
-            (dynimg.clone(), 2),
-        );
-        cache.memory.lock().unwrap().insert("c".to_string(), (dynimg, 3));
+        cache
+            .memory
+            .lock()
+            .unwrap()
+            .insert("a".to_string(), (dynimg.clone(), 1));
+        cache
+            .memory
+            .lock()
+            .unwrap()
+            .insert("b".to_string(), (dynimg.clone(), 2));
+        cache
+            .memory
+            .lock()
+            .unwrap()
+            .insert("c".to_string(), (dynimg, 3));
         assert!(cache.memory.lock().unwrap().contains_key("a"));
         assert!(cache.memory.lock().unwrap().contains_key("b"));
         assert!(cache.memory.lock().unwrap().contains_key("c"));

@@ -44,25 +44,25 @@ pub struct UpPage {
     pub favorite_page: i32,
     pub favorite_order: FavoriteOrder,
     pub favorite_has_more: bool,
-            // ── 合集状态 ──
-            pub series_list: Vec<SeriesInfo>,
-            pub series_cards: VideoCardGrid,
-            pub series_selected: usize,
-            pub series_list_loaded: bool,
-            pub pending_series: Option<i64>,
-            pub pending_series_is_series: bool,
-            pub active_series: Option<i64>,
-            pub active_series_is_series: bool,
-            pub series_videos: VideoCardGrid,
-            pub series_page: i32,
-            pub series_has_more: bool,
-            // ── 专栏状态 ──
-            pub articles: Vec<crate::api::space::SpaceArticleItem>,
-            pub article_cards: VideoCardGrid,
-            pub article_selected: usize,
-            pub article_page: i32,
-            pub article_has_more: bool,
-            pub article_loading_more: bool,
+    // ── 合集状态 ──
+    pub series_list: Vec<SeriesInfo>,
+    pub series_cards: VideoCardGrid,
+    pub series_selected: usize,
+    pub series_list_loaded: bool,
+    pub pending_series: Option<i64>,
+    pub pending_series_is_series: bool,
+    pub active_series: Option<i64>,
+    pub active_series_is_series: bool,
+    pub series_videos: VideoCardGrid,
+    pub series_page: i32,
+    pub series_has_more: bool,
+    // ── 专栏状态 ──
+    pub articles: Vec<crate::api::space::SpaceArticleItem>,
+    pub article_cards: VideoCardGrid,
+    pub article_selected: usize,
+    pub article_page: i32,
+    pub article_has_more: bool,
+    pub article_loading_more: bool,
     pub loading: bool,
     pub loading_more: bool,
     pub error: Option<String>,
@@ -237,11 +237,7 @@ impl UpPage {
                 .as_ref()
                 .and_then(|m| m.name.as_deref().or(m.title.as_deref()))
                 .unwrap_or("未命名合集");
-            let count = series
-                .meta
-                .as_ref()
-                .and_then(|m| m.total)
-                .unwrap_or(0);
+            let count = series.meta.as_ref().and_then(|m| m.total).unwrap_or(0);
             let pic = series.meta.as_ref().and_then(|m| m.cover.clone());
             let card = VideoCard::new(
                 None,
@@ -338,7 +334,10 @@ impl UpPage {
             let card = VideoCard::new(
                 None, // 专栏不是视频，无 bvid
                 None,
-                article.title.clone().unwrap_or_else(|| "(无标题)".to_string()),
+                article
+                    .title
+                    .clone()
+                    .unwrap_or_else(|| "(无标题)".to_string()),
                 "专栏".to_string(),
                 format!("👁 {views}"),
                 format!("👍 {likes}"),
@@ -442,7 +441,12 @@ impl UpPage {
                         theme.fg_muted
                     }),
                 ),
-                Span::styled(follow_state, Style::default().fg(state_style).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    follow_state,
+                    Style::default()
+                        .fg(state_style)
+                        .add_modifier(Modifier::BOLD),
+                ),
             ]),
             Line::from(Span::styled(
                 "[f] 切换关注",
@@ -598,27 +602,19 @@ impl Component for UpPage {
     fn handle_input(&mut self, key: KeyCode, keys: &Keybindings) -> Option<AppAction> {
         if keys.matches_back(key) || keys.matches_quit(key) {
             // 收藏夹内 → 回收藏夹列表；合集内 → 回合集列表
-            if self.tab == UpTab::Favorites
-                && self.pending_folder.take().is_some()
-            {
+            if self.tab == UpTab::Favorites && self.pending_folder.take().is_some() {
                 self.loading = false;
                 return Some(AppAction::None);
             }
-            if self.tab == UpTab::Favorites
-                && self.active_folder.take().is_some()
-            {
+            if self.tab == UpTab::Favorites && self.active_folder.take().is_some() {
                 self.favorite_videos.clear();
                 return Some(AppAction::None);
             }
-            if self.tab == UpTab::Collections
-                && self.pending_series.take().is_some()
-            {
+            if self.tab == UpTab::Collections && self.pending_series.take().is_some() {
                 self.loading = false;
                 return Some(AppAction::None);
             }
-            if self.tab == UpTab::Collections
-                && self.active_series.take().is_some()
-            {
+            if self.tab == UpTab::Collections && self.active_series.take().is_some() {
                 self.series_videos.clear();
                 return Some(AppAction::None);
             }
@@ -713,11 +709,7 @@ impl Component for UpPage {
                     // Season-style collections use meta.season_id; user-created
                     // series use meta.series_id (fall back to the plain id).
                     let season_id = series.meta.as_ref().and_then(|m| m.season_id);
-                    let series_id = series
-                        .meta
-                        .as_ref()
-                        .and_then(|m| m.series_id)
-                        .or(series.id);
+                    let series_id = series.meta.as_ref().and_then(|m| m.series_id).or(series.id);
                     if let Some(id) = season_id {
                         self.loading = true;
                         self.pending_series = Some(id);
@@ -745,7 +737,9 @@ impl Component for UpPage {
         if tab == UpTab::Articles {
             if keys.matches_down(key) || keys.matches_page_down(key) {
                 self.article_cards.move_down();
-                if self.article_cards.is_near_bottom(self.article_cards.cached_visible_rows)
+                if self
+                    .article_cards
+                    .is_near_bottom(self.article_cards.cached_visible_rows)
                     && self.article_has_more
                     && !self.article_loading_more
                     && self.article_cards.selected_index + 1 >= self.articles.len()

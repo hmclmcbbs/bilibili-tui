@@ -160,12 +160,17 @@ impl Sidebar {
         frame: &mut Frame,
         area: Rect,
         theme: &Theme,
-        user: Option<(&crate::api::auth::CurrentUser, &mut Option<ratatui_image::protocol::StatefulProtocol>)>,
+        user: Option<(
+            &crate::api::auth::CurrentUser,
+            &mut Option<ratatui_image::protocol::StatefulProtocol>,
+        )>,
         active: bool,
     ) {
         // Main block with subtle right border; when focused, use pink accent.
         let border_style = if active {
-            Style::default().fg(theme.bilibili_pink).add_modifier(Modifier::BOLD)
+            Style::default()
+                .fg(theme.bilibili_pink)
+                .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(theme.border_subtle)
         };
@@ -224,10 +229,7 @@ impl Sidebar {
         } else {
             None
         };
-        let brand_area = header_chunks
-            .as_ref()
-            .map(|c| c[0])
-            .unwrap_or(chunks[0]);
+        let brand_area = header_chunks.as_ref().map(|c| c[0]).unwrap_or(chunks[0]);
 
         // Bilibili branding header with modern styling
         let brand_lines = vec![
@@ -273,10 +275,7 @@ impl Sidebar {
 
         // User info (avatar, name, level) below the brand when logged in
         if let Some((user, avatar)) = user {
-            let area = header_chunks
-                .as_ref()
-                .map(|c| c[2])
-                .unwrap_or(chunks[0]);
+            let area = header_chunks.as_ref().map(|c| c[2]).unwrap_or(chunks[0]);
             let lines = user_lines(theme, user);
             if let Some(protocol) = avatar.as_mut() {
                 // 5-column avatar on the left
@@ -486,10 +485,7 @@ impl Sidebar {
 }
 
 /// Build the sidebar user-info text lines (name + level).
-fn user_lines(
-    theme: &Theme,
-    user: &crate::api::auth::CurrentUser,
-) -> Vec<Line<'static>> {
+fn user_lines(theme: &Theme, user: &crate::api::auth::CurrentUser) -> Vec<Line<'static>> {
     let name = if user.uname.is_empty() {
         format!("用户{}", user.mid)
     } else {

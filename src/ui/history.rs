@@ -162,9 +162,7 @@ impl HistoryPage {
                 .filter(|item| item.title.to_lowercase().contains(&filter))
                 .map(|item| HistoryCard {
                     item: item.clone(),
-                    cover_protocol: item
-                        .history_key()
-                        .and_then(|key| cached.remove(&key)),
+                    cover_protocol: item.history_key().and_then(|key| cached.remove(&key)),
                 })
                 .collect();
         } else {
@@ -173,9 +171,7 @@ impl HistoryPage {
                 .iter()
                 .map(|item| HistoryCard {
                     item: item.clone(),
-                    cover_protocol: item
-                        .history_key()
-                        .and_then(|key| cached.remove(&key)),
+                    cover_protocol: item.history_key().and_then(|key| cached.remove(&key)),
                 })
                 .collect();
         }
@@ -184,12 +180,9 @@ impl HistoryPage {
         self.pending_downloads.clear();
         self.generation = self.generation.wrapping_add(1);
         self.selected = self.selected.min(self.items.len().saturating_sub(1));
-        self.scroll_offset = self.scroll_offset.min(
-            self.items
-                .len()
-                .div_ceil(Self::COLUMNS)
-                .saturating_sub(1),
-        );
+        self.scroll_offset = self
+            .scroll_offset
+            .min(self.items.len().div_ceil(Self::COLUMNS).saturating_sub(1));
     }
 
     fn update_filter_from_input(&mut self) {
@@ -332,7 +325,9 @@ impl HistoryPage {
     }
 
     async fn download_image(url: &str) -> Option<DynamicImage> {
-        crate::infrastructure::image_cache::instance().get(url).await
+        crate::infrastructure::image_cache::instance()
+            .get(url)
+            .await
     }
 
     fn visible_rows(&self, height: u16) -> usize {

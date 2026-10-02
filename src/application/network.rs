@@ -1,3 +1,4 @@
+use crate::api::cdn::{PlayUrlData, RankedStreams, rank_streams};
 use crate::api::{
     ApiClient,
     article::ArticleData,
@@ -20,7 +21,6 @@ use crate::api::{
 };
 use crate::domain::playback::{PlayOrder, PlaybackOptions, PlaylistItem, PlaylistSource};
 use crate::player::proxy::MediaProxy;
-use crate::api::cdn::{PlayUrlData, RankedStreams, rank_streams};
 use crate::presentation::tui::DynamicTab;
 use futures_util::{StreamExt, stream};
 use std::collections::HashMap;
@@ -512,7 +512,10 @@ pub struct NetworkBridge {
     pub event_rx: mpsc::Receiver<NetworkEvent>,
 }
 
-pub fn start_network_worker(api_client: Arc<ApiClient>, preheat_store: PreheatStore) -> NetworkBridge {
+pub fn start_network_worker(
+    api_client: Arc<ApiClient>,
+    preheat_store: PreheatStore,
+) -> NetworkBridge {
     let (command_tx, command_rx) = mpsc::channel::<NetworkCommand>();
     let (event_tx, event_rx) = mpsc::channel::<NetworkEvent>();
 
@@ -537,7 +540,14 @@ pub fn start_network_worker(api_client: Arc<ApiClient>, preheat_store: PreheatSt
                     }
                     continue;
                 }
-                if let NetworkCommand::PreheatStream { bvid, aid, cid, duration, playback } = command {
+                if let NetworkCommand::PreheatStream {
+                    bvid,
+                    aid,
+                    cid,
+                    duration,
+                    playback,
+                } = command
+                {
                     let store = preheat_store.clone();
                     let api = api_client.clone();
                     runtime.spawn(async move {
@@ -546,17 +556,26 @@ pub fn start_network_worker(api_client: Arc<ApiClient>, preheat_store: PreheatSt
                     continue;
                 }
                 // Intercept LoadVideoDetail with a preheat hint
-                if let NetworkCommand::LoadVideoDetail { ref bvid, preheat_cid, preheat_playback, .. } = command
-                    && let (Some(cid), Some(playback)) = (preheat_cid, preheat_playback) {
-                        let store = preheat_store.clone();
-                        let api = api_client.clone();
-                        let bv = bvid.clone();
-                        runtime.spawn(async move {
-                            do_preheat(api, bv, 0, cid, 0, playback, store).await;
-                        });
-                    }
+                if let NetworkCommand::LoadVideoDetail {
+                    ref bvid,
+                    preheat_cid,
+                    preheat_playback,
+                    ..
+                } = command
+                    && let (Some(cid), Some(playback)) = (preheat_cid, preheat_playback)
+                {
+                    let store = preheat_store.clone();
+                    let api = api_client.clone();
+                    let bv = bvid.clone();
+                    runtime.spawn(async move {
+                        do_preheat(api, bv, 0, cid, 0, playback, store).await;
+                    });
+                }
                 // Two-phase video detail loading
-                if let NetworkCommand::LoadVideoDetail { req_id, bvid, aid, .. } = command {
+                if let NetworkCommand::LoadVideoDetail {
+                    req_id, bvid, aid, ..
+                } = command
+                {
                     let api = api_client.clone();
                     let tx = event_tx.clone();
                     let bv = bvid.clone();
@@ -573,7 +592,9 @@ pub fn start_network_worker(api_client: Arc<ApiClient>, preheat_store: PreheatSt
                             }
                         };
                         // Extract cid before moving video_info.
-                        let cid = video_info.pages.as_ref()
+                        let cid = video_info
+                            .pages
+                            .as_ref()
                             .and_then(|p| p.first())
                             .map(|pg| pg.cid)
                             .unwrap_or(video_info.cid);
@@ -596,7 +617,8 @@ pub fn start_network_worker(api_client: Arc<ApiClient>, preheat_store: PreheatSt
                                 match api.get_comments(aid, 1).await {
                                     Ok(data) => {
                                         let comments = data.replies.unwrap_or_default();
-                                        let has_more = data.page
+                                        let has_more = data
+                                            .page
                                             .map(|p| p.count.unwrap_or(0) > comments.len() as i32)
                                             .unwrap_or(false);
                                         (comments, has_more)
@@ -639,10 +661,18 @@ pub fn start_network_worker(api_client: Arc<ApiClient>, preheat_store: PreheatSt
                             Err(_) => (None, false),
                         };
                         let mut interaction_errors = Vec::new();
-                        if let Err(e) = &like_result { interaction_errors.push(*e); }
-                        if let Err(e) = &coin_result { interaction_errors.push(*e); }
-                        if let Err(e) = &fav_result { interaction_errors.push(*e); }
-                        if let Err(e) = &watch_later_result { interaction_errors.push(*e); }
+                        if let Err(e) = &like_result {
+                            interaction_errors.push(*e);
+                        }
+                        if let Err(e) = &coin_result {
+                            interaction_errors.push(*e);
+                        }
+                        if let Err(e) = &fav_result {
+                            interaction_errors.push(*e);
+                        }
+                        if let Err(e) = &watch_later_result {
+                            interaction_errors.push(*e);
+                        }
                         let interaction_error = if interaction_errors.is_empty() {
                             None
                         } else {
@@ -710,7 +740,9 @@ impl NetworkCommand {
             Self::DeleteHistory { .. } => "history_delete",
             Self::LoadArticle { .. } => "article_detail",
             Self::LoadLiveInit { .. } | Self::LoadLiveMore { .. } => "live",
-            Self::LoadVideoDetail { .. } | Self::ProbeVideoStreams { .. } | Self::PreheatStream { .. } => "video_detail",
+            Self::LoadVideoDetail { .. }
+            | Self::ProbeVideoStreams { .. }
+            | Self::PreheatStream { .. } => "video_detail",
             Self::LoadUpPage { .. }
             | Self::LoadUpVideos { .. }
             | Self::LoadSeriesList { .. }
@@ -801,7 +833,12 @@ async fn probe_stream_support(
             // 125 = HDR, 126 = Dolby Vision, 127 = 8K.
             let hdr = data.dash.video.iter().any(|stream| stream.id >= 125);
             let hires = data.dash.audio.iter().any(|stream| stream.id == 30252)
-                || data.dash.flac.as_ref().and_then(|flac| flac.audio.as_ref()).is_some();
+                || data
+                    .dash
+                    .flac
+                    .as_ref()
+                    .and_then(|flac| flac.audio.as_ref())
+                    .is_some();
             (Some(hdr), Some(hires))
         }
         Err(_) => (None, None),
@@ -984,24 +1021,24 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 Err(error) => failed(req_id, "series_list", error),
             }
         }
-            NetworkCommand::LoadSeriesArchives {
+        NetworkCommand::LoadSeriesArchives {
+            req_id,
+            mid,
+            series_id,
+            is_series,
+            page,
+        } => match api_client
+            .get_series_archives(mid, series_id, is_series, page, 30)
+            .await
+        {
+            Ok(data) => NetworkEvent::SeriesArchivesLoaded {
                 req_id,
                 mid,
                 series_id,
                 is_series,
                 page,
-            } => match api_client
-                .get_series_archives(mid, series_id, is_series, page, 30)
-                .await
-            {
-                Ok(data) => NetworkEvent::SeriesArchivesLoaded {
-                    req_id,
-                    mid,
-                    series_id,
-                    is_series,
-                    page,
-                    data,
-                },
+                data,
+            },
             Err(error) => failed(req_id, "series_archives", error),
         },
         NetworkCommand::LoadUpArticles { req_id, mid, page } => {
@@ -1034,18 +1071,20 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 };
                 let total = data.page.count as usize;
                 let empty = data.list.vlist.is_empty();
-                items.extend(data.list.vlist.into_iter().map(|video| PlaylistItem {
-                    bvid: video.bvid,
-                    aid: video.aid,
-                    cid: None,
-                    title: video.title,
-                    uploader_mid: Some(video.mid.unwrap_or(mid)),
-                    duration: video
-                        .length
-                        .as_deref()
-                        .and_then(parse_length_to_seconds)
-                        .or(video.duration),
-                    page: None,
+                items.extend(data.list.vlist.into_iter().map(|video| {
+                    PlaylistItem {
+                        bvid: video.bvid,
+                        aid: video.aid,
+                        cid: None,
+                        title: video.title,
+                        uploader_mid: Some(video.mid.unwrap_or(mid)),
+                        duration: video
+                            .length
+                            .as_deref()
+                            .and_then(parse_length_to_seconds)
+                            .or(video.duration),
+                        page: None,
+                    }
                 }));
                 if empty || items.len() >= total {
                     break;
@@ -1143,7 +1182,9 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 Err(_) => Vec::new(),
             };
             NetworkEvent::FavoriteFoldersRefreshed {
-                req_id, created, collected,
+                req_id,
+                created,
+                collected,
             }
         }
         NetworkCommand::LoadFavoritesContent {
@@ -1255,26 +1296,23 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
         NetworkCommand::LoadNotificationsInit { req_id, feed_type } => {
             match api_client.get_msg_feed(feed_type, 1).await {
                 Ok(items) => {
-                    let unread = api_client.get_msg_unread().await.unwrap_or(
-                        crate::api::msg::UnreadData {
-                            at: 0,
-                            chat: 0,
-                            like: 0,
-                            reply: 0,
-                            sys_msg: 0,
-                        },
-                    );
+                    let unread =
+                        api_client
+                            .get_msg_unread()
+                            .await
+                            .unwrap_or(crate::api::msg::UnreadData {
+                                at: 0,
+                                chat: 0,
+                                like: 0,
+                                reply: 0,
+                                sys_msg: 0,
+                            });
                     NetworkEvent::NotificationsLoaded {
                         req_id,
                         append: false,
                         feed_type,
                         items,
-                        unread: (
-                            unread.reply,
-                            unread.at,
-                            unread.like,
-                            unread.sys_msg,
-                        ),
+                        unread: (unread.reply, unread.at, unread.like, unread.sys_msg),
                     }
                 }
                 Err(e) => failed(req_id, "notifications_init", e),
@@ -1294,12 +1332,10 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
             },
             Err(e) => failed(req_id, "notifications_more", e),
         },
-        NetworkCommand::LoadChatSessions { req_id } => {
-            match api_client.get_msg_sessions().await {
-                Ok(sessions) => NetworkEvent::ChatSessionsLoaded { req_id, sessions },
-                Err(e) => failed(req_id, "chat_sessions", e),
-            }
-        }
+        NetworkCommand::LoadChatSessions { req_id } => match api_client.get_msg_sessions().await {
+            Ok(sessions) => NetworkEvent::ChatSessionsLoaded { req_id, sessions },
+            Err(e) => failed(req_id, "chat_sessions", e),
+        },
         NetworkCommand::LoadChatDetail { req_id, talker_id } => {
             match api_client.get_chat_detail(talker_id).await {
                 Ok(messages) => NetworkEvent::ChatDetailLoaded {
@@ -1363,7 +1399,8 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
         }
         NetworkCommand::LoadMallExpressTrack { req_id, order_id } => {
             let timeout_dur = std::time::Duration::from_secs(10);
-            match tokio::time::timeout(timeout_dur, api_client.get_mall_express_track(order_id)).await
+            match tokio::time::timeout(timeout_dur, api_client.get_mall_express_track(order_id))
+                .await
             {
                 Ok(Ok(express)) => NetworkEvent::MallExpressTrackLoaded {
                     req_id,
@@ -1465,7 +1502,9 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 Err(e) => failed(req_id, "live_more", e),
             }
         }
-        NetworkCommand::LoadVideoDetail { req_id, bvid, aid, .. } => {
+        NetworkCommand::LoadVideoDetail {
+            req_id, bvid, aid, ..
+        } => {
             let video_info = match api_client.get_video_info(&bvid).await {
                 Ok(info) => info,
                 Err(e) => return failed(req_id, "video_detail", e),
@@ -1484,48 +1523,52 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 coin_result,
                 fav_result,
                 watch_later_result,
-            ) =
-                tokio::join!(
-                    async {
-                        match api_client.get_comments(aid, 1).await {
-                            Ok(data) => {
-                                let comments = data.replies.unwrap_or_default();
-                                let has_more = data
-                                    .page
-                                    .map(|p| p.count.unwrap_or(0) > comments.len() as i32)
-                                    .unwrap_or(false);
-                                (comments, has_more)
-                            }
-                            Err(_) => (Vec::new(), false),
+            ) = tokio::join!(
+                async {
+                    match api_client.get_comments(aid, 1).await {
+                        Ok(data) => {
+                            let comments = data.replies.unwrap_or_default();
+                            let has_more = data
+                                .page
+                                .map(|p| p.count.unwrap_or(0) > comments.len() as i32)
+                                .unwrap_or(false);
+                            (comments, has_more)
                         }
-                    },
-                    async { api_client.get_related_videos(&bvid).await.unwrap_or_default() },
-                    async { probe_stream_support(&api_client, &bvid, cid).await },
-                    async {
-                        match api_client.get_video_like_status(&bvid).await {
-                            Ok(v) => Ok(v),
-                            Err(_) => Err("点赞状态: 需要登录"),
-                        }
-                    },
-                    async {
-                        match api_client.get_video_coin_status(&bvid).await {
-                            Ok(v) => Ok(v),
-                            Err(_) => Err("投币状态: 需要登录"),
-                        }
-                    },
-                    async {
-                        match api_client.get_default_favorite_folder(aid).await {
-                            Ok((mid, fav)) => Ok((mid, fav)),
-                            Err(_) => Err("收藏状态: 需要登录"),
-                        }
-                    },
-                    async {
-                        match api_client.get_watch_later_status(aid).await {
-                            Ok(v) => Ok(v),
-                            Err(_) => Err("稍后再看状态: 需要登录"),
-                        }
-                    },
-                );
+                        Err(_) => (Vec::new(), false),
+                    }
+                },
+                async {
+                    api_client
+                        .get_related_videos(&bvid)
+                        .await
+                        .unwrap_or_default()
+                },
+                async { probe_stream_support(&api_client, &bvid, cid).await },
+                async {
+                    match api_client.get_video_like_status(&bvid).await {
+                        Ok(v) => Ok(v),
+                        Err(_) => Err("点赞状态: 需要登录"),
+                    }
+                },
+                async {
+                    match api_client.get_video_coin_status(&bvid).await {
+                        Ok(v) => Ok(v),
+                        Err(_) => Err("投币状态: 需要登录"),
+                    }
+                },
+                async {
+                    match api_client.get_default_favorite_folder(aid).await {
+                        Ok((mid, fav)) => Ok((mid, fav)),
+                        Err(_) => Err("收藏状态: 需要登录"),
+                    }
+                },
+                async {
+                    match api_client.get_watch_later_status(aid).await {
+                        Ok(v) => Ok(v),
+                        Err(_) => Err("稍后再看状态: 需要登录"),
+                    }
+                },
+            );
             let liked = like_result.unwrap_or(false);
             let coined = coin_result.unwrap_or(0);
             let in_watch_later = watch_later_result.unwrap_or(false);
@@ -1534,10 +1577,18 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 Err(_) => (None, false),
             };
             let mut interaction_errors = Vec::new();
-            if let Err(e) = &like_result { interaction_errors.push(*e); }
-            if let Err(e) = &coin_result { interaction_errors.push(*e); }
-            if let Err(e) = &fav_result { interaction_errors.push(*e); }
-            if let Err(e) = &watch_later_result { interaction_errors.push(*e); }
+            if let Err(e) = &like_result {
+                interaction_errors.push(*e);
+            }
+            if let Err(e) = &coin_result {
+                interaction_errors.push(*e);
+            }
+            if let Err(e) = &fav_result {
+                interaction_errors.push(*e);
+            }
+            if let Err(e) = &watch_later_result {
+                interaction_errors.push(*e);
+            }
             let interaction_error = if interaction_errors.is_empty() {
                 None
             } else {
@@ -1627,12 +1678,18 @@ async fn handle_command(api_client: Arc<ApiClient>, command: NetworkCommand) -> 
                 Err(e) => failed(req_id, "bangumi_follow_list", e),
             }
         }
-        NetworkCommand::LoadBangumiSearch { req_id, keyword, page } => {
-            match api_client.search_bangumi(&keyword, page).await {
-                Ok(items) => NetworkEvent::BangumiSearchLoaded { req_id, keyword, items },
-                Err(e) => failed(req_id, "bangumi_search", e),
-            }
-        }
+        NetworkCommand::LoadBangumiSearch {
+            req_id,
+            keyword,
+            page,
+        } => match api_client.search_bangumi(&keyword, page).await {
+            Ok(items) => NetworkEvent::BangumiSearchLoaded {
+                req_id,
+                keyword,
+                items,
+            },
+            Err(e) => failed(req_id, "bangumi_search", e),
+        },
         NetworkCommand::LoadBangumiDetail { req_id, season_id } => {
             match api_client.get_bangumi_season(season_id).await {
                 Ok(season) => {

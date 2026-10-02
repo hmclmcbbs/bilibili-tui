@@ -226,7 +226,9 @@ impl DynamicPage {
     }
 
     pub fn set_filter(&mut self, filter: Option<String>) {
-        let filter = filter.map(|f| f.trim().to_string()).filter(|f| !f.is_empty());
+        let filter = filter
+            .map(|f| f.trim().to_string())
+            .filter(|f| !f.is_empty());
         self.filter_text = filter;
         self.apply_filter();
     }

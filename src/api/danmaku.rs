@@ -68,10 +68,7 @@ struct PositionedPayload {
 ///   6: rotate-y degrees (modern) or rotation (legacy)
 ///   7: end x    8: end y    9: duration (ms)
 ///   10: delay    11: border    12: font family    13: unused
-fn parse_positioned_payload(
-    payload: &str,
-    p_font_size: f64,
-) -> Option<PositionedPayload> {
+fn parse_positioned_payload(payload: &str, p_font_size: f64) -> Option<PositionedPayload> {
     let payload = payload.trim();
     if !payload.starts_with('[') || !payload.ends_with(']') {
         return None;
@@ -132,9 +129,15 @@ fn parse_positioned_payload(
     // field 6, and the color only in the p attribute. The p-attribute color
     // is authoritative in both cases, so only the rotation slot changes.
     let rotation: f64 = if per_mille {
-        fields.get(6).and_then(|value| value.parse().ok()).unwrap_or(0.0)
+        fields
+            .get(6)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.0)
     } else {
-        fields.get(5).and_then(|value| value.parse().ok()).unwrap_or(0.0)
+        fields
+            .get(5)
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0.0)
     };
     // Field 9 is the display duration in milliseconds. Some payloads leave
     // it at 0 and carry the duration in field 3 (seconds, e.g. 0.3 = 300 ms),
@@ -151,10 +154,7 @@ fn parse_positioned_payload(
         // but field 9 = 650ms). Taking field 9 alone truncates the comment to
         // a blink. Use the LARGER of the two so a malformed field 9 cannot
         // shorten the on-screen lifetime below the official value.
-        let from_f9 = fields[9]
-            .parse::<i64>()
-            .ok()
-            .filter(|&ms| ms > 0);
+        let from_f9 = fields[9].parse::<i64>().ok().filter(|&ms| ms > 0);
         let from_f3 = fields
             .get(3)
             .and_then(|value| value.parse::<f64>().ok())
@@ -172,7 +172,11 @@ fn parse_positioned_payload(
     // font size for modern payloads lives in the p attribute (p[2], e.g. 71);
     // legacy per-mille payloads carry it in field 3 (e.g. 10).
     let size: f64 = if per_mille {
-        fields[3].parse().ok().filter(|size: &f64| *size > 0.0).unwrap_or(0.0)
+        fields[3]
+            .parse()
+            .ok()
+            .filter(|size: &f64| *size > 0.0)
+            .unwrap_or(0.0)
     } else {
         p_font_size
     };
@@ -186,14 +190,17 @@ fn parse_positioned_payload(
     let (alpha, alpha_to): (Option<f64>, Option<f64>) = if per_mille {
         (None, None)
     } else {
-        fields.get(2).and_then(|value| {
-            let mut parts = value.split('-');
-            let from = parts.next()?.trim().parse::<f64>().ok()?;
-            let to = parts
-                .next()
-                .map(|part| part.trim().parse::<f64>().unwrap_or(from));
-            Some((Some(from), to))
-        }).unwrap_or((None, None))
+        fields
+            .get(2)
+            .and_then(|value| {
+                let mut parts = value.split('-');
+                let from = parts.next()?.trim().parse::<f64>().ok()?;
+                let to = parts
+                    .next()
+                    .map(|part| part.trim().parse::<f64>().unwrap_or(from));
+                Some((Some(from), to))
+            })
+            .unwrap_or((None, None))
     };
     // Field 11 is the border flag (0/1 or false/true) in modern BAS.
     let border: Option<bool> = fields.get(11).and_then(|value| {
@@ -213,9 +220,7 @@ fn parse_positioned_payload(
     // Keep `/n` as the newline marker. The Lua renderer escapes the text for
     // ASS first and converts `/n` to `\N` afterwards, so a backslash never
     // survives into the ASS line (escaping `\N` would print a literal `\N`).
-    let text = fields[4]
-        .replace("\\n", "/n")
-        .replace('\n', "/n");
+    let text = fields[4].replace("\\n", "/n").replace('\n', "/n");
     let font = fields
         .get(12)
         .map(|value| value.replace(['\\', '"'], "").trim().to_string())
@@ -539,7 +544,8 @@ mod tests {
 
     #[test]
     fn parses_positioned_danmaku_payload() {
-        let payload = r#"[0.32,0.11,"1-1",1.5,"真/n是/n毫/n无/n道/n理",0,0,0.32,0.11,500,0,true,"黑体",1]"#;
+        let payload =
+            r#"[0.32,0.11,"1-1",1.5,"真/n是/n毫/n无/n道/n理",0,0,0.32,0.11,500,0,true,"黑体",1]"#;
         let parsed = parse_xml(&format!(
             r#"<i><d p="53.91400,7,70,16777215,1514624467,1,b82a51a3,4141681672,10">{payload}</d></i>"#
         ))
@@ -587,7 +593,14 @@ mod tests {
             match (item.x, item.y) {
                 (Some(x), Some(y)) => eprintln!(
                     "[{i}] t={:.2} x={x:.4} y={y:.4} x2={:?} y2={:?} rot={:?} size={:?} dur={:?} font={:?} text={}",
-                    item.time, item.x2, item.y2, item.rotation, item.size, item.duration_ms, item.font_family, item.text
+                    item.time,
+                    item.x2,
+                    item.y2,
+                    item.rotation,
+                    item.size,
+                    item.duration_ms,
+                    item.font_family,
+                    item.text
                 ),
                 _ => {
                     failed += 1;
@@ -638,7 +651,8 @@ mod tests {
         rolling.extend(field_bytes(7, b"hello"));
 
         // positioned: progress=53000ms, mode=7, content=BAS array
-        let payload = r#"[0.32,0.11,"1-1",1.5,"真/n是/n毫/n无/n道/n理",0,0,0.32,0.11,500,0,true,"黑体",1]"#;
+        let payload =
+            r#"[0.32,0.11,"1-1",1.5,"真/n是/n毫/n无/n道/n理",0,0,0.32,0.11,500,0,true,"黑体",1]"#;
         let mut positioned = Vec::new();
         positioned.extend(field_varint(2, 53_000));
         positioned.extend(field_varint(3, 7));

@@ -392,7 +392,12 @@ impl App {
                     return;
                 }
                 let (preheat_cid, preheat_aid, preheat_bvid, preheat_playback) = {
-                    let mut t = (0i64, 0i64, String::new(), crate::domain::playback::PlaybackOptions::default());
+                    let mut t = (
+                        0i64,
+                        0i64,
+                        String::new(),
+                        crate::domain::playback::PlaybackOptions::default(),
+                    );
                     if let Page::VideoDetail(page) = &self.current_page {
                         t.0 = page.video_info.as_ref().map(|v| v.cid).unwrap_or(0);
                         t.1 = page.aid;
@@ -617,21 +622,17 @@ impl App {
                     return;
                 }
                 if let Page::Favorites(page) = &mut self.current_page {
-                    if let Some(media_id) =
-                        page.apply_folder_list_refresh(created, collected)
-                    {
+                    if let Some(media_id) = page.apply_folder_list_refresh(created, collected) {
                         // Auto-navigate to the newly created folder
                         let req_id = self.next_request_id("favorites_content");
-                        self.send_network_command(
-                            network::NetworkCommand::LoadFavoritesContent {
-                                req_id,
-                                source: crate::api::favorite::FavoriteSource::Created {
-                                    media_id,
-                                    title: String::new(),
-                                },
-                                page: 1,
+                        self.send_network_command(network::NetworkCommand::LoadFavoritesContent {
+                            req_id,
+                            source: crate::api::favorite::FavoriteSource::Created {
+                                media_id,
+                                title: String::new(),
                             },
-                        );
+                            page: 1,
+                        });
                     }
                 }
             }
@@ -731,7 +732,11 @@ impl App {
                     page.set_follow_items(items);
                 }
             }
-            network::NetworkEvent::BangumiSearchLoaded { req_id, keyword, items } => {
+            network::NetworkEvent::BangumiSearchLoaded {
+                req_id,
+                keyword,
+                items,
+            } => {
                 if !self.is_latest_request("bangumi_search", req_id) {
                     return;
                 }

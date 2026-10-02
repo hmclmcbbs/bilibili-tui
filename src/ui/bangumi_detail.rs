@@ -275,10 +275,16 @@ impl BangumiDetailPage {
                 } else {
                     "[f] 未追番"
                 };
-                let follow_color = if followed { theme.success } else { theme.fg_secondary };
+                let follow_color = if followed {
+                    theme.success
+                } else {
+                    theme.fg_secondary
+                };
                 stats_spans.push(Span::styled(
                     follow_text,
-                    Style::default().fg(follow_color).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(follow_color)
+                        .add_modifier(Modifier::BOLD),
                 ));
                 if let Some(msg) = &self.follow_msg {
                     stats_spans.push(Span::styled(
@@ -486,11 +492,7 @@ impl Component for BangumiDetailPage {
                     theme.fg_accent,
                 ),
                 ("f".into(), "追番/取消".into(), theme.info),
-                (
-                    "x".into(),
-                    self.download_quality_label(),
-                    theme.fg_accent,
-                ),
+                ("x".into(), self.download_quality_label(), theme.fg_accent),
                 (keys.confirm.clone(), "播放".into(), theme.success),
                 (keys.back.clone(), "返回".into(), theme.info),
             ]
@@ -565,8 +567,10 @@ impl Component for BangumiDetailPage {
                     }
                 }
                 KeyCode::Enter => {
-                    self.download_quality =
-                        Self::quality_options().get(self.download_quality_index).copied().flatten();
+                    self.download_quality = Self::quality_options()
+                        .get(self.download_quality_index)
+                        .copied()
+                        .flatten();
                     self.download_quality_picker = false;
                 }
                 _ => {}
@@ -617,7 +621,8 @@ impl Component for BangumiDetailPage {
         }
         if key == KeyCode::Char('D') {
             // Download all selected episodes, or current if nothing selected.
-            let items: Vec<crate::application::DownloadItem> = if self.download_selection.is_empty() {
+            let items: Vec<crate::application::DownloadItem> = if self.download_selection.is_empty()
+            {
                 self.flat_episodes
                     .get(self.selected_episode)
                     .map(|ep| crate::application::DownloadItem {

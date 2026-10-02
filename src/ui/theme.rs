@@ -70,7 +70,6 @@ fn parse_hex(s: &str) -> Option<Color> {
     None
 }
 
-
 #[derive(Debug, Clone)]
 pub struct Theme {
     pub bg_primary: Color,
@@ -106,11 +105,9 @@ impl Default for Theme {
     fn default() -> Self {
         Self::load_or_default(DEFAULT_THEME_ID).0
     }
-
 }
 
 impl Theme {
-
     /// Matugen color file path (`~/.config/bilibili-tui/matugen.json`).
     pub fn matugen_path() -> std::path::PathBuf {
         let base = dirs::config_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
@@ -128,8 +125,7 @@ impl Theme {
     fn from_matugen_file() -> Option<Self> {
         let path = Self::matugen_path();
         let text = std::fs::read_to_string(path).ok()?;
-        let map: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&text).ok()?;
+        let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text).ok()?;
         let c = |key: &str, fallback: Color| -> Color {
             map.get(key)
                 .and_then(|v| v.as_str())

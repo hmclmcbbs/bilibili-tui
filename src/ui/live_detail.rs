@@ -367,7 +367,7 @@ impl LiveDetailPage {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(10),             // Content
+                Constraint::Min(10),               // Content
                 Constraint::Length(bottom_height), // Bottom (input/hints)
             ])
             .split(area);
@@ -435,8 +435,8 @@ impl LiveDetailPage {
             if let Some(ref fb) = self.feedback {
                 hint_items.push(("".to_string(), format!(" | {fb}"), theme.fg_accent));
             }
-            let hints = Paragraph::new(shortcut_footer(theme, hint_items))
-                .alignment(Alignment::Center);
+            let hints =
+                Paragraph::new(shortcut_footer(theme, hint_items)).alignment(Alignment::Center);
             frame.render_widget(hints, chunks[1]);
         }
     }

@@ -218,7 +218,13 @@ pub fn parse_chat_message(value: &serde_json::Value) -> Option<ChatMessage> {
 fn parse_video_meta(
     msg_type: i32,
     raw: &str,
-) -> (Option<String>, Option<String>, Option<i64>, Option<i64>, Option<String>) {
+) -> (
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+) {
     if msg_type != 11 && msg_type != 10 {
         return (None, None, None, None, None);
     }
@@ -264,20 +270,30 @@ fn parse_video_meta(
         let up = obj
             .get("modules")
             .and_then(|m| m.as_array())
-            .and_then(|a| a.iter().find(|modu| {
-                modu.get("title").and_then(|t| t.as_str()).unwrap_or("") == "UP主"
-            }))
+            .and_then(|a| {
+                a.iter()
+                    .find(|modu| modu.get("title").and_then(|t| t.as_str()).unwrap_or("") == "UP主")
+            })
             .and_then(|modu| modu.get("detail"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         let desc = up.map(|u| format!("UP主: {}", u));
         return (title, cover, None, None, desc);
     }
-    let title = obj.get("title").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let cover = obj.get("cover").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let title = obj
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let cover = obj
+        .get("cover")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let view = obj.get("view").and_then(|v| v.as_i64());
     let danmaku = obj.get("danmaku").and_then(|v| v.as_i64());
-    let desc = obj.get("desc").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let desc = obj
+        .get("desc")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     (title, cover, view, danmaku, desc)
 }
 
@@ -330,8 +346,16 @@ pub fn session_last_text(msg: &ChatMessage) -> String {
                     v.get("content")
                         .and_then(|x| x.as_str())
                         .filter(|s| !s.is_empty())
-                        .or_else(|| v.get("text").and_then(|x| x.as_str()).filter(|s| !s.is_empty()))
-                        .or_else(|| v.get("title").and_then(|x| x.as_str()).filter(|s| !s.is_empty()))
+                        .or_else(|| {
+                            v.get("text")
+                                .and_then(|x| x.as_str())
+                                .filter(|s| !s.is_empty())
+                        })
+                        .or_else(|| {
+                            v.get("title")
+                                .and_then(|x| x.as_str())
+                                .filter(|s| !s.is_empty())
+                        })
                 };
                 if let Some(s) = readable {
                     return s.to_string();
@@ -366,8 +390,7 @@ fn parse_message_links(msg_type: i32, raw: &str) -> (Option<String>, Option<Stri
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .or_else(|| {
-            jump
-                .as_deref()
+            jump.as_deref()
                 .and_then(|u| extract_bvid_from_uri(u))
                 .map(|s| s.to_string())
         })
@@ -401,9 +424,13 @@ fn extract_readable_fallback(raw: &str) -> Option<String> {
     ] {
         let Some(idx) = raw.find(key) else { continue };
         let rest = &raw[idx + key.len()..];
-        let Some(colon) = rest.find(':') else { continue };
+        let Some(colon) = rest.find(':') else {
+            continue;
+        };
         let after = rest[colon + 1..].trim_start();
-        let Some(start) = after.strip_prefix('"') else { continue };
+        let Some(start) = after.strip_prefix('"') else {
+            continue;
+        };
         let bytes = start.as_bytes();
         let mut end = 0;
         while end < bytes.len() {
@@ -627,7 +654,9 @@ fn readable_or_placeholder(raw: &str) -> String {
 /// Parse a raw session value.
 pub fn parse_session(value: &serde_json::Value) -> Option<ChatSession> {
     let raw: RawSession = serde_json::from_value(value.clone()).ok()?;
-    let talker_id = raw.talker_id.or_else(|| raw.talker_info.as_ref().and_then(|t| t.uid))?;
+    let talker_id = raw
+        .talker_id
+        .or_else(|| raw.talker_info.as_ref().and_then(|t| t.uid))?;
     let last_msg = raw.last_msg.as_ref().and_then(parse_chat_message);
     let uname = raw
         .account_info
@@ -743,23 +772,22 @@ pub fn parse_system_notify(value: &serde_json::Value) -> Option<NotificationItem
         .and_then(|c| serde_json::from_str::<serde_json::Value>(c).ok())
         .and_then(|v| v.get("web").and_then(|w| w.as_str()).map(|s| s.to_string()))
         .or(entry.content.clone());
-    let ctime = entry
-        .time_at
-        .as_deref()
-        .and_then(|t| {
-            // "2026-03-16 19:00:00" -> unix seconds (Beijing time assumed local)
-            let s = t.trim();
-            let mut parts = s.split(['-', ' ', ':']).filter_map(|p| p.parse::<i64>().ok());
-            let (y, mo, d, h, mi, sec) = (
-                parts.next()?,
-                parts.next()?,
-                parts.next()?,
-                parts.next().unwrap_or(0),
-                parts.next().unwrap_or(0),
-                parts.next().unwrap_or(0),
-            );
-            Some(days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + sec - 8 * 3600)
-        });
+    let ctime = entry.time_at.as_deref().and_then(|t| {
+        // "2026-03-16 19:00:00" -> unix seconds (Beijing time assumed local)
+        let s = t.trim();
+        let mut parts = s
+            .split(['-', ' ', ':'])
+            .filter_map(|p| p.parse::<i64>().ok());
+        let (y, mo, d, h, mi, sec) = (
+            parts.next()?,
+            parts.next()?,
+            parts.next()?,
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+        );
+        Some(days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + sec - 8 * 3600)
+    });
     Some(NotificationItem {
         id: entry.id.unwrap_or(0),
         notif_type: 6,
@@ -901,8 +929,7 @@ pub fn parse_feed_item(value: &serde_json::Value, feed_type: i32) -> Option<Noti
     // Prefer `user.nickname` (actual API field), fall back to `user.uname`,
     // then to the first entry of `users` (like feed).
     let user = entry.user.as_ref().or_else(|| entry.users.first());
-    let user_name = user
-        .and_then(|u| u.nickname.clone().or_else(|| u.uname.clone()));
+    let user_name = user.and_then(|u| u.nickname.clone().or_else(|| u.uname.clone()));
     let user_mid = user.and_then(|u| u.mid);
     let message = entry
         .reply
@@ -1018,14 +1045,20 @@ mod tests {
             "timestamp": 1783679401,
         }))
         .expect("message parses");
-        assert!(msg.is_video_share(), "reserve notice should be a video card");
+        assert!(
+            msg.is_video_share(),
+            "reserve notice should be a video card"
+        );
         assert_eq!(msg.bvid.as_deref(), Some("BV1akMq6mEos"));
         assert_eq!(
             msg.video_title.as_deref(),
             Some("Bili_Board术力口周榜第113期2026年8月5日第31周")
         );
         assert!(msg.video_cover.is_some());
-        assert_eq!(session_last_text(&msg), "[视频] Bili_Board术力口周榜第113期2026年8月5日第31周");
+        assert_eq!(
+            session_last_text(&msg),
+            "[视频] Bili_Board术力口周榜第113期2026年8月5日第31周"
+        );
     }
 
     #[test]
@@ -1058,7 +1091,10 @@ mod tests {
         }))
         .expect("message parses");
         assert_eq!(msg.content, "对方主动回复或关注你前，最多发送1条信息");
-        assert_eq!(session_last_text(&msg), "对方主动回复或关注你前，最多发送1条信息");
+        assert_eq!(
+            session_last_text(&msg),
+            "对方主动回复或关注你前，最多发送1条信息"
+        );
     }
 
     #[test]
@@ -1091,7 +1127,10 @@ mod tests {
         let item = parse_feed_item(&raw, 2).expect("at item parses");
         assert_eq!(item.user_name.as_deref(), Some("哔哩艺术社"));
         assert_eq!(item.message.as_deref(), Some("@Folk15305"));
-        assert_eq!(item.title.as_deref(), Some("【小画家专属绘画礼包福利合集】"));
+        assert_eq!(
+            item.title.as_deref(),
+            Some("【小画家专属绘画礼包福利合集】")
+        );
     }
 
     #[test]
@@ -1143,11 +1182,12 @@ mod tests {
         });
         let item = parse_system_notify(&raw).expect("sys notify parses");
         assert_eq!(item.title.as_deref(), Some("《哔哩哔哩隐私政策》修订通知"));
-        assert!(item
-            .message
-            .as_deref()
-            .map(|m| m.contains("哔哩哔哩隐私政策"))
-            .unwrap_or(false));
+        assert!(
+            item.message
+                .as_deref()
+                .map(|m| m.contains("哔哩哔哩隐私政策"))
+                .unwrap_or(false)
+        );
         assert!(item.ctime.unwrap_or(0) > 0);
     }
 }

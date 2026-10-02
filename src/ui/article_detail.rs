@@ -245,10 +245,7 @@ impl ArticleDetailPage {
                         );
                     } else if trimmed.starts_with("```") {
                         // 代码块（去掉首尾 ``` 围栏）
-                        let code = text
-                            .trim_matches('`')
-                            .trim_matches('\n')
-                            .trim();
+                        let code = text.trim_matches('`').trim_matches('\n').trim();
                         frame.render_widget(
                             Paragraph::new(code)
                                 .wrap(Wrap { trim: false })
@@ -405,11 +402,7 @@ impl ArticleDetailPage {
                 y += msg_h;
             }
             for &img_idx in self.comment_images.get(ci).into_iter().flatten() {
-                let img_url = self
-                    .image_urls
-                    .get(img_idx)
-                    .cloned()
-                    .unwrap_or_default();
+                let img_url = self.image_urls.get(img_idx).cloned().unwrap_or_default();
                 let h = 14u16.min(inner.y + inner.height - y);
                 if h == 0 {
                     break;
@@ -547,7 +540,9 @@ impl Component for ArticleDetailPage {
 }
 
 async fn download_image(url: &str) -> Option<DynamicImage> {
-    crate::infrastructure::image_cache::instance().get(url).await
+    crate::infrastructure::image_cache::instance()
+        .get(url)
+        .await
 }
 
 fn article_block_height(block: &ArticleBlock, width: u16) -> u16 {

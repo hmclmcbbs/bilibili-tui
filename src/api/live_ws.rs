@@ -324,12 +324,7 @@ fn parse_danmu_msg(info: &serde_json::Value) -> Option<LiveMessage> {
     let uname = user_arr.get(1)?.as_str().unwrap_or("").to_string();
 
     // info[0][1] = mode; info[0][3] = color (decimal)
-    let mode = info_arr
-        .first()?
-        .as_array()?
-        .get(1)?
-        .as_i64()
-        .unwrap_or(1) as i32;
+    let mode = info_arr.first()?.as_array()?.get(1)?.as_i64().unwrap_or(1) as i32;
     let color = info_arr
         .first()?
         .as_array()?

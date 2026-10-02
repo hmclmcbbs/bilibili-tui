@@ -104,10 +104,7 @@ pub struct App {
 
     /// Cached home/feed pages (one per HomeFeed) to avoid refresh when
     /// switching between sidebar items.
-    pub cached_home_feeds: std::collections::HashMap<
-        crate::api::recommend::HomeFeed,
-        HomePage,
-    >,
+    pub cached_home_feeds: std::collections::HashMap<crate::api::recommend::HomeFeed, HomePage>,
     /// Cached bangumi page to avoid refresh when switching tabs
     pub cached_bangumi: Option<BangumiPage>,
     network_command_tx: mpsc::Sender<network::NetworkCommand>,
@@ -124,7 +121,14 @@ impl App {
             ApiClient::new()
         };
         let api_client = Arc::new(api_client);
-        let preheat_store = std::sync::Arc::new(tokio::sync::Mutex::new(Option::<(String, i64, crate::player::proxy::MediaProxy, crate::api::cdn::PlayUrlData)>::None));
+        let preheat_store = std::sync::Arc::new(tokio::sync::Mutex::new(
+            Option::<(
+                String,
+                i64,
+                crate::player::proxy::MediaProxy,
+                crate::api::cdn::PlayUrlData,
+            )>::None,
+        ));
         let bridge = network::start_network_worker(api_client.clone(), preheat_store.clone());
         let (playback_event_tx, playback_event_rx) = mpsc::channel();
 
@@ -143,9 +147,8 @@ impl App {
         // Always start from home. Login is now an optional flow.
         let current_page = Page::Home(HomePage::new());
 
-        let avatar_picker = Arc::new(
-            Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()),
-        );
+        let avatar_picker =
+            Arc::new(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()));
         let (avatar_tx, avatar_rx) = tokio::sync::mpsc::channel(4);
 
         Self {

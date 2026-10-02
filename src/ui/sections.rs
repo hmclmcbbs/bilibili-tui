@@ -129,7 +129,9 @@ impl SectionPage {
             .border_type(ratatui::widgets::BorderType::Rounded)
             .title(Span::styled(
                 " 分区 ",
-                Style::default().fg(theme.fg_accent).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme.fg_accent)
+                    .add_modifier(Modifier::BOLD),
             ));
         let list = List::new(items)
             .block(block)
@@ -218,7 +220,10 @@ impl Component for SectionPage {
                 theme,
                 [
                     (
-                        format!("{}/{}, {}/{}", keys.nav_up, keys.nav_down, keys.page_up, keys.page_down),
+                        format!(
+                            "{}/{}, {}/{}",
+                            keys.nav_up, keys.nav_down, keys.page_up, keys.page_down
+                        ),
                         "选择/翻页".into(),
                         theme.fg_accent,
                     ),

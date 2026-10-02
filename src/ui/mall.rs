@@ -116,18 +116,13 @@ impl MallPage {
         self.message = Some("正在获取物流信息...".to_string());
     }
 
-    pub fn apply_express(
-        &mut self,
-        order_id: i64,
-        express: Option<MallExpressSummary>,
-    ) {
+    pub fn apply_express(&mut self, order_id: i64, express: Option<MallExpressSummary>) {
         self.express_loading.remove(&order_id);
         self.express_errors.remove(&order_id);
         self.message = match &express {
-            Some(e) if !e.com_v.is_empty() && !e.sno.is_empty() => Some(format!(
-                "物流: {} {} ({})",
-                e.com_v, e.sno, e.status_v
-            )),
+            Some(e) if !e.com_v.is_empty() && !e.sno.is_empty() => {
+                Some(format!("物流: {} {} ({})", e.com_v, e.sno, e.status_v))
+            }
             Some(_) => Some("该订单暂无物流信息".to_string()),
             None => Some("该订单暂无物流信息".to_string()),
         };
@@ -150,10 +145,9 @@ impl MallPage {
         self.track_loading.remove(&order_id);
         self.track_errors.remove(&order_id);
         self.message = match &track {
-            Some(t) if !t.traces.is_empty() => Some(format!(
-                "运输过程: {} 条物流记录",
-                t.traces.len()
-            )),
+            Some(t) if !t.traces.is_empty() => {
+                Some(format!("运输过程: {} 条物流记录", t.traces.len()))
+            }
             Some(_) => Some("该订单暂无运输过程".to_string()),
             None => Some("该订单暂无运输过程".to_string()),
         };
@@ -207,10 +201,7 @@ impl MallPage {
         }
     }
 
-    async fn download_product_image(
-        url: &str,
-        picker: &Arc<Picker>,
-    ) -> Option<StatefulProtocol> {
+    async fn download_product_image(url: &str, picker: &Arc<Picker>) -> Option<StatefulProtocol> {
         // Mall logo URLs are scheme-less (`//i0.hdslb.com/...`); reqwest needs a
         // full URL, so prepend `https:` when the protocol is missing.
         let full_url = if url.starts_with("//") {
@@ -271,38 +262,34 @@ impl MallPage {
         let mut lines: Vec<Line> = Vec::new();
         if let Some(order) = self.selected_order() {
             let order_id = order.order_id;
-            lines.push(Line::from(vec![
-                Span::styled(
-                    if order.shop_name.is_empty() {
-                        format!("订单 {}", order.order_id)
-                    } else {
-                        order.shop_name.clone()
-                    },
-                    Style::default().fg(theme.bilibili_pink).add_modifier(Modifier::BOLD),
-                ),
-            ]));
+            lines.push(Line::from(vec![Span::styled(
+                if order.shop_name.is_empty() {
+                    format!("订单 {}", order.order_id)
+                } else {
+                    order.shop_name.clone()
+                },
+                Style::default()
+                    .fg(theme.bilibili_pink)
+                    .add_modifier(Modifier::BOLD),
+            )]));
             // Show the first product name for this order.
-            if let Some(row) = order
-                .rows
-                .iter()
-                .find(|row| !row.name.is_empty())
-            {
+            if let Some(row) = order.rows.iter().find(|row| !row.name.is_empty()) {
                 lines.push(Line::from(vec![
                     Span::styled("商品: ", Style::default().fg(theme.fg_secondary)),
                     Span::styled(
                         format!("{} x{}", row.name, row.count.max(1)),
-                        Style::default().fg(theme.fg_primary).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme.fg_primary)
+                            .add_modifier(Modifier::BOLD),
                     ),
                 ]));
             }
             if let Some(Some(track)) = self.tracks.get(&order_id) {
                 if !track.com_v.is_empty() || !track.sno.is_empty() {
-                    lines.push(Line::from(vec![
-                        Span::styled(
-                            format!("快递: {}  单号: {}", track.com_v, track.sno),
-                            Style::default().fg(theme.fg_secondary),
-                        ),
-                    ]));
+                    lines.push(Line::from(vec![Span::styled(
+                        format!("快递: {}  单号: {}", track.com_v, track.sno),
+                        Style::default().fg(theme.fg_secondary),
+                    )]));
                 }
                 lines.push(Line::from(""));
                 if track.traces.is_empty() {
@@ -428,7 +415,13 @@ impl Component for MallPage {
                 .saturating_sub(list_height.saturating_sub(1))
                 .min(self.orders.len().saturating_sub(1));
             let mut lines: Vec<Line> = Vec::new();
-            for (idx, order) in self.orders.iter().enumerate().skip(scroll_start).take(list_height) {
+            for (idx, order) in self
+                .orders
+                .iter()
+                .enumerate()
+                .skip(scroll_start)
+                .take(list_height)
+            {
                 let selected = idx == self.selected;
                 let name = if order.shop_name.is_empty() {
                     format!("订单 {}", order.order_id)
@@ -454,22 +447,13 @@ impl Component for MallPage {
                             format!(" [{status_name}] "),
                             Style::default().fg(theme.info),
                         ),
-                        Span::styled(
-                            format!(" {money} "),
-                            Style::default().fg(theme.fg_accent),
-                        ),
-                        Span::styled(
-                            format!(" {time}"),
-                            Style::default().fg(theme.fg_secondary),
-                        ),
+                        Span::styled(format!(" {money} "), Style::default().fg(theme.fg_accent)),
+                        Span::styled(format!(" {time}"), Style::default().fg(theme.fg_secondary)),
                     ])
                     .style(Style::default().bg(theme.selection_bg))
                 } else {
                     Line::from(vec![
-                        Span::styled(
-                            format!(" {name} "),
-                            Style::default().fg(theme.fg_primary),
-                        ),
+                        Span::styled(format!(" {name} "), Style::default().fg(theme.fg_primary)),
                         Span::styled(
                             format!(" [{status_name}] "),
                             Style::default().fg(theme.fg_secondary),
@@ -478,10 +462,7 @@ impl Component for MallPage {
                             format!(" {money} "),
                             Style::default().fg(theme.fg_secondary),
                         ),
-                        Span::styled(
-                            format!(" {time}"),
-                            Style::default().fg(theme.fg_secondary),
-                        ),
+                        Span::styled(format!(" {time}"), Style::default().fg(theme.fg_secondary)),
                     ])
                 };
                 lines.push(line);
@@ -499,15 +480,20 @@ impl Component for MallPage {
                     .find(|row| !row.logo.is_empty() || !row.name.is_empty());
                 if let Some(row) = product {
                     if !row.name.is_empty() {
-                        expr_lines.push(Line::from(vec![
-                            Span::styled(
-                                format!("商品: {} x{}", row.name, row.count.max(1)),
-                                Style::default().fg(theme.fg_primary).add_modifier(Modifier::BOLD),
-                            ),
-                        ]));
+                        expr_lines.push(Line::from(vec![Span::styled(
+                            format!("商品: {} x{}", row.name, row.count.max(1)),
+                            Style::default()
+                                .fg(theme.fg_primary)
+                                .add_modifier(Modifier::BOLD),
+                        )]));
                     }
                 }
-                if self.express_loading.get(&order_id).copied().unwrap_or(false) {
+                if self
+                    .express_loading
+                    .get(&order_id)
+                    .copied()
+                    .unwrap_or(false)
+                {
                     expr_lines.push(Line::from(Span::styled(
                         "物流加载中...",
                         Style::default().fg(theme.fg_secondary),
@@ -520,33 +506,51 @@ impl Component for MallPage {
                 } else if let Some(Some(expr)) = self.expresses.get(&order_id) {
                     expr_lines.push(Line::from(Span::styled(
                         "── 物流信息 ──",
-                        Style::default().fg(theme.bilibili_pink).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(theme.bilibili_pink)
+                            .add_modifier(Modifier::BOLD),
                     )));
                     expr_lines.push(Line::from(vec![
                         Span::styled("快递公司: ", Style::default().fg(theme.fg_secondary)),
                         Span::styled(
-                            if expr.com_v.is_empty() { "—".to_string() } else { expr.com_v.clone() },
+                            if expr.com_v.is_empty() {
+                                "—".to_string()
+                            } else {
+                                expr.com_v.clone()
+                            },
                             Style::default().fg(theme.fg_primary),
                         ),
                     ]));
                     expr_lines.push(Line::from(vec![
                         Span::styled("快递单号: ", Style::default().fg(theme.fg_secondary)),
                         Span::styled(
-                            if expr.sno.is_empty() { "—".to_string() } else { expr.sno.clone() },
+                            if expr.sno.is_empty() {
+                                "—".to_string()
+                            } else {
+                                expr.sno.clone()
+                            },
                             Style::default().fg(theme.fg_primary),
                         ),
                     ]));
                     expr_lines.push(Line::from(vec![
                         Span::styled("物流状态: ", Style::default().fg(theme.fg_secondary)),
                         Span::styled(
-                            if expr.state_v.is_empty() { "—".to_string() } else { expr.state_v.clone() },
+                            if expr.state_v.is_empty() {
+                                "—".to_string()
+                            } else {
+                                expr.state_v.clone()
+                            },
                             Style::default().fg(theme.success),
                         ),
                     ]));
                     expr_lines.push(Line::from(vec![
                         Span::styled("订单状态: ", Style::default().fg(theme.fg_secondary)),
                         Span::styled(
-                            if expr.status_v.is_empty() { "—".to_string() } else { expr.status_v.clone() },
+                            if expr.status_v.is_empty() {
+                                "—".to_string()
+                            } else {
+                                expr.status_v.clone()
+                            },
                             Style::default().fg(theme.fg_primary),
                         ),
                     ]));
@@ -569,17 +573,18 @@ impl Component for MallPage {
             let expr_block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .title(Span::styled(
-                    " 物流 ",
-                    Style::default().fg(theme.info),
-                ));
+                .title(Span::styled(" 物流 ", Style::default().fg(theme.info)));
             let expr_inner = expr_block.inner(cols[1]);
             frame.render_widget(expr_block, cols[1]);
 
             // Split the express panel: product image on top, text below.
             if let Some(order) = self.selected_order() {
                 let order_id = order.order_id;
-                if let Some(protocol) = self.product_images.get_mut(&order_id).and_then(|p| p.as_mut()) {
+                if let Some(protocol) = self
+                    .product_images
+                    .get_mut(&order_id)
+                    .and_then(|p| p.as_mut())
+                {
                     let img_h = 14u16.min(expr_inner.height.saturating_sub(1));
                     let text_h = expr_inner.height.saturating_sub(img_h);
                     if text_h > 0 {
@@ -635,7 +640,6 @@ impl Component for MallPage {
         frame.render_widget(footer, chunks[2]);
     }
 
-
     fn handle_input_with_modifiers(
         &mut self,
         key: KeyCode,
@@ -661,81 +665,81 @@ impl Component for MallPage {
                 _ => None,
             }
         } else {
-        // Tab / BackTab switches to the sidebar, same as other pages.
-        if keys.matches_nav_next(key) {
-            return Some(AppAction::NavNext);
-        }
-        if keys.matches_nav_prev(key) {
-            return Some(AppAction::NavPrev);
-        }
-        match key {
-            KeyCode::Char('j') | KeyCode::Down => {
-                if !self.orders.is_empty() {
-                    let next = (self.selected + 1).min(self.orders.len() - 1);
-                    if next != self.selected {
-                        self.selected = next;
-                        // Auto-load express for the newly selected order.
-                        if let Some(order) = self.selected_order() {
-                            return Some(AppAction::LoadMallExpress {
-                                order_id: order.order_id,
-                            });
+            // Tab / BackTab switches to the sidebar, same as other pages.
+            if keys.matches_nav_next(key) {
+                return Some(AppAction::NavNext);
+            }
+            if keys.matches_nav_prev(key) {
+                return Some(AppAction::NavPrev);
+            }
+            match key {
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if !self.orders.is_empty() {
+                        let next = (self.selected + 1).min(self.orders.len() - 1);
+                        if next != self.selected {
+                            self.selected = next;
+                            // Auto-load express for the newly selected order.
+                            if let Some(order) = self.selected_order() {
+                                return Some(AppAction::LoadMallExpress {
+                                    order_id: order.order_id,
+                                });
+                            }
                         }
                     }
+                    None
                 }
-                None
-            }
-            KeyCode::Char('k') | KeyCode::Up => {
-                if !self.orders.is_empty() {
-                    let next = self.selected.saturating_sub(1);
-                    if next != self.selected {
-                        self.selected = next;
-                        // Auto-load express for the newly selected order.
-                        if let Some(order) = self.selected_order() {
-                            return Some(AppAction::LoadMallExpress {
-                                order_id: order.order_id,
-                            });
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if !self.orders.is_empty() {
+                        let next = self.selected.saturating_sub(1);
+                        if next != self.selected {
+                            self.selected = next;
+                            // Auto-load express for the newly selected order.
+                            if let Some(order) = self.selected_order() {
+                                return Some(AppAction::LoadMallExpress {
+                                    order_id: order.order_id,
+                                });
+                            }
                         }
                     }
+                    None
                 }
-                None
-            }
-            KeyCode::Char('r') => Some(AppAction::RefreshMall),
-            KeyCode::Char('t') => {
-                if let Some(order) = self.selected_order() {
-                    let order_id = order.order_id;
-                    if self.tracks.contains_key(&order_id)
-                        && !self.track_loading.get(&order_id).copied().unwrap_or(false)
-                    {
-                        self.track_view = true;
-                        self.track_scroll = 0;
-                        self.track_pending_view = false;
-                        None
+                KeyCode::Char('r') => Some(AppAction::RefreshMall),
+                KeyCode::Char('t') => {
+                    if let Some(order) = self.selected_order() {
+                        let order_id = order.order_id;
+                        if self.tracks.contains_key(&order_id)
+                            && !self.track_loading.get(&order_id).copied().unwrap_or(false)
+                        {
+                            self.track_view = true;
+                            self.track_scroll = 0;
+                            self.track_pending_view = false;
+                            None
+                        } else {
+                            self.track_pending_view = true;
+                            Some(AppAction::LoadMallExpressTrack { order_id })
+                        }
                     } else {
-                        self.track_pending_view = true;
-                        Some(AppAction::LoadMallExpressTrack { order_id })
+                        None
                     }
-                } else {
-                    None
                 }
-            }
-            KeyCode::Enter => {
-                if let Some(order) = self.selected_order() {
-                    Some(AppAction::LoadMallExpress {
-                        order_id: order.order_id,
-                    })
-                } else {
-                    None
+                KeyCode::Enter => {
+                    if let Some(order) = self.selected_order() {
+                        Some(AppAction::LoadMallExpress {
+                            order_id: order.order_id,
+                        })
+                    } else {
+                        None
+                    }
                 }
+                KeyCode::Char('o') => {
+                    self.message = Some("已在浏览器中打开 会员购 (mall.bilibili.com)".to_string());
+                    Some(AppAction::OpenExternalUrl(
+                        "https://mall.bilibili.com/".to_string(),
+                    ))
+                }
+                _ if keys.matches_back(key) || keys.matches_quit(key) => None,
+                _ => None,
             }
-            KeyCode::Char('o') => {
-                self.message = Some("已在浏览器中打开 会员购 (mall.bilibili.com)".to_string());
-                Some(AppAction::OpenExternalUrl(
-                    "https://mall.bilibili.com/".to_string(),
-                ))
-            }
-            _ if keys.matches_back(key) || keys.matches_quit(key) => None,
-            _ => None,
-        }
         }
     }
 }

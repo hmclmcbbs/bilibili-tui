@@ -1,6 +1,6 @@
 use crate::app::App;
-use crate::presentation::tui::{Component, Page};
 use crate::presentation::tui::NavItem;
+use crate::presentation::tui::{Component, Page};
 use crossterm::event::MouseEventKind;
 use ratatui::layout::Position;
 use ratatui::{
@@ -112,7 +112,7 @@ impl App {
                 .direction(Direction::Horizontal)
                 .constraints([
                     Constraint::Length(self.sidebar_width()), // Sidebar
-                    Constraint::Min(40),    // Content
+                    Constraint::Min(40),                      // Content
                 ])
                 .split(area)[1]
         } else {
@@ -152,7 +152,7 @@ impl App {
                 .direction(Direction::Horizontal)
                 .constraints([
                     Constraint::Length(self.sidebar_width()), // Sidebar
-                    Constraint::Min(40),    // Content
+                    Constraint::Min(40),                      // Content
                 ])
                 .split(area)
         } else {
@@ -233,9 +233,7 @@ impl App {
             // A non-sidebar key leaves sidebar mode and falls through to the
             // active page normally.
             self.leave_sidebar_mode();
-        } else if self.sidebar_visible_page()
-            && (key == KeyCode::Tab || key == KeyCode::BackTab)
-        {
+        } else if self.sidebar_visible_page() && (key == KeyCode::Tab || key == KeyCode::BackTab) {
             // Tab now focuses the sidebar instead of cycling straight to the
             // next page. From there j/k move the highlight and Enter opens.
             self.sidebar_active = true;
@@ -386,7 +384,9 @@ impl App {
                     match event.kind {
                         MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
                             self.sidebar_active = true;
-                            self.handle_action(crate::application::AppAction::NavSelect(item)).await; return;
+                            self.handle_action(crate::application::AppAction::NavSelect(item))
+                                .await;
+                            return;
                         }
                         // scrolling over the sidebar moves selection sequentially
                         MouseEventKind::ScrollDown => {
@@ -515,7 +515,8 @@ impl App {
         if let Page::Home(page) = &mut self.current_page {
             let bvids = page.take_prefetch();
             if !bvids.is_empty() {
-                self.handle_action(crate::application::AppAction::PrefetchVideoDetails { bvids }).await;
+                self.handle_action(crate::application::AppAction::PrefetchVideoDetails { bvids })
+                    .await;
             }
         }
 

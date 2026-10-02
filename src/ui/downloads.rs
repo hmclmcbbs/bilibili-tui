@@ -57,9 +57,7 @@ impl DownloadsPage {
             columns: 3,
             visible_rows: 3,
             covers: Vec::new(),
-            picker: Arc::new(
-                Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()),
-            ),
+            picker: Arc::new(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())),
             filter: String::new(),
             input_mode: false,
             message: None,
@@ -274,14 +272,8 @@ impl Component for DownloadsPage {
                 }
             };
             let lines = Text::from(vec![
-                Line::from(Span::styled(
-                    text,
-                    Style::default().fg(theme.fg_primary),
-                )),
-                Line::from(Span::styled(
-                    bar,
-                    Style::default().fg(theme.info),
-                )),
+                Line::from(Span::styled(text, Style::default().fg(theme.fg_primary))),
+                Line::from(Span::styled(bar, Style::default().fg(theme.info))),
             ]);
             frame.render_widget(Paragraph::new(lines), inner);
         } else {
@@ -292,11 +284,7 @@ impl Component for DownloadsPage {
         let list_title = if self.filter.is_empty() {
             format!(" 已下载 ({} 个) ", self.files.len())
         } else {
-            format!(
-                " 已下载 ({} 个，过滤: {}) ",
-                self.files.len(),
-                self.filter
-            )
+            format!(" 已下载 ({} 个，过滤: {}) ", self.files.len(), self.filter)
         };
         let grid_block = Block::bordered()
             .title(Span::styled(
@@ -357,7 +345,9 @@ impl Component for DownloadsPage {
                 };
                 let selected = index == self.selected;
                 let border = if selected {
-                    Style::default().fg(theme.fg_accent).add_modifier(Modifier::BOLD)
+                    Style::default()
+                        .fg(theme.fg_accent)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     Style::default().fg(theme.border_subtle)
                 };
@@ -366,9 +356,7 @@ impl Component for DownloadsPage {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                let card_block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(border);
+                let card_block = Block::default().borders(Borders::ALL).border_style(border);
                 let inner = card_block.inner(cols_area[col]);
                 frame.render_widget(card_block, cols_area[col]);
 
@@ -396,15 +384,27 @@ impl Component for DownloadsPage {
                 let info_area = card_chunks[1];
                 let max_len = (info_area.width.saturating_sub(2)) as usize;
                 let display_name: String = if name.chars().count() > max_len {
-                    name.chars().take(max_len.saturating_sub(2)).collect::<String>() + "…"
+                    name.chars()
+                        .take(max_len.saturating_sub(2))
+                        .collect::<String>()
+                        + "…"
                 } else {
                     name
                 };
                 let info_text = Text::from(vec![
                     Line::from(Span::styled(
                         display_name,
-                        Style::default().fg(if selected { theme.fg_accent } else { theme.fg_primary })
-                            .add_modifier(if selected { Modifier::BOLD } else { Modifier::default() }),
+                        Style::default()
+                            .fg(if selected {
+                                theme.fg_accent
+                            } else {
+                                theme.fg_primary
+                            })
+                            .add_modifier(if selected {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::default()
+                            }),
                     )),
                     Line::from(Span::styled(
                         format!(
@@ -415,10 +415,7 @@ impl Component for DownloadsPage {
                         Style::default().fg(theme.fg_muted),
                     )),
                 ]);
-                frame.render_widget(
-                    Paragraph::new(info_text),
-                    info_area,
-                );
+                frame.render_widget(Paragraph::new(info_text), info_area);
             }
         }
 
@@ -521,18 +518,16 @@ impl DownloadsPage {
         }
     }
 
-    fn render_footer(
-        &self,
-        frame: &mut Frame,
-        area: Rect,
-        theme: &Theme,
-        _keys: &Keybindings,
-    ) {
+    fn render_footer(&self, frame: &mut Frame, area: Rect, theme: &Theme, _keys: &Keybindings) {
         let items = if self.input_mode {
             vec![
                 ("Esc".to_string(), "取消".into(), theme.fg_secondary),
                 ("Enter".to_string(), "完成".into(), theme.success),
-                ("!".to_string(), format!("过滤: {}", self.filter), theme.info),
+                (
+                    "!".to_string(),
+                    format!("过滤: {}", self.filter),
+                    theme.info,
+                ),
             ]
         } else {
             let mut v = vec![

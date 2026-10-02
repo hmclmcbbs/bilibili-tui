@@ -7,10 +7,10 @@
 
 use super::{Component, Theme, shortcut_footer};
 use crate::api::client::ApiClient;
+use crate::api::msg::session_last_text;
 use crate::api::msg::{ChatMessage, ChatSession, NotificationItem};
 use crate::application::AppAction;
 use crate::storage::Keybindings;
-use crate::api::msg::session_last_text;
 use image::DynamicImage;
 use ratatui::{
     crossterm::event::{KeyCode, KeyModifiers, MouseEvent},
@@ -291,7 +291,12 @@ impl NotificationsPage {
             let picker = Arc::clone(&self.picker);
             tokio::spawn(async move {
                 let protocol = download_cover(&cover_url, &picker).await;
-                let _ = tx.send(CoverResult { index: idx, protocol }).await;
+                let _ = tx
+                    .send(CoverResult {
+                        index: idx,
+                        protocol,
+                    })
+                    .await;
             });
         }
     }
@@ -310,7 +315,12 @@ impl NotificationsPage {
             let picker = Arc::clone(&self.picker);
             tokio::spawn(async move {
                 let protocol = download_avatar(&face_url, &picker).await;
-                let _ = tx.send(AvatarResult { index: idx, protocol }).await;
+                let _ = tx
+                    .send(AvatarResult {
+                        index: idx,
+                        protocol,
+                    })
+                    .await;
             });
         }
     }
@@ -399,14 +409,16 @@ impl NotificationsPage {
 
     /// Index of the previous selectable item row before `from_row`.
     fn prev_item_row(&self, from_row: usize) -> Option<usize> {
-        (0..from_row).rev().find(|&r| matches!(self.rows[r], NotifRow::Item { .. }))
+        (0..from_row)
+            .rev()
+            .find(|&r| matches!(self.rows[r], NotifRow::Item { .. }))
     }
 
     /// Current row index for `selected` item.
     fn selected_row(&self) -> Option<usize> {
-        self.rows.iter().position(|r| {
-            matches!(r, NotifRow::Item { item_idx } if *item_idx == self.selected)
-        })
+        self.rows
+            .iter()
+            .position(|r| matches!(r, NotifRow::Item { item_idx } if *item_idx == self.selected))
     }
 
     pub fn apply_unread(&mut self, reply: i32, at: i32, like: i32, sys: i32) {
@@ -590,10 +602,11 @@ impl Component for NotificationsPage {
             tab_spans.push(Span::styled(label, style));
         }
         let tab_line = Line::from(tab_spans);
-        let tabs = Paragraph::new(tab_line)
-            .block(Block::default().borders(Borders::BOTTOM).border_style(
-                Style::default().fg(theme.border_subtle),
-            ));
+        let tabs = Paragraph::new(tab_line).block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(Style::default().fg(theme.border_subtle)),
+        );
         frame.render_widget(tabs, chunks[0]);
 
         // List
@@ -622,12 +635,8 @@ impl Component for NotificationsPage {
             let start = self.session_scroll;
             let end = (start + max_rows as usize).min(self.sessions.len());
             for (row, i) in (start..end).enumerate() {
-                let row_area = Rect::new(
-                    inner.x,
-                    inner.y + (row as u16) * ROW_H,
-                    inner.width,
-                    ROW_H,
-                );
+                let row_area =
+                    Rect::new(inner.x, inner.y + (row as u16) * ROW_H, inner.width, ROW_H);
                 let cols = Layout::default()
                     .direction(Direction::Horizontal)
                     .constraints([Constraint::Length(7), Constraint::Min(5)])
@@ -644,7 +653,11 @@ impl Component for NotificationsPage {
                     }
                     None => {
                         let ph = Paragraph::new(Line::from(Span::styled(
-                            if self.pending_avatars.contains(&i) { "◌" } else { "○" },
+                            if self.pending_avatars.contains(&i) {
+                                "◌"
+                            } else {
+                                "○"
+                            },
                             Style::default().fg(theme.fg_secondary),
                         )));
                         frame.render_widget(ph, Rect::new(avatar_area.x, avatar_area.y, 5, 1));
@@ -692,10 +705,16 @@ impl Component for NotificationsPage {
                             theme.fg_secondary
                         })),
                     ),
-                    Span::styled(format!("{}{}", session.uname, unread), text_style(name_style)),
+                    Span::styled(
+                        format!("{}{}", session.uname, unread),
+                        text_style(name_style),
+                    ),
                 ];
                 if !time.is_empty() {
-                    let used = UnicodeWidthStr::width(format!("{}{}", session.uname, unread).as_str()) as u16 + 2;
+                    let used =
+                        UnicodeWidthStr::width(format!("{}{}", session.uname, unread).as_str())
+                            as u16
+                            + 2;
                     if used < name_max {
                         name_spans.push(Span::raw(" ".repeat((name_max - used) as usize)));
                     }
@@ -705,7 +724,10 @@ impl Component for NotificationsPage {
                     ));
                 }
                 let name_para = Paragraph::new(Line::from(name_spans));
-                frame.render_widget(name_para, Rect::new(text_area.x, text_area.y, text_area.width, 1));
+                frame.render_widget(
+                    name_para,
+                    Rect::new(text_area.x, text_area.y, text_area.width, 1),
+                );
                 // Rows 1-2: last message, wrapped to two rows max.
                 if !last_text.is_empty() {
                     let last_style = text_style(Style::default().fg(theme.fg_secondary));
@@ -721,9 +743,10 @@ impl Component for NotificationsPage {
                             last.push('…');
                         }
                     }
-                    let last_para =
-                        Paragraph::new(Text::from(shown.into_iter().map(Line::from).collect::<Vec<_>>()))
-                            .style(last_style);
+                    let last_para = Paragraph::new(Text::from(
+                        shown.into_iter().map(Line::from).collect::<Vec<_>>(),
+                    ))
+                    .style(last_style);
                     frame.render_widget(
                         last_para,
                         Rect::new(text_area.x, text_area.y + 1, text_area.width, 2),
@@ -831,10 +854,7 @@ impl Component for NotificationsPage {
                         let is_selected = *item_idx == self.selected;
                         let wrap_width = inner.width.saturating_sub(2).max(1);
                         let lines = self.item_display_lines(*item_idx, wrap_width);
-                        let text = lines
-                            .get(line_no)
-                            .cloned()
-                            .unwrap_or_default();
+                        let text = lines.get(line_no).cloned().unwrap_or_default();
                         let base = if is_selected {
                             Style::default()
                                 .bg(theme.selection_bg)
@@ -952,11 +972,7 @@ impl Component for NotificationsPage {
                 }
                 KeyCode::Char('o') | KeyCode::Char('O') => {
                     // Open the most recent video-share message in this chat.
-                    if let Some(bvid) = self
-                        .chat_messages
-                        .iter()
-                        .rev()
-                        .find_map(|m| m.bvid.clone())
+                    if let Some(bvid) = self.chat_messages.iter().rev().find_map(|m| m.bvid.clone())
                     {
                         return Some(AppAction::OpenChatVideo(bvid));
                     }
@@ -1067,7 +1083,10 @@ impl Component for NotificationsPage {
                 }
                 if let Some(item) = self.items.get(self.selected) {
                     if let Some(bvid) = &item.bvid {
-                        return Some(AppAction::OpenVideoDetail(bvid.clone(), item.oid.unwrap_or(0)));
+                        return Some(AppAction::OpenVideoDetail(
+                            bvid.clone(),
+                            item.oid.unwrap_or(0),
+                        ));
                     }
                 }
                 return Some(AppAction::None);
@@ -1103,10 +1122,7 @@ impl NotificationsPage {
         // Header: avatar (if downloaded) + title
         let header_area = chunks[0];
         let talker_id = self.chat_talker.as_ref().map(|s| s.talker_id).unwrap_or(0);
-        let avatar_idx = self
-            .sessions
-            .iter()
-            .position(|s| s.talker_id == talker_id);
+        let avatar_idx = self.sessions.iter().position(|s| s.talker_id == talker_id);
         let header_block = Block::default()
             .borders(Borders::BOTTOM)
             .border_style(Style::default().fg(theme.border_subtle));
@@ -1126,22 +1142,20 @@ impl NotificationsPage {
                 frame.render_stateful_widget(img, img_area, protocol);
             }
         }
-        let has_video = self
-            .chat_messages
-            .iter()
-            .any(|m| m.bvid.is_some());
+        let has_video = self.chat_messages.iter().any(|m| m.bvid.is_some());
         let title = if self.chat_input_active {
             format!("── {} ──  [Esc 取消输入 | Enter 发送]", name)
         } else if has_video {
-            format!("── {} ──  [Esc 返回 | j/k 选择 | Enter 打开视频 | / 输入]", name)
+            format!(
+                "── {} ──  [Esc 返回 | j/k 选择 | Enter 打开视频 | / 输入]",
+                name
+            )
         } else {
             format!("── {} ──  [Esc 返回 | j/k 选择 | / 输入]", name)
         };
         let header = Paragraph::new(Line::from(Span::styled(
             title,
-            Style::default()
-                .fg(theme.info)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.info).add_modifier(Modifier::BOLD),
         )));
         frame.render_widget(header, text_area);
 
@@ -1184,7 +1198,11 @@ impl NotificationsPage {
                 7
             } else {
                 let time_rows = if msg.format_time().is_empty() { 0 } else { 1 };
-                let sender = if msg.sender_uid != talker_id { "我" } else { name.as_str() };
+                let sender = if msg.sender_uid != talker_id {
+                    "我"
+                } else {
+                    name.as_str()
+                };
                 let badge = msg.type_badge();
                 let content: String = msg.content.chars().take(120).collect();
                 let full = format!("{}: {}{}", sender, badge, content);
@@ -1223,11 +1241,7 @@ impl NotificationsPage {
         // Without this, the final message (often a video card) stays cut by
         // the bottom edge no matter how far down you scroll.
         if let Some(&last_row) = row_of.last() {
-            let last_rows = self
-                .chat_messages
-                .last()
-                .map(msg_rows)
-                .unwrap_or(1);
+            let last_rows = self.chat_messages.last().map(msg_rows).unwrap_or(1);
             let max_scroll = (last_row + last_rows).saturating_sub(height);
             if self.chat_scroll > max_scroll {
                 self.chat_scroll = max_scroll;
@@ -1348,15 +1362,13 @@ impl NotificationsPage {
                         ),
                         Span::styled(
                             format!("[视频] {}", title),
-                            card_style(
-                                Style::default()
-                                    .fg(theme.fg_primary)
-                                    .add_modifier(if is_selected {
-                                        Modifier::BOLD
-                                    } else {
-                                        Modifier::empty()
-                                    }),
-                            ),
+                            card_style(Style::default().fg(theme.fg_primary).add_modifier(
+                                if is_selected {
+                                    Modifier::BOLD
+                                } else {
+                                    Modifier::empty()
+                                },
+                            )),
                         ),
                     ]);
                     let ty = row_area.y + clip;
@@ -1389,11 +1401,8 @@ impl NotificationsPage {
                         let per_line = (info_w as usize).max(10);
                         for r in 0..3u16 {
                             let start = r as usize * per_line;
-                            let chunk: String = desc_text
-                                .chars()
-                                .skip(start)
-                                .take(per_line)
-                                .collect();
+                            let chunk: String =
+                                desc_text.chars().skip(start).take(per_line).collect();
                             let dy = row_area.y + 3 + r - clip;
                             if !chunk.is_empty() && dy < bottom {
                                 let desc_line = Line::from(Span::styled(

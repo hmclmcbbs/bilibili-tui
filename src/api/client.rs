@@ -175,8 +175,14 @@ impl ApiClient {
     /// Drop every cached API response. Called when the login state changes so
     /// a cached response for a previous account is never reused.
     pub fn clear_api_cache(&self) {
-        self.api_cache.write().expect("api cache lock poisoned").clear();
-        self.video_info_cache.write().expect("video_info cache lock").clear();
+        self.api_cache
+            .write()
+            .expect("api cache lock poisoned")
+            .clear();
+        self.video_info_cache
+            .write()
+            .expect("video_info cache lock")
+            .clear();
     }
 
     fn build_url(&self, domain: BilibiliApiDomain, endpoint: &str) -> String {
@@ -233,7 +239,11 @@ impl ApiClient {
 
             if !status.is_success() {
                 if attempt < 2 && (status.is_server_error() || status.as_u16() == 429) {
-                    let backoff = if status.as_u16() == 429 { 1000 } else { 150 * (1u64 << attempt) };
+                    let backoff = if status.as_u16() == 429 {
+                        1000
+                    } else {
+                        150 * (1u64 << attempt)
+                    };
                     tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
                     continue;
                 }
@@ -273,11 +283,7 @@ impl ApiClient {
     /// not change within a minute and which are re-requested whenever the user
     /// navigates back to the same screen. A cache hit skips the network round
     /// trip entirely; the value is shared by reference until it expires.
-    pub async fn get_json_cached(
-        &self,
-        url: &str,
-        ttl: Duration,
-    ) -> Result<serde_json::Value> {
+    pub async fn get_json_cached(&self, url: &str, ttl: Duration) -> Result<serde_json::Value> {
         let now = Instant::now();
         {
             let cache = self.api_cache.read().expect("api cache lock poisoned");
@@ -314,7 +320,10 @@ impl ApiClient {
             let mut g = holder.lock().await;
             *g = Some(value.clone());
         }
-        self.api_inflight.lock().expect("inflight lock poisoned").remove(url);
+        self.api_inflight
+            .lock()
+            .expect("inflight lock poisoned")
+            .remove(url);
 
         {
             let mut cache = self.api_cache.write().expect("api cache lock poisoned");
@@ -325,10 +334,8 @@ impl ApiClient {
             if cache.len() > MAX_ENTRIES {
                 cache.retain(|_, (at, _)| now.duration_since(*at) < ttl);
                 if cache.len() > MAX_ENTRIES {
-                    let mut entries: Vec<(String, Instant)> = cache
-                        .iter()
-                        .map(|(k, (at, _))| (k.clone(), *at))
-                        .collect();
+                    let mut entries: Vec<(String, Instant)> =
+                        cache.iter().map(|(k, (at, _))| (k.clone(), *at)).collect();
                     entries.sort_by_key(|(_, at)| *at);
                     for (k, _) in entries.into_iter().take(cache.len() - MAX_ENTRIES) {
                         cache.remove(&k);
@@ -606,18 +613,9 @@ impl ApiClient {
             .and_then(|v| v.get("next_exp"))
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        let vip_status = data
-            .get("vipStatus")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as i32;
-        let vip_type = data
-            .get("vipType")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0) as i32;
-        let vip_due_date = data
-            .get("vipDueDate")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0);
+        let vip_status = data.get("vipStatus").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let vip_type = data.get("vipType").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let vip_due_date = data.get("vipDueDate").and_then(|v| v.as_i64()).unwrap_or(0);
         Ok(Some(super::auth::CurrentUser {
             mid,
             uname,
@@ -707,9 +705,7 @@ impl ApiClient {
         );
         // Popular feed is stable for a minute; cache it so browsing back and
         // forth between home and a video does not re-fetch the same list.
-        let value = self
-            .get_json_cached(&url, Duration::from_secs(60))
-            .await?;
+        let value = self.get_json_cached(&url, Duration::from_secs(60)).await?;
         let code = value
             .get("code")
             .and_then(|v| v.as_i64())
@@ -796,9 +792,7 @@ impl ApiClient {
         let url = format!("{}{}", BilibiliApiDomain::Main.as_str(), path);
         // Ranking / must-watch lists are stable for a minute; cache them so
         // switching between sections does not re-fetch the same list.
-        let value = self
-            .get_json_cached(&url, Duration::from_secs(60))
-            .await?;
+        let value = self.get_json_cached(&url, Duration::from_secs(60)).await?;
         Self::check_code(&value)?;
         let list = value
             .get("data")
@@ -827,10 +821,14 @@ impl ApiClient {
             }
         }
         let resp: ApiResponse<super::video::VideoInfo> = self.get(&url).await?;
-        let info = resp.data
+        let info = resp
+            .data
             .ok_or_else(|| anyhow::anyhow!("No data in video info response"))?;
         {
-            let mut cache = self.video_info_cache.write().expect("video_info cache lock");
+            let mut cache = self
+                .video_info_cache
+                .write()
+                .expect("video_info cache lock");
             cache.insert(url, (now, info.clone()));
         }
         Ok(info)
@@ -1015,13 +1013,11 @@ impl ApiClient {
             }
         }
 
-
-
         all.sort_by(|left, right| left.time.total_cmp(&right.time));
         Ok(all)
     }
 
-/// Fetch the AI subtitle track list for a video. Returns an empty list
+    /// Fetch the AI subtitle track list for a video. Returns an empty list
     /// when the video has no AI subtitles (or the player API hides them).
     pub async fn get_video_subtitles(
         &self,
@@ -1045,7 +1041,11 @@ impl ApiClient {
             )
             .await?;
         if resp.code != 0 {
-            return Err(anyhow!("player v2 API error {}: {}", resp.code, resp.message));
+            return Err(anyhow!(
+                "player v2 API error {}: {}",
+                resp.code,
+                resp.message
+            ));
         }
         Ok(resp
             .data
@@ -1308,7 +1308,8 @@ impl ApiClient {
     /// envelope: it returns `{"success":bool,"data":{...}}` without a top-level
     /// `code` field. Parse the raw JSON instead of going through `ApiResponse`.
     pub async fn get_mall_orders(&self) -> Result<Vec<super::mall::MallOrder>> {
-        let url = "https://show.bilibili.com/api/ticket/ordercenter/list?page=1&pageSize=20&status=0";
+        let url =
+            "https://show.bilibili.com/api/ticket/ordercenter/list?page=1&pageSize=20&status=0";
         #[derive(Debug, Deserialize)]
         struct MallOrderListEnvelope {
             #[serde(default)]
@@ -1321,11 +1322,12 @@ impl ApiClient {
         // 注意：该接口的 success 字段不可靠——实测未登录也返回 success=false，
         // 但 data 里有完整订单列表。只有 data 完全缺失才视为失败。
         if env.data.is_none() {
-            return Err(anyhow!(
-                "会员购接口未返回订单数据，可能未登录或登录已过期"
-            ));
+            return Err(anyhow!("会员购接口未返回订单数据，可能未登录或登录已过期"));
         }
-        Ok(env.data.map(|d| d.list.unwrap_or_default()).unwrap_or_default())
+        Ok(env
+            .data
+            .map(|d| d.list.unwrap_or_default())
+            .unwrap_or_default())
     }
 
     /// POST a JSON body with cookies attached (no csrf/form handling).
@@ -1377,12 +1379,15 @@ impl ApiClient {
         let items: Vec<super::mall::MallExpressTrackItem> = self
             .post_json(&url, serde_json::json!({ "orderId": order_id }))
             .await?;
-        Ok(items.into_iter().next().map(|it| super::mall::MallExpressSummary {
-            com_v: it.com_v,
-            sno: it.sno,
-            state_v: it.state_v,
-            status_v: it.status_v,
-        }))
+        Ok(items
+            .into_iter()
+            .next()
+            .map(|it| super::mall::MallExpressSummary {
+                com_v: it.com_v,
+                sno: it.sno,
+                state_v: it.state_v,
+                status_v: it.status_v,
+            }))
     }
 
     /// Fetch express trace (物流轨迹) for a 会员购 order.
@@ -1406,18 +1411,16 @@ impl ApiClient {
     /// Add a video (by aid) to the user's watch-later list.
     pub async fn add_to_watch_later(&self, aid: i64) -> Result<()> {
         let url = self.build_url(BilibiliApiDomain::Main, "/x/v2/history/toview/add");
-        let _: ApiResponse<serde_json::Value> = self
-            .post(&url, vec![("aid", aid.to_string())])
-            .await?;
+        let _: ApiResponse<serde_json::Value> =
+            self.post(&url, vec![("aid", aid.to_string())]).await?;
         Ok(())
     }
 
     /// Remove a video (by aid) from the user's watch-later list.
     pub async fn remove_from_watch_later(&self, aid: i64) -> Result<()> {
         let url = self.build_url(BilibiliApiDomain::Main, "/x/v2/history/toview/del");
-        let _: ApiResponse<serde_json::Value> = self
-            .post(&url, vec![("aid", aid.to_string())])
-            .await?;
+        let _: ApiResponse<serde_json::Value> =
+            self.post(&url, vec![("aid", aid.to_string())]).await?;
         Ok(())
     }
 
@@ -1523,7 +1526,8 @@ impl ApiClient {
             ("order", "totalrank".to_string()),
         ];
 
-        let resp: ApiResponse<super::search::SearchUserData> = self.get_with_wbi(&url, params).await?;
+        let resp: ApiResponse<super::search::SearchUserData> =
+            self.get_with_wbi(&url, params).await?;
         Ok(resp.data.unwrap_or(super::search::SearchUserData {
             result: None,
             num_results: Some(0),
@@ -1738,322 +1742,331 @@ impl ApiClient {
             BilibiliApiDomain::Main.as_str()
         );
 
-         let resp: ApiResponse<super::dynamic::PortalData> = self.get(&url).await?;
-         Ok(resp
-             .data
-             .unwrap_or(super::dynamic::PortalData { up_list: None }))
-     }
+        let resp: ApiResponse<super::dynamic::PortalData> = self.get(&url).await?;
+        Ok(resp
+            .data
+            .unwrap_or(super::dynamic::PortalData { up_list: None }))
+    }
 
-     // Message notification API
-     pub async fn get_msg_unread(&self) -> Result<super::msg::UnreadData> {
-         let url = format!("{}/x/msgfeed/unread", BilibiliApiDomain::Main.as_str());
-         let resp: ApiResponse<super::msg::UnreadData> = self.get(&url).await?;
-         Ok(resp.data.unwrap_or(super::msg::UnreadData {
-             at: 0,
-             chat: 0,
-             like: 0,
-             reply: 0,
-             sys_msg: 0,
-         }))
-     }
+    // Message notification API
+    pub async fn get_msg_unread(&self) -> Result<super::msg::UnreadData> {
+        let url = format!("{}/x/msgfeed/unread", BilibiliApiDomain::Main.as_str());
+        let resp: ApiResponse<super::msg::UnreadData> = self.get(&url).await?;
+        Ok(resp.data.unwrap_or(super::msg::UnreadData {
+            at: 0,
+            chat: 0,
+            like: 0,
+            reply: 0,
+            sys_msg: 0,
+        }))
+    }
 
-     /// Fetch a message feed tab. `feed_type`: 1=reply 2=at 3=like 6=system.
-     pub async fn get_msg_feed(
-         &self,
-         feed_type: i32,
-         page: i32,
-     ) -> Result<Vec<super::msg::NotificationItem>> {
-         if feed_type == 6 {
-             return self.get_system_notices(page).await;
-         }
-         let (path, extra) = match feed_type {
-             2 => ("/x/msgfeed/at".to_string(), String::new()),
-             3 => ("/x/msgfeed/like".to_string(), String::new()),
-             _ => ("/x/msgfeed/reply".to_string(), "&type=1".to_string()),
-         };
-         let url = format!(
-             "{}{}?page={}&page_size=20{}",
-             BilibiliApiDomain::Main.as_str(),
-             path,
-             page,
-             extra
-         );
-         if feed_type == 3 {
-             // The like feed nests items under data.latest / data.total.
-             let resp: ApiResponse<super::msg::LikeFeedData> = self.get(&url).await?;
-             let data = resp.data.unwrap_or(super::msg::LikeFeedData {
-                 latest: None,
-                 total: None,
-             });
-             let mut items: Vec<super::msg::NotificationItem> = Vec::new();
-             if let Some(section) = &data.latest {
-                 items.extend(
-                     section
-                         .items
-                         .iter()
-                         .filter_map(|v| super::msg::parse_feed_item(v, feed_type)),
-                 );
-             }
-             if let Some(section) = &data.total {
-                 items.extend(
-                     section
-                         .items
-                         .iter()
-                         .filter_map(|v| super::msg::parse_feed_item(v, feed_type)),
-                 );
-             }
-             return Ok(items);
-         }
-         let resp: ApiResponse<super::msg::FeedData> = self.get(&url).await?;
-         let data = resp.data.unwrap_or(super::msg::FeedData {
-             items: Vec::new(),
-             page: None,
-         });
-         Ok(data
-             .items
-             .iter()
-             .filter_map(|v| super::msg::parse_feed_item(v, feed_type))
-             .collect())
-     }
+    /// Fetch a message feed tab. `feed_type`: 1=reply 2=at 3=like 6=system.
+    pub async fn get_msg_feed(
+        &self,
+        feed_type: i32,
+        page: i32,
+    ) -> Result<Vec<super::msg::NotificationItem>> {
+        if feed_type == 6 {
+            return self.get_system_notices(page).await;
+        }
+        let (path, extra) = match feed_type {
+            2 => ("/x/msgfeed/at".to_string(), String::new()),
+            3 => ("/x/msgfeed/like".to_string(), String::new()),
+            _ => ("/x/msgfeed/reply".to_string(), "&type=1".to_string()),
+        };
+        let url = format!(
+            "{}{}?page={}&page_size=20{}",
+            BilibiliApiDomain::Main.as_str(),
+            path,
+            page,
+            extra
+        );
+        if feed_type == 3 {
+            // The like feed nests items under data.latest / data.total.
+            let resp: ApiResponse<super::msg::LikeFeedData> = self.get(&url).await?;
+            let data = resp.data.unwrap_or(super::msg::LikeFeedData {
+                latest: None,
+                total: None,
+            });
+            let mut items: Vec<super::msg::NotificationItem> = Vec::new();
+            if let Some(section) = &data.latest {
+                items.extend(
+                    section
+                        .items
+                        .iter()
+                        .filter_map(|v| super::msg::parse_feed_item(v, feed_type)),
+                );
+            }
+            if let Some(section) = &data.total {
+                items.extend(
+                    section
+                        .items
+                        .iter()
+                        .filter_map(|v| super::msg::parse_feed_item(v, feed_type)),
+                );
+            }
+            return Ok(items);
+        }
+        let resp: ApiResponse<super::msg::FeedData> = self.get(&url).await?;
+        let data = resp.data.unwrap_or(super::msg::FeedData {
+            items: Vec::new(),
+            page: None,
+        });
+        Ok(data
+            .items
+            .iter()
+            .filter_map(|v| super::msg::parse_feed_item(v, feed_type))
+            .collect())
+    }
 
-     /// Fetch system notices from the unified notify endpoint.
-     /// This lives on message.bilibili.com (not api.bilibili.com) and the
-     /// legacy /x/msgfeed/sys and /x/msgfeed/notice are both unusable for
-     /// listing: sys is retired (404) and notice only marks items read.
-     pub async fn get_system_notices(&self, _page: i32) -> Result<Vec<super::msg::NotificationItem>> {
-         let url = format!(
-             "{}/x/sys-msg/query_unified_notify?page_size=20&build=0&mobi_app=web",
-             "https://message.bilibili.com"
-         );
-         let resp: ApiResponse<super::msg::SystemNotifyData> = self.get(&url).await?;
-         let data = resp.data.unwrap_or(super::msg::SystemNotifyData {
-             system_notify_list: Vec::new(),
-         });
-         Ok(data
-             .system_notify_list
-             .iter()
-             .filter_map(super::msg::parse_system_notify)
-             .collect())
-     }
+    /// Fetch system notices from the unified notify endpoint.
+    /// This lives on message.bilibili.com (not api.bilibili.com) and the
+    /// legacy /x/msgfeed/sys and /x/msgfeed/notice are both unusable for
+    /// listing: sys is retired (404) and notice only marks items read.
+    pub async fn get_system_notices(
+        &self,
+        _page: i32,
+    ) -> Result<Vec<super::msg::NotificationItem>> {
+        let url = format!(
+            "{}/x/sys-msg/query_unified_notify?page_size=20&build=0&mobi_app=web",
+            "https://message.bilibili.com"
+        );
+        let resp: ApiResponse<super::msg::SystemNotifyData> = self.get(&url).await?;
+        let data = resp.data.unwrap_or(super::msg::SystemNotifyData {
+            system_notify_list: Vec::new(),
+        });
+        Ok(data
+            .system_notify_list
+            .iter()
+            .filter_map(super::msg::parse_system_notify)
+            .collect())
+    }
 
-      /// Fetch the private-message conversation list.
-      /// GET https://api.vc.bilibili.com/session_svr/v1/session_svr/get_sessions
-      /// (the old api.bilibili.com/x/session/v2/sessions was retired in 2026;
-      /// the private-message service moved to the vc domain and requires WBI)
-      ///
-      /// The session endpoint only returns `talker_id` (no user name), so we
-      /// resolve display names in parallel via the user card API.
-      pub async fn get_msg_sessions(&self) -> Result<Vec<super::msg::ChatSession>> {
-          let url = "https://api.vc.bilibili.com/session_svr/v1/session_svr/get_sessions";
-          let params: Vec<(&str, String)> = vec![
-              ("session_type", "1".to_string()),
-              ("group_fold", "1".to_string()),
-              ("unfollow_fold", "0".to_string()),
-              ("sort_rule", "2".to_string()),
-              ("build", "0".to_string()),
-              ("mobi_app", "web".to_string()),
-          ];
-          let resp: ApiResponse<super::msg::SessionListData> =
-              self.get_with_wbi(url, params).await?;
-          let data = resp.data.unwrap_or(super::msg::SessionListData {
-              session_list: Vec::new(),
-              has_more: None,
-          });
-          let mut sessions: Vec<super::msg::ChatSession> = data
-              .session_list
-              .iter()
-              .filter_map(super::msg::parse_session)
-              .collect();
+    /// Fetch the private-message conversation list.
+    /// GET https://api.vc.bilibili.com/session_svr/v1/session_svr/get_sessions
+    /// (the old api.bilibili.com/x/session/v2/sessions was retired in 2026;
+    /// the private-message service moved to the vc domain and requires WBI)
+    ///
+    /// The session endpoint only returns `talker_id` (no user name), so we
+    /// resolve display names in parallel via the user card API.
+    pub async fn get_msg_sessions(&self) -> Result<Vec<super::msg::ChatSession>> {
+        let url = "https://api.vc.bilibili.com/session_svr/v1/session_svr/get_sessions";
+        let params: Vec<(&str, String)> = vec![
+            ("session_type", "1".to_string()),
+            ("group_fold", "1".to_string()),
+            ("unfollow_fold", "0".to_string()),
+            ("sort_rule", "2".to_string()),
+            ("build", "0".to_string()),
+            ("mobi_app", "web".to_string()),
+        ];
+        let resp: ApiResponse<super::msg::SessionListData> = self.get_with_wbi(url, params).await?;
+        let data = resp.data.unwrap_or(super::msg::SessionListData {
+            session_list: Vec::new(),
+            has_more: None,
+        });
+        let mut sessions: Vec<super::msg::ChatSession> = data
+            .session_list
+            .iter()
+            .filter_map(super::msg::parse_session)
+            .collect();
 
-          // The session API has no user names; fill them from the user card
-          // API in parallel (20 sessions -> 20 small GETs).
-          let mids: Vec<i64> = sessions.iter().map(|s| s.talker_id).collect();
-          let resolved = self.resolve_user_cards(&mids).await;
-          for session in sessions.iter_mut() {
-              if let Some(entry) = resolved.get(&session.talker_id) {
-                  if !entry.0.is_empty() {
-                      session.uname = entry.0.clone();
-                  }
-                  if session.face.is_none() && !entry.1.is_empty() {
-                      session.face = Some(entry.1.clone());
-                  }
-              }
-          }
-          Ok(sessions)
-      }
+        // The session API has no user names; fill them from the user card
+        // API in parallel (20 sessions -> 20 small GETs).
+        let mids: Vec<i64> = sessions.iter().map(|s| s.talker_id).collect();
+        let resolved = self.resolve_user_cards(&mids).await;
+        for session in sessions.iter_mut() {
+            if let Some(entry) = resolved.get(&session.talker_id) {
+                if !entry.0.is_empty() {
+                    session.uname = entry.0.clone();
+                }
+                if session.face.is_none() && !entry.1.is_empty() {
+                    session.face = Some(entry.1.clone());
+                }
+            }
+        }
+        Ok(sessions)
+    }
 
-      /// Resolve `mid -> (name, face)` for a list of user ids.
-      ///
-      /// Strategy (the standalone `/x/web-interface/card` endpoint is
-      /// frequently rate-limited to -352 from server IPs):
-      ///   1. scan the current user's following list (returns uname+face
-      ///      and is a stable endpoint);
-      ///   2. fill remaining ids with the card API best-effort.
-      /// Missing/private users are simply skipped (the caller keeps the
-      /// fallback "用户{id}" name).
-      async fn resolve_user_cards(&self, mids: &[i64]) -> HashMap<i64, (String, String)> {
-          if mids.is_empty() {
-              return HashMap::new();
-          }
-          let mut wanted: HashSet<i64> = mids.iter().copied().collect();
-          let mut result: HashMap<i64, (String, String)> = HashMap::new();
+    /// Resolve `mid -> (name, face)` for a list of user ids.
+    ///
+    /// Strategy (the standalone `/x/web-interface/card` endpoint is
+    /// frequently rate-limited to -352 from server IPs):
+    ///   1. scan the current user's following list (returns uname+face
+    ///      and is a stable endpoint);
+    ///   2. fill remaining ids with the card API best-effort.
+    /// Missing/private users are simply skipped (the caller keeps the
+    /// fallback "用户{id}" name).
+    async fn resolve_user_cards(&self, mids: &[i64]) -> HashMap<i64, (String, String)> {
+        if mids.is_empty() {
+            return HashMap::new();
+        }
+        let mut wanted: HashSet<i64> = mids.iter().copied().collect();
+        let mut result: HashMap<i64, (String, String)> = HashMap::new();
 
-          // 1. following list: 2 pages x 50 covers most private-message
-          // contacts (people you follow). The endpoint returns uname/face.
-          let my_uid = self
-              .cookies
-              .read()
-              .expect("cookies lock poisoned")
-              .as_ref()
-              .and_then(|c| {
-                  c.split(';').find_map(|part| {
-                      let part = part.trim();
-                      part.split_once('=')
-                          .filter(|(name, _)| *name == "DedeUserID")
-                          .map(|(_, value)| value.to_string())
-                  })
-              })
-              .unwrap_or_default();
-          if !my_uid.is_empty() {
-              for pn in 1..=2u32 {
-                  if wanted.is_empty() {
-                      break;
-                  }
-                  let url = format!(
-                      "{}/x/relation/followings?vmid={}&pn={}&ps=50&order=desc",
-                      BilibiliApiDomain::Main.as_str(),
-                      my_uid,
-                      pn
-                  );
-                  match self.get::<serde_json::Value>(&url).await {
-                      Ok(resp) => {
-                          let Some(data) = resp.data else {
-                              break;
-                          };
-                          let Some(list) = data.get("list").and_then(|l| l.as_array()) else {
-                              break;
-                          };
-                          for u in list {
-                              let Some(mid) = u.get("mid").and_then(|m| m.as_i64()) else {
-                                  continue;
-                              };
-                              if wanted.remove(&mid) {
-                                  let name = u
-                                      .get("uname")
-                                      .and_then(|n| n.as_str())
-                                      .unwrap_or("")
-                                      .to_string();
-                                  let face = u
-                                      .get("face")
-                                      .and_then(|f| f.as_str())
-                                      .unwrap_or("")
-                                      .to_string();
-                                  result.insert(mid, (name, face));
-                              }
-                          }
-                      }
-                      Err(_) => break,
-                  }
-              }
-          }
+        // 1. following list: 2 pages x 50 covers most private-message
+        // contacts (people you follow). The endpoint returns uname/face.
+        let my_uid = self
+            .cookies
+            .read()
+            .expect("cookies lock poisoned")
+            .as_ref()
+            .and_then(|c| {
+                c.split(';').find_map(|part| {
+                    let part = part.trim();
+                    part.split_once('=')
+                        .filter(|(name, _)| *name == "DedeUserID")
+                        .map(|(_, value)| value.to_string())
+                })
+            })
+            .unwrap_or_default();
+        if !my_uid.is_empty() {
+            for pn in 1..=2u32 {
+                if wanted.is_empty() {
+                    break;
+                }
+                let url = format!(
+                    "{}/x/relation/followings?vmid={}&pn={}&ps=50&order=desc",
+                    BilibiliApiDomain::Main.as_str(),
+                    my_uid,
+                    pn
+                );
+                match self.get::<serde_json::Value>(&url).await {
+                    Ok(resp) => {
+                        let Some(data) = resp.data else {
+                            break;
+                        };
+                        let Some(list) = data.get("list").and_then(|l| l.as_array()) else {
+                            break;
+                        };
+                        for u in list {
+                            let Some(mid) = u.get("mid").and_then(|m| m.as_i64()) else {
+                                continue;
+                            };
+                            if wanted.remove(&mid) {
+                                let name = u
+                                    .get("uname")
+                                    .and_then(|n| n.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let face = u
+                                    .get("face")
+                                    .and_then(|f| f.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                result.insert(mid, (name, face));
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
 
-          // 2. best-effort card lookup for the rest.
-          let remaining: Vec<i64> = wanted.into_iter().collect();
-          if remaining.is_empty() {
-              return result;
-          }
-          let futures = remaining.iter().map(|mid| {
-              let url = format!(
-                  "{}/x/web-interface/card?mid={}",
-                  BilibiliApiDomain::Main.as_str(),
-                  mid
-              );
-              async move {
-                  let resp: ApiResponse<serde_json::Value> = self.get(&url).await.ok()?;
-                  let card = resp.data.as_ref()?.get("card")?;
-                  let name = card.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-                  let face = card.get("face").and_then(|f| f.as_str()).unwrap_or("").to_string();
-                  Some((*mid, (name, face)))
-              }
-          });
-          let results = futures_util::future::join_all(futures).await;
-          for (mid, (name, face)) in results.into_iter().flatten() {
-              result.insert(mid, (name, face));
-          }
-          result
-      }
+        // 2. best-effort card lookup for the rest.
+        let remaining: Vec<i64> = wanted.into_iter().collect();
+        if remaining.is_empty() {
+            return result;
+        }
+        let futures = remaining.iter().map(|mid| {
+            let url = format!(
+                "{}/x/web-interface/card?mid={}",
+                BilibiliApiDomain::Main.as_str(),
+                mid
+            );
+            async move {
+                let resp: ApiResponse<serde_json::Value> = self.get(&url).await.ok()?;
+                let card = resp.data.as_ref()?.get("card")?;
+                let name = card
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let face = card
+                    .get("face")
+                    .and_then(|f| f.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some((*mid, (name, face)))
+            }
+        });
+        let results = futures_util::future::join_all(futures).await;
+        for (mid, (name, face)) in results.into_iter().flatten() {
+            result.insert(mid, (name, face));
+        }
+        result
+    }
 
-     /// Fetch chat history with one user.
-     /// GET https://api.vc.bilibili.com/svr_sync/v1/svr_sync/fetch_session_msgs
-     pub async fn get_chat_detail(&self, talker_id: i64) -> Result<Vec<super::msg::ChatMessage>> {
-         let url = "https://api.vc.bilibili.com/svr_sync/v1/svr_sync/fetch_session_msgs";
-         let params: Vec<(&str, String)> = vec![
-             ("talker_id", talker_id.to_string()),
-             ("session_type", "1".to_string()),
-             ("size", "30".to_string()),
-             ("build", "0".to_string()),
-             ("mobi_app", "web".to_string()),
-             ("sender_device_id", "1".to_string()),
-         ];
-         let resp: ApiResponse<super::msg::ChatDetailData> =
-             self.get_with_wbi(url, params).await?;
-         let data = resp.data.unwrap_or(super::msg::ChatDetailData {
-             messages: Vec::new(),
-             has_more: None,
-         });
-         Ok(data
-             .messages
-             .iter()
-             .filter_map(super::msg::parse_chat_message)
-             .collect())
-     }
+    /// Fetch chat history with one user.
+    /// GET https://api.vc.bilibili.com/svr_sync/v1/svr_sync/fetch_session_msgs
+    pub async fn get_chat_detail(&self, talker_id: i64) -> Result<Vec<super::msg::ChatMessage>> {
+        let url = "https://api.vc.bilibili.com/svr_sync/v1/svr_sync/fetch_session_msgs";
+        let params: Vec<(&str, String)> = vec![
+            ("talker_id", talker_id.to_string()),
+            ("session_type", "1".to_string()),
+            ("size", "30".to_string()),
+            ("build", "0".to_string()),
+            ("mobi_app", "web".to_string()),
+            ("sender_device_id", "1".to_string()),
+        ];
+        let resp: ApiResponse<super::msg::ChatDetailData> = self.get_with_wbi(url, params).await?;
+        let data = resp.data.unwrap_or(super::msg::ChatDetailData {
+            messages: Vec::new(),
+            has_more: None,
+        });
+        Ok(data
+            .messages
+            .iter()
+            .filter_map(super::msg::parse_chat_message)
+            .collect())
+    }
 
-     /// Send a private message to `talker_id`.
-     /// POST https://customerservice.bilibili.com/x/custom/msg_svr/v1/send_msg
-     pub async fn send_chat_message(&self, talker_id: i64, content: &str) -> Result<()> {
-         let my_uid = self
-             .cookies
-             .read()
-             .expect("cookies lock poisoned")
-             .as_ref()
-             .and_then(|c| {
-                 c.split(';').find_map(|part| {
-                     let part = part.trim();
-                     part.split_once('=')
-                         .filter(|(name, _)| *name == "DedeUserID")
-                         .map(|(_, value)| value.to_string())
-                 })
-             })
-             .unwrap_or_default();
-         // Bilibili web IM expects a UUID v4 (upper-case) as dev_id; the old
-         // x/session/msg/send accepted a hex blob, the new endpoint validates it.
-         let dev_id = uuid_v4_upper();
-         let ts = std::time::SystemTime::now()
-             .duration_since(std::time::UNIX_EPOCH)
-             .map(|d| d.as_secs())
-             .unwrap_or(0);
-         let content_json = serde_json::json!({ "content": content }).to_string();
-         let url = "https://customerservice.bilibili.com/x/custom/msg_svr/v1/send_msg";
-         let form_data: Vec<(&str, String)> = vec![
-             ("sender_uid", my_uid),
-             ("receiver_id", talker_id.to_string()),
-             ("receiver_type", "1".to_string()),
-             ("msg_type", "1".to_string()),
-             ("content", content_json),
-             ("dev_id", dev_id),
-             ("msg_status", "0".to_string()),
-             ("msg_source", "6".to_string()),
-             ("timestamp", ts.to_string()),
-             ("build", "0".to_string()),
-             ("mobi_app", "web".to_string()),
-         ];
-         let _resp: ApiResponse<serde_json::Value> = self.post_with_wbi(&url, form_data).await?;
-         Ok(())
-     }
+    /// Send a private message to `talker_id`.
+    /// POST https://customerservice.bilibili.com/x/custom/msg_svr/v1/send_msg
+    pub async fn send_chat_message(&self, talker_id: i64, content: &str) -> Result<()> {
+        let my_uid = self
+            .cookies
+            .read()
+            .expect("cookies lock poisoned")
+            .as_ref()
+            .and_then(|c| {
+                c.split(';').find_map(|part| {
+                    let part = part.trim();
+                    part.split_once('=')
+                        .filter(|(name, _)| *name == "DedeUserID")
+                        .map(|(_, value)| value.to_string())
+                })
+            })
+            .unwrap_or_default();
+        // Bilibili web IM expects a UUID v4 (upper-case) as dev_id; the old
+        // x/session/msg/send accepted a hex blob, the new endpoint validates it.
+        let dev_id = uuid_v4_upper();
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let content_json = serde_json::json!({ "content": content }).to_string();
+        let url = "https://customerservice.bilibili.com/x/custom/msg_svr/v1/send_msg";
+        let form_data: Vec<(&str, String)> = vec![
+            ("sender_uid", my_uid),
+            ("receiver_id", talker_id.to_string()),
+            ("receiver_type", "1".to_string()),
+            ("msg_type", "1".to_string()),
+            ("content", content_json),
+            ("dev_id", dev_id),
+            ("msg_status", "0".to_string()),
+            ("msg_source", "6".to_string()),
+            ("timestamp", ts.to_string()),
+            ("build", "0".to_string()),
+            ("mobi_app", "web".to_string()),
+        ];
+        let _resp: ApiResponse<serde_json::Value> = self.post_with_wbi(&url, form_data).await?;
+        Ok(())
+    }
 
-     /// Send a private message to `talker_id` (alias kept for readability).
+    /// Send a private message to `talker_id` (alias kept for readability).
 
-     // Comments API
+    // Comments API
 
     // Comments API
     pub async fn get_comments(&self, oid: i64, pn: i32) -> Result<super::comment::CommentData> {
@@ -2344,10 +2357,7 @@ impl ApiClient {
 
     /// Query whether the current user has liked a video (data: 0/1).
     pub async fn get_video_like_status(&self, bvid: &str) -> Result<bool> {
-        let url = self.build_url(
-            BilibiliApiDomain::Main,
-            "/x/web-interface/archive/has/like",
-        );
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/web-interface/archive/has/like");
         let resp: ApiResponse<i32> = self
             .get_with_wbi(&url, vec![("bvid", bvid.to_string())])
             .await?;
@@ -2360,10 +2370,7 @@ impl ApiClient {
         struct CoinsResp {
             multiply: Option<i32>,
         }
-        let url = self.build_url(
-            BilibiliApiDomain::Main,
-            "/x/web-interface/archive/coins",
-        );
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/web-interface/archive/coins");
         let resp: ApiResponse<CoinsResp> = self
             .get_with_wbi(&url, vec![("bvid", bvid.to_string())])
             .await?;
@@ -2402,10 +2409,7 @@ impl ApiClient {
             })
             .next()
             .ok_or_else(|| anyhow!("not logged in (no DedeUserID)"))?;
-        let url = self.build_url(
-            BilibiliApiDomain::Main,
-            "/x/v3/fav/folder/created/list-all",
-        );
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/v3/fav/folder/created/list-all");
         let resp: ApiResponse<FolderListResp> = self
             .get_with_wbi(
                 &url,
@@ -2416,7 +2420,9 @@ impl ApiClient {
                 ],
             )
             .await?;
-        let data = resp.data.ok_or_else(|| anyhow!("no favorite folder data"))?;
+        let data = resp
+            .data
+            .ok_or_else(|| anyhow!("no favorite folder data"))?;
         let folder = data
             .list
             .iter()
@@ -2454,10 +2460,7 @@ impl ApiClient {
             })
             .next()
             .ok_or_else(|| anyhow!("not logged in (no DedeUserID)"))?;
-        let url = self.build_url(
-            BilibiliApiDomain::Main,
-            "/x/v3/fav/folder/created/list-all",
-        );
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/v3/fav/folder/created/list-all");
         let resp: ApiResponse<super::favorite::FavoriteFolderData> = self
             .get_with_wbi(
                 &url,
@@ -2476,8 +2479,7 @@ impl ApiClient {
 
     /// Like (`like = true`) or unlike (`like = false`) a video.
     pub async fn like_video(&self, aid: i64, like: bool) -> Result<()> {
-        let url =
-            self.build_url(BilibiliApiDomain::Main, "/x/web-interface/archive/like");
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/web-interface/archive/like");
         let form_data = vec![
             ("aid", aid.to_string()),
             ("like", if like { "1" } else { "2" }.to_string()),
@@ -2493,7 +2495,10 @@ impl ApiClient {
         let form_data = vec![
             ("aid", aid.to_string()),
             ("multiply", multiply.to_string()),
-            ("select_like", if select_like { "1" } else { "0" }.to_string()),
+            (
+                "select_like",
+                if select_like { "1" } else { "0" }.to_string(),
+            ),
         ];
         let _: ApiResponse<serde_json::Value> = self.post_with_wbi(&url, form_data).await?;
         Ok(())
@@ -2503,10 +2508,7 @@ impl ApiClient {
     /// folder identified by `media_id`.
     pub async fn favorite_video(&self, aid: i64, media_id: i64, add: bool) -> Result<()> {
         let url = self.build_url(BilibiliApiDomain::Main, "/x/v3/fav/resource/deal");
-        let mut form_data = vec![
-            ("rid", aid.to_string()),
-            ("type", "2".to_string()),
-        ];
+        let mut form_data = vec![("rid", aid.to_string()), ("type", "2".to_string())];
         if add {
             form_data.push(("add_media_ids", media_id.to_string()));
         } else {
@@ -2763,9 +2765,7 @@ impl ApiClient {
                 .split(';')
                 .map(str::trim)
                 .filter(|part| {
-                    !part.is_empty()
-                        && !part.starts_with("buvid3=")
-                        && !part.starts_with("buvid4=")
+                    !part.is_empty() && !part.starts_with("buvid3=") && !part.starts_with("buvid4=")
                 })
                 .collect();
             let mut joined = kept.join("; ");
@@ -2786,9 +2786,7 @@ impl ApiClient {
         if let Ok(mut f) = File::open("/dev/urandom") {
             let _ = f.read_exact(&mut buf);
         }
-        let hex = |bytes: &[u8]| -> String {
-            bytes.iter().map(|b| format!("{b:02x}")).collect()
-        };
+        let hex = |bytes: &[u8]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
         format!("{}_{}", &hex(&buf[..8]), &hex(&buf[8..]))
     }
 
@@ -2798,9 +2796,7 @@ impl ApiClient {
     fn ensure_lsid_cookies(&self) {
         let mut cookies = self.cookies.write().expect("cookies lock poisoned");
         if let Some(c) = cookies.as_mut() {
-            let has_lsid = c
-                .split(';')
-                .any(|p| p.trim().starts_with("b_lsid="));
+            let has_lsid = c.split(';').any(|p| p.trim().starts_with("b_lsid="));
             let has_nut = c.split(';').any(|p| p.trim().starts_with("b_nut="));
             if has_lsid && has_nut {
                 return;
@@ -2814,9 +2810,7 @@ impl ApiClient {
                 .split(';')
                 .map(str::trim)
                 .filter(|part| {
-                    !part.is_empty()
-                        && !part.starts_with("b_lsid=")
-                        && !part.starts_with("b_nut=")
+                    !part.is_empty() && !part.starts_with("b_lsid=") && !part.starts_with("b_nut=")
                 })
                 .collect();
             let mut joined = kept.join("; ");
@@ -2906,21 +2900,15 @@ impl ApiClient {
         intro: &str,
         privacy: i32,
     ) -> Result<i64> {
-        let url =
-            self.build_url(BilibiliApiDomain::Main, "/x/v3/fav/folder/add");
+        let url = self.build_url(BilibiliApiDomain::Main, "/x/v3/fav/folder/add");
         let form_data = vec![
             ("title", title.to_string()),
             ("intro", intro.to_string()),
             ("privacy", privacy.to_string()),
         ];
-        let resp: ApiResponse<serde_json::Value> =
-            self.post_with_wbi(&url, form_data).await?;
+        let resp: ApiResponse<serde_json::Value> = self.post_with_wbi(&url, form_data).await?;
         if resp.code != 0 {
-            return Err(anyhow!(
-                "创建收藏夹失败 {}: {}",
-                resp.code,
-                resp.message
-            ));
+            return Err(anyhow!("创建收藏夹失败 {}: {}", resp.code, resp.message));
         }
         let id = resp
             .data
@@ -2935,14 +2923,9 @@ impl ApiClient {
     pub async fn delete_favorite_folder(&self, media_id: i64) -> Result<()> {
         let url = self.build_url(BilibiliApiDomain::Main, "/x/v3/fav/folder/del");
         let form_data = vec![("media_ids".to_string(), media_id.to_string())];
-        let resp: ApiResponse<serde_json::Value> =
-            self.post_with_owned(&url, form_data).await?;
+        let resp: ApiResponse<serde_json::Value> = self.post_with_owned(&url, form_data).await?;
         if resp.code != 0 {
-            return Err(anyhow!(
-                "删除收藏夹失败 {}: {}",
-                resp.code,
-                resp.message
-            ));
+            return Err(anyhow!("删除收藏夹失败 {}: {}", resp.code, resp.message));
         }
         Ok(())
     }
@@ -2954,14 +2937,9 @@ impl ApiClient {
             ("media_id", media_id.to_string()),
             ("title", title.to_string()),
         ];
-        let resp: ApiResponse<serde_json::Value> =
-            self.post_with_wbi(&url, form_data).await?;
+        let resp: ApiResponse<serde_json::Value> = self.post_with_wbi(&url, form_data).await?;
         if resp.code != 0 {
-            return Err(anyhow!(
-                "重命名收藏夹失败 {}: {}",
-                resp.code,
-                resp.message
-            ));
+            return Err(anyhow!("重命名收藏夹失败 {}: {}", resp.code, resp.message));
         }
         Ok(())
     }
@@ -2972,12 +2950,7 @@ impl ApiClient {
     /// - `bvid`: Video BV ID
     /// - `cid`: Video CID (page cid)
     /// - `msg`: Danmaku text content
-    pub async fn send_danmaku(
-        &self,
-        bvid: &str,
-        cid: i64,
-        msg: &str,
-    ) -> Result<()> {
+    pub async fn send_danmaku(&self, bvid: &str, cid: i64, msg: &str) -> Result<()> {
         let url = self.build_url(BilibiliApiDomain::Main, "/x/v2/dm/post");
         let rnd = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2993,14 +2966,9 @@ impl ApiClient {
             ("mode", "1".to_string()),
             ("rnd", rnd.to_string()),
         ];
-        let resp: ApiResponse<serde_json::Value> =
-            self.post_with_wbi(&url, form_data).await?;
+        let resp: ApiResponse<serde_json::Value> = self.post_with_wbi(&url, form_data).await?;
         if resp.code != 0 {
-            return Err(anyhow!(
-                "发送弹幕失败 ({}): {}",
-                resp.code,
-                resp.message
-            ));
+            return Err(anyhow!("发送弹幕失败 ({}): {}", resp.code, resp.message));
         }
         Ok(())
     }
@@ -3064,11 +3032,7 @@ impl ApiClient {
         ];
         let resp: ApiResponse<serde_json::Value> = self.post(&url, form_data).await?;
         if resp.code != 0 {
-            return Err(anyhow!(
-                "发布动态失败 ({}): {}",
-                resp.code,
-                resp.message
-            ));
+            return Err(anyhow!("发布动态失败 ({}): {}", resp.code, resp.message));
         }
         Ok(())
     }
@@ -3087,11 +3051,7 @@ impl ApiClient {
         ];
         let resp: ApiResponse<serde_json::Value> = self.post(&url, form_data).await?;
         if resp.code != 0 {
-            return Err(anyhow!(
-                "关注失败 ({}): {}",
-                resp.code,
-                resp.message
-            ));
+            return Err(anyhow!("关注失败 ({}): {}", resp.code, resp.message));
         }
         Ok(())
     }
@@ -3106,11 +3066,7 @@ impl ApiClient {
         ];
         let resp: ApiResponse<serde_json::Value> = self.post(&url, form_data).await?;
         if resp.code != 0 {
-            return Err(anyhow!(
-                "取关失败 ({}): {}",
-                resp.code,
-                resp.message
-            ));
+            return Err(anyhow!("取关失败 ({}): {}", resp.code, resp.message));
         }
         Ok(())
     }
@@ -3124,11 +3080,7 @@ impl ApiClient {
         let form_data = vec![("season_id", season_id.to_string())];
         let resp: ApiResponse<serde_json::Value> = self.post(&url, form_data).await?;
         if resp.code != 0 {
-            return Err(anyhow!(
-                "追番失败 ({}): {}",
-                resp.code,
-                resp.message
-            ));
+            return Err(anyhow!("追番失败 ({}): {}", resp.code, resp.message));
         }
         Ok(())
     }
@@ -3139,11 +3091,7 @@ impl ApiClient {
         let form_data = vec![("season_id", season_id.to_string())];
         let resp: ApiResponse<serde_json::Value> = self.post(&url, form_data).await?;
         if resp.code != 0 {
-            return Err(anyhow!(
-                "取消追番失败 ({}): {}",
-                resp.code,
-                resp.message
-            ));
+            return Err(anyhow!("取消追番失败 ({}): {}", resp.code, resp.message));
         }
         Ok(())
     }
@@ -3215,18 +3163,17 @@ impl ApiClient {
     pub async fn is_bangumi_followed(&self, season_id: i64) -> Result<bool> {
         let mid = {
             let cookie_str = self.cookies.read().expect("cookies lock poisoned").clone();
-            cookie_str
-                .and_then(|c| {
-                    c.split(';')
-                        .filter_map(|part| {
-                            let mut it = part.trim().splitn(2, '=');
-                            match (it.next(), it.next()) {
-                                (Some("DedeUserID"), Some(v)) => v.trim().parse::<i64>().ok(),
-                                _ => None,
-                            }
-                        })
-                        .next()
-                })
+            cookie_str.and_then(|c| {
+                c.split(';')
+                    .filter_map(|part| {
+                        let mut it = part.trim().splitn(2, '=');
+                        match (it.next(), it.next()) {
+                            (Some("DedeUserID"), Some(v)) => v.trim().parse::<i64>().ok(),
+                            _ => None,
+                        }
+                    })
+                    .next()
+            })
         };
         let Some(mid) = mid else {
             return Ok(false);
@@ -3272,10 +3219,7 @@ impl ApiClient {
     /// Check whether the current user follows the given uploader.
     /// Returns `true` if followed (attribute & 1 != 0).
     pub async fn get_follow_status(&self, mid: i64) -> Result<bool> {
-        let url = self.build_url(
-            BilibiliApiDomain::Main,
-            &format!("/x/relation?fid={}", mid),
-        );
+        let url = self.build_url(BilibiliApiDomain::Main, &format!("/x/relation?fid={}", mid));
         let resp: ApiResponse<serde_json::Value> = self.get(&url).await?;
         if resp.code != 0 {
             return Err(anyhow!(
@@ -3299,10 +3243,7 @@ impl ApiClient {
 
     /// Get ranking videos for a specific section (分区排行榜).
     /// `rid`: Section ID (0 = all, 1 = anime, 3 = music, etc.)
-    pub async fn get_ranking(
-        &self,
-        rid: i64,
-    ) -> Result<Vec<super::recommend::VideoItem>> {
+    pub async fn get_ranking(&self, rid: i64) -> Result<Vec<super::recommend::VideoItem>> {
         let url = format!(
             "{}/x/web-interface/ranking/v2?rid={}&type=all",
             BilibiliApiDomain::Main.as_str(),
@@ -3360,7 +3301,10 @@ fn uuid_v4_upper() -> String {
     // RFC 4122: version 4, variant 10xx
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex = bytes.iter().map(|b| format!("{:02X}", b)).collect::<String>();
+    let hex = bytes
+        .iter()
+        .map(|b| format!("{:02X}", b))
+        .collect::<String>();
     format!(
         "{}-{}-{}-{}-{}",
         &hex[0..8],
@@ -3453,7 +3397,8 @@ mod live_contract_tests {
         }
 
         let watch_later = client.get_watch_later(1, 2).await.expect("watch later");
-        assert!(watch_later.count >= watch_later.list.len() as i64);        let collected = client
+        assert!(watch_later.count >= watch_later.list.len() as i64);
+        let collected = client
             .get_collected_folders(mid, 1, 2)
             .await
             .expect("collected folders");
@@ -3477,4 +3422,3 @@ mod live_contract_tests {
         }
     }
 }
-

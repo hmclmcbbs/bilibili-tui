@@ -182,7 +182,11 @@ impl SearchPage {
                     if len > 0 && cur + 1 >= len {
                         // 到底部再按 j/↓：切到热搜栏（即使热搜还在加载也切，让用户看到焦点移动）
                         self.picker_focus = PickerFocus::Hotwords;
-                        self.hot_selected = if self.hotwords.is_empty() { None } else { Some(0) };
+                        self.hot_selected = if self.hotwords.is_empty() {
+                            None
+                        } else {
+                            Some(0)
+                        };
                         return;
                     }
                     self.move_history(1);
@@ -274,7 +278,11 @@ impl SearchPage {
         self.loading_more = false;
     }
 
-    pub fn set_user_results(&mut self, results: Vec<crate::api::search::SearchUserItem>, total: i32) {
+    pub fn set_user_results(
+        &mut self,
+        results: Vec<crate::api::search::SearchUserItem>,
+        total: i32,
+    ) {
         self.user_grid.clear();
         for item in results {
             let card = VideoCard::user(
@@ -426,7 +434,9 @@ impl SearchPage {
             }
             PickerFocus::Hotwords => {
                 let idx = self.hot_selected?;
-                self.hotwords.get(idx).and_then(|item| item.keyword_text())?
+                self.hotwords
+                    .get(idx)
+                    .and_then(|item| item.keyword_text())?
             }
         };
         self.query = keyword.clone();
@@ -502,7 +512,8 @@ impl SearchPage {
                         }
                     } else {
                         self.user_grid.selected_index = click_idx;
-                        self.user_grid.update_scroll(self.user_grid.cached_visible_rows);
+                        self.user_grid
+                            .update_scroll(self.user_grid.cached_visible_rows);
                         self.last_click_time = Some(now);
                         self.last_click_index = Some(click_idx);
                     }
@@ -520,12 +531,12 @@ impl SearchPage {
         } else {
             (self.history.len() as u16 + 2).min(8)
         };
-        let hot_h = if self.hotword_loading || !self.hotword_error.is_none() || !self.hotwords.is_empty()
-        {
-            (self.hotwords.len() as u16 + 2).min(8).max(3)
-        } else {
-            0
-        };
+        let hot_h =
+            if self.hotword_loading || !self.hotword_error.is_none() || !self.hotwords.is_empty() {
+                (self.hotwords.len() as u16 + 2).min(8).max(3)
+            } else {
+                0
+            };
 
         if hist_h == 0 && hot_h == 0 {
             let block = Block::default()
@@ -597,7 +608,11 @@ impl SearchPage {
 
         let list = List::new(items)
             .block(block)
-            .highlight_style(Style::default().fg(theme.bilibili_pink).bg(theme.bg_highlight))
+            .highlight_style(
+                Style::default()
+                    .fg(theme.bilibili_pink)
+                    .bg(theme.bg_highlight),
+            )
             .highlight_symbol("▶ ");
         let mut state = ListState::default().with_selected(self.history_selected);
         frame.render_stateful_widget(list, area, &mut state);
@@ -662,7 +677,11 @@ impl SearchPage {
 
         let list = List::new(items)
             .block(block)
-            .highlight_style(Style::default().fg(theme.bilibili_pink).bg(theme.bg_highlight))
+            .highlight_style(
+                Style::default()
+                    .fg(theme.bilibili_pink)
+                    .bg(theme.bg_highlight),
+            )
             .highlight_symbol("▶ ");
         let mut state = ListState::default().with_selected(self.hot_selected);
         frame.render_stateful_widget(list, area, &mut state);
@@ -745,7 +764,9 @@ impl Component for SearchPage {
             let results_top = dropdown_area.y + dropdown_area.height;
             let results_area = Rect {
                 y: results_top,
-                height: chunks[1].height.saturating_sub(results_top.saturating_sub(chunks[1].y)),
+                height: chunks[1]
+                    .height
+                    .saturating_sub(results_top.saturating_sub(chunks[1].y)),
                 ..chunks[1]
             };
             if self.mode == SearchMode::User {
@@ -1118,10 +1139,7 @@ impl Component for SearchPage {
             if keys.matches_confirm(key) {
                 return self.search_selected_picker();
             }
-            if key == KeyCode::Char('x')
-                || key == KeyCode::Char('X')
-                || key == KeyCode::Delete
-            {
+            if key == KeyCode::Char('x') || key == KeyCode::Char('X') || key == KeyCode::Delete {
                 if self.picker_focus == PickerFocus::History && !self.history.is_empty() {
                     self.clear_history();
                     return Some(AppAction::None);
@@ -1156,7 +1174,9 @@ impl Component for SearchPage {
                 SearchMode::User => {
                     if keys.matches_page_down(key) {
                         self.user_grid.move_page_down();
-                        if self.user_grid.is_near_bottom(self.user_grid.cached_visible_rows)
+                        if self
+                            .user_grid
+                            .is_near_bottom(self.user_grid.cached_visible_rows)
                             && !self.user_loading_more
                         {
                             return Some(AppAction::LoadMoreSearchUsers);
@@ -1344,10 +1364,8 @@ impl Component for SearchPage {
                         ..dropdown_area
                     };
                     if hist_h > 0
-                        && hist_area.contains(ratatui::layout::Position::new(
-                            event.column,
-                            event.row,
-                        ))
+                        && hist_area
+                            .contains(ratatui::layout::Position::new(event.column, event.row))
                     {
                         let idx = event.row.saturating_sub(hist_area.y + 1) as usize;
                         if idx < self.history.len() {
@@ -1358,10 +1376,8 @@ impl Component for SearchPage {
                         return None;
                     }
                     if hot_h > 0
-                        && hot_area.contains(ratatui::layout::Position::new(
-                            event.column,
-                            event.row,
-                        ))
+                        && hot_area
+                            .contains(ratatui::layout::Position::new(event.column, event.row))
                     {
                         let idx = event.row.saturating_sub(hot_area.y + 1) as usize;
                         if idx < self.hotwords.len() {

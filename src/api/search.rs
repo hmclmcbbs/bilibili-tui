@@ -181,7 +181,11 @@ impl SearchBangumiItem {
             serde_json::Value::Array(arr) => {
                 let names: Vec<String> = arr
                     .iter()
-                    .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                    .filter_map(|v| {
+                        v.get("name")
+                            .and_then(|n| n.as_str())
+                            .map(|s| s.to_string())
+                    })
                     .filter(|s| !s.is_empty())
                     .collect();
                 if !names.is_empty() {

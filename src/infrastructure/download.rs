@@ -142,7 +142,13 @@ pub async fn download(
     // video/audio parts use the `.fNNNNN` suffix before ffmpeg merges them.
     let safe_title: String = title
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim()
         .to_string();
@@ -160,7 +166,11 @@ pub async fn download(
         .arg("--no-warnings")
         .arg("--user-agent")
         .arg(user_agent)
-        .arg(if whole_playlist { "--yes-playlist" } else { "--no-playlist" })
+        .arg(if whole_playlist {
+            "--yes-playlist"
+        } else {
+            "--no-playlist"
+        })
         .arg("-o")
         .arg(&out_template)
         .arg("--merge-output-format")
@@ -178,10 +188,7 @@ pub async fn download(
 
     let _ = tx.send(DownloadPhase::Preparing).await;
 
-    let mut stderr = child
-        .stderr
-        .take()
-        .context("无法读取 yt-dlp 输出")?;
+    let mut stderr = child.stderr.take().context("无法读取 yt-dlp 输出")?;
     let mut buf = [0u8; 4096];
     let mut pending: Vec<u8> = Vec::new();
     let mut last_percent: f32 = -1.0;
@@ -196,10 +203,7 @@ pub async fn download(
         // Split on both so percentages stream live instead of stalling until
         // the process exits.
         loop {
-            let Some(sep) = pending
-                .iter()
-                .position(|b| *b == b'\r' || *b == b'\n')
-            else {
+            let Some(sep) = pending.iter().position(|b| *b == b'\r' || *b == b'\n') else {
                 break;
             };
             let chunk_bytes: Vec<u8> = pending.drain(..sep).collect();
@@ -242,7 +246,10 @@ pub async fn download(
                 status.code()
             )))
             .await;
-        return Err(anyhow::anyhow!("yt-dlp 下载失败 (exit {:?})", status.code()));
+        return Err(anyhow::anyhow!(
+            "yt-dlp 下载失败 (exit {:?})",
+            status.code()
+        ));
     }
 
     // The final merged file is `<safe_title>.mp4`.

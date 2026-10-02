@@ -625,7 +625,6 @@ fn pick_audio<'a>(
     audio.into_iter().max_by_key(|stream| stream.bandwidth)
 }
 
-
 fn candidate_from_url(url: &str) -> CdnCandidate {
     CdnCandidate {
         url: url.to_string(),
@@ -644,10 +643,10 @@ impl RankedStreams {
         data: &PlayUrlData,
         options: crate::domain::playback::PlaybackOptions,
     ) -> Result<Self> {
-        let video_stream = pick_video(&data.dash.video, options)
-            .ok_or_else(|| anyhow!("播放地址没有视频流"))?;
-        let audio_stream = pick_audio(&data.dash, options)
-            .ok_or_else(|| anyhow!("播放地址没有音频流"))?;
+        let video_stream =
+            pick_video(&data.dash.video, options).ok_or_else(|| anyhow!("播放地址没有视频流"))?;
+        let audio_stream =
+            pick_audio(&data.dash, options).ok_or_else(|| anyhow!("播放地址没有音频流"))?;
         let mut video: Vec<CdnCandidate> = Vec::new();
         if let Some(primary) = video_stream.primary_url() {
             video.push(candidate_from_url(primary));
@@ -699,10 +698,9 @@ pub async fn rank_streams(
     data: &PlayUrlData,
     options: crate::domain::playback::PlaybackOptions,
 ) -> Result<RankedStreams> {
-    let video = pick_video(&data.dash.video, options)
-        .ok_or_else(|| anyhow!("播放地址没有视频流"))?;
-    let audio = pick_audio(&data.dash, options)
-        .ok_or_else(|| anyhow!("播放地址没有音频流"))?;
+    let video =
+        pick_video(&data.dash.video, options).ok_or_else(|| anyhow!("播放地址没有视频流"))?;
+    let audio = pick_audio(&data.dash, options).ok_or_else(|| anyhow!("播放地址没有音频流"))?;
     let region_client = reqwest::Client::builder()
         .connect_timeout(Duration::from_millis(400))
         .build()?;

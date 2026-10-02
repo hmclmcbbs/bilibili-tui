@@ -174,8 +174,8 @@ mod tests {
             "status_v": "已完成",
             "detail": null
         }"#;
-        let item: MallExpressTrackItem = serde_json::from_str(json).expect("null detail must parse");
+        let item: MallExpressTrackItem =
+            serde_json::from_str(json).expect("null detail must parse");
         assert!(item.detail.is_empty());
     }
 }
-

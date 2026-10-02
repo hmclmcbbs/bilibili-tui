@@ -176,7 +176,9 @@ impl DynamicDetailPage {
     }
 
     async fn download_image(url: &str) -> Option<DynamicImage> {
-        crate::infrastructure::image_cache::instance().get(url).await
+        crate::infrastructure::image_cache::instance()
+            .get(url)
+            .await
     }
 
     pub async fn load_more_comments(&mut self, api_client: &ApiClient) {

@@ -119,15 +119,15 @@ fn document_from_html(content: &str) -> ArticleDocument {
             if inside_figure {
                 continue;
             }
-                if let Some(placeholder) = embedded_placeholder(&element) {
-                    document_blocks.push(ArticleBlock::Embedded(placeholder));
-                } else if let Some(url) = image_url(&element) {
-                    push_unique_url(&mut image_urls, &url);
-                    document_blocks.push(ArticleBlock::Image {
-                        url: normalized_url(&url),
-                        alt: image_alt(&element),
-                    });
-                }
+            if let Some(placeholder) = embedded_placeholder(&element) {
+                document_blocks.push(ArticleBlock::Embedded(placeholder));
+            } else if let Some(url) = image_url(&element) {
+                push_unique_url(&mut image_urls, &url);
+                document_blocks.push(ArticleBlock::Image {
+                    url: normalized_url(&url),
+                    alt: image_alt(&element),
+                });
+            }
             continue;
         }
 

@@ -456,7 +456,8 @@ impl Component for FavoritesPage {
             Style::default()
         };
         frame.render_widget(
-            Paragraph::new(header_title).style(header_style)
+            Paragraph::new(header_title)
+                .style(header_style)
                 .block(Block::default().borders(Borders::ALL)),
             right[0],
         );
@@ -517,7 +518,11 @@ impl Component for FavoritesPage {
                 KeyCode::Enter => {
                     self.filter_input_mode = false;
                     let kw = self.filter_input.trim().to_string();
-                    self.filter = if kw.is_empty() { None } else { Some(kw.clone()) };
+                    self.filter = if kw.is_empty() {
+                        None
+                    } else {
+                        Some(kw.clone())
+                    };
                     crate::storage::save_search_history(&kw);
                     self.apply_filter();
                     return Some(AppAction::None);
@@ -645,18 +650,18 @@ impl Component for FavoritesPage {
                     }
                 }
                 return Some(AppAction::None);
-        } else if key == KeyCode::Char('x') {
-            // Delete the selected created folder
-            if let Some(source) = sources.get(self.selected_source) {
-                if let FavoriteSource::Created { media_id, title } = source {
-                    let title = title.clone();
-                    let mid = self.mid;
-                    self.set_message(format!("已删除收藏夹: {title}"));
-                    return Some(AppAction::DeleteFavoriteFolder(*media_id));
+            } else if key == KeyCode::Char('x') {
+                // Delete the selected created folder
+                if let Some(source) = sources.get(self.selected_source) {
+                    if let FavoriteSource::Created { media_id, title } = source {
+                        let title = title.clone();
+                        let mid = self.mid;
+                        self.set_message(format!("已删除收藏夹: {title}"));
+                        return Some(AppAction::DeleteFavoriteFolder(*media_id));
+                    }
                 }
-            }
-            return Some(AppAction::None);
-        } else if keys.matches_confirm(key)
+                return Some(AppAction::None);
+            } else if keys.matches_confirm(key)
                 && let Some(source) = sources.get(self.selected_source)
                 && *source != self.active_source
             {

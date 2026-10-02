@@ -314,9 +314,7 @@ impl HomePage {
     ) {
         let t0 = std::time::Instant::now();
         let result = match (feed, use_guest_feed) {
-            (HomeFeed::Recommended, false) => {
-                api_client.get_recommendations_paged(fresh_idx).await
-            }
+            (HomeFeed::Recommended, false) => api_client.get_recommendations_paged(fresh_idx).await,
             (HomeFeed::Recommended, true) | (HomeFeed::Popular, _) => {
                 api_client.get_popular_videos(fresh_idx, 20).await
             }
@@ -554,7 +552,9 @@ impl HomePage {
     }
 
     async fn download_image(url: &str) -> Option<DynamicImage> {
-        crate::infrastructure::image_cache::instance().get(url).await
+        crate::infrastructure::image_cache::instance()
+            .get(url)
+            .await
     }
 
     fn visible_rows(&self, height: u16) -> usize {
@@ -730,8 +730,7 @@ impl Component for HomePage {
         }
         // 已在搜索输入模式时，i 应作为普通字符输入（由 search.handle_input
         // 处理），不再被"进入搜索"快捷键拦截。
-        if keys.matches_search_focus(key)
-            && !(self.selected_source == 0 && self.search.input_mode)
+        if keys.matches_search_focus(key) && !(self.selected_source == 0 && self.search.input_mode)
         {
             self.begin_search();
             return Some(AppAction::None);
