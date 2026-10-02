@@ -1,0 +1,5 @@
+# Compile for the AVX2 baseline (x86-64-v3): every CPU since ~2013 supports it,
+# and it lets serde/strings/ image kernels use 256-bit SIMD. Checked at build
+# time so the AUR/local builds pick it up automatically.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

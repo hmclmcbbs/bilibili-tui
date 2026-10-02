@@ -3,10 +3,15 @@ use crate::application::network;
 use crate::presentation::tui::{Page, VideoCard};
 
 impl App {
-    pub(super) fn drain_network_events(&mut self) {
+    /// Drain queued network replies. Returns `true` when at least one event
+    /// was processed, i.e. visible state may have changed and a redraw is due.
+    pub(super) fn drain_network_events(&mut self) -> bool {
+        let mut changed = false;
         while let Ok(event) = self.network_event_rx.try_recv() {
             self.handle_network_event(event);
+            changed = true;
         }
+        changed
     }
 
     fn handle_network_event(&mut self, event: network::NetworkEvent) {

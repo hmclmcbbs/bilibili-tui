@@ -57,7 +57,7 @@ impl DownloadsPage {
             columns: 3,
             visible_rows: 3,
             covers: Vec::new(),
-            picker: Arc::new(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks())),
+            picker: crate::infrastructure::picker::shared(),
             filter: String::new(),
             input_mode: false,
             message: None,

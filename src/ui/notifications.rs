@@ -171,7 +171,7 @@ pub struct NotificationsPage {
 
 impl NotificationsPage {
     pub fn new() -> Self {
-        let picker = Arc::new(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()));
+        let picker = crate::infrastructure::picker::shared();
         let (avatar_tx, avatar_rx) = mpsc::channel(64);
         let (cover_tx, cover_rx) = mpsc::channel(64);
         Self {

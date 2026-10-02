@@ -24,7 +24,7 @@ qrcode = { version = "0.14.1", default-features = false, features = ["image"] }
 quick-xml = "0.37.5"
 ratatui = { version = "0.30.0", features = ["serde"] }
 ratatui-image = { version = "11.0.2", default-features = false, features = ["image-defaults", "crossterm"] }
-reqwest = { version = "0.13.2", default-features = false, features = ["json", "cookies", "form", "native-tls", "charset", "http2", "system-proxy"] }
+reqwest = { version = "0.13.2", default-features = false, features = ["json", "cookies", "form", "native-tls", "charset", "http2", "system-proxy", "gzip", "brotli", "deflate"] }
 resvg = "0.45"
 usvg = "0.45"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -41,7 +41,9 @@ unicode-width = "0.2.2"
 lto = true
 codegen-units = 1
 strip = true
-opt-level = "z"
+# Optimize for speed, not size: the TUI does a lot of JSON/image/layout work
+# per frame and binary size is irrelevant for a locally-installed tool.
+opt-level = 3
 
 # The profile that 'dist' will build with
 [profile.dist]

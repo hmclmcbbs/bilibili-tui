@@ -442,7 +442,7 @@ pub struct VideoCardGrid {
 
 impl VideoCardGrid {
     pub fn new() -> Self {
-        let picker = Arc::new(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()));
+        let picker = crate::infrastructure::picker::shared();
         let (cover_tx, cover_rx) = mpsc::channel(32);
 
         Self {
@@ -630,12 +630,7 @@ impl VideoCardGrid {
                             img = img.crop_imm(x, y, side, side);
                             img = img.resize(384, 384, image::imageops::FilterType::Triangle);
                         }
-                        let t_rp = std::time::Instant::now();
                         let protocol = picker.new_resize_protocol(img);
-                        crate::infrastructure::image_cache::img_log(&format!(
-                            "[IMG] resize_protocol time={}ms",
-                            t_rp.elapsed().as_millis()
-                        ));
                         let _ = tx
                             .send(CoverResult {
                                 index: idx,

@@ -223,7 +223,7 @@ impl HomePage {
     pub fn new() -> Self {
         // Try to detect terminal graphics protocol (Kitty/Sixel/iTerm2)
         // Fall back to halfblocks if detection fails
-        let picker = Arc::new(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()));
+        let picker = crate::infrastructure::picker::shared();
 
         // Create channel for background image downloads
         let (cover_tx, cover_rx) = mpsc::channel(32);
@@ -294,10 +294,6 @@ impl HomePage {
         let use_guest_feed = self.use_guest_feed;
         let rid = self.ranking_rid;
         let api_client = self.api_client.clone().unwrap();
-        crate::infrastructure::image_cache::img_log(&format!(
-            "[PREFETCH] spawning prefetch for page {} feed={:?}",
-            next_fresh_idx, feed
-        ));
         tokio::spawn(async move {
             Self::prefetch_page(api_client, next_fresh_idx, feed, use_guest_feed, rid).await;
         });
@@ -312,7 +308,6 @@ impl HomePage {
         use_guest_feed: bool,
         rid: i64,
     ) {
-        let t0 = std::time::Instant::now();
         let result = match (feed, use_guest_feed) {
             (HomeFeed::Recommended, false) => api_client.get_recommendations_paged(fresh_idx).await,
             (HomeFeed::Recommended, true) | (HomeFeed::Popular, _) => {
@@ -320,34 +315,15 @@ impl HomePage {
             }
             _ => api_client.get_home_feed(feed, fresh_idx, 20, rid).await,
         };
-        match result {
-            Ok(videos) => {
-                crate::infrastructure::image_cache::img_log(&format!(
-                    "[PREFETCH] page {} fetched {} videos in {}ms",
-                    fresh_idx,
-                    videos.len(),
-                    t0.elapsed().as_millis()
-                ));
-                let cache = crate::infrastructure::image_cache::instance();
-                for video in &videos {
-                    if let Some(pic_url) = &video.pic {
-                        // Warm both memory and disk cache.  `image_cache::get`
-                        // handles deduplication internally, so concurrent
-                        // requests for the same URL are coalesced.
-                        cache.get(pic_url).await;
-                    }
+        if let Ok(videos) = result {
+            let cache = crate::infrastructure::image_cache::instance();
+            for video in &videos {
+                if let Some(pic_url) = &video.pic {
+                    // Warm both memory and disk cache.  `image_cache::get`
+                    // handles deduplication internally, so concurrent
+                    // requests for the same URL are coalesced.
+                    cache.get(pic_url).await;
                 }
-                crate::infrastructure::image_cache::img_log(&format!(
-                    "[PREFETCH] page {} covers cached in {}ms",
-                    fresh_idx,
-                    t0.elapsed().as_millis()
-                ));
-            }
-            Err(e) => {
-                crate::infrastructure::image_cache::img_log(&format!(
-                    "[PREFETCH] page {} failed: {}",
-                    fresh_idx, e
-                ));
             }
         }
     }
@@ -519,12 +495,7 @@ impl HomePage {
                     // Spawn background task
                     tokio::spawn(async move {
                         if let Some(img) = Self::download_image(&pic_url).await {
-                            let t_rp = std::time::Instant::now();
                             let protocol = picker.new_resize_protocol(img);
-                            crate::infrastructure::image_cache::img_log(&format!(
-                                "[IMG] resize_protocol time={}ms",
-                                t_rp.elapsed().as_millis()
-                            ));
                             let _ = tx
                                 .send(CoverResult {
                                     index: idx,

@@ -18,25 +18,11 @@ use std::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
-
-use std::io::Write;
 
 use image::DynamicImage;
 use reqwest::Client;
-
-/// Append a line to the image timing log (file, not stderr, to avoid
-/// conflicting with ratatui/crossterm terminal control on stderr).
-pub fn img_log(line: &str) {
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open("/tmp/img-timing.log")
-    {
-        let _ = writeln!(f, "{line}");
-    }
-}
 
 const CACHE_SUBDIR: &str = "images";
 const META_FILE: &str = "meta.json";
@@ -225,31 +211,10 @@ impl ImageCache {
     /// Fetch a decoded image, consulting memory -> disk -> network in order.
     /// Returns `None` only when the network fetch or decode fails.
     pub async fn get(&self, url: &str) -> Option<DynamicImage> {
-        let short: String = url
-            .chars()
-            .rev()
-            .take(40)
-            .collect::<String>()
-            .chars()
-            .rev()
-            .collect();
         // 1. memory
         let img = {
-            let t = Instant::now();
             let mem = self.memory.lock().unwrap();
-            let result = mem.get(url).map(|(img, _)| img.clone());
-            if result.is_some() {
-                img_log(&format!(
-                    "[IMG] memory_hit url={short} time={}ms",
-                    t.elapsed().as_millis()
-                ));
-            } else {
-                img_log(&format!(
-                    "[IMG] memory_miss url={short} time={}ms",
-                    t.elapsed().as_millis()
-                ));
-            }
-            result
+            mem.get(url).map(|(img, _)| img.clone())
         };
         if let Some(img) = img {
             self.touch_disk(url);
@@ -282,7 +247,6 @@ impl ImageCache {
         // 3. disk (raw bytes) -> decode
         let disk_bytes = tokio::fs::read(self.disk_path(url)).await.ok();
         if let Some(bytes) = disk_bytes {
-            let t = Instant::now();
             let decoded = if is_svg(&bytes) {
                 decode_svg(bytes).await
             } else {
@@ -294,21 +258,12 @@ impl ImageCache {
                 self.touch_disk(url);
                 drop(g);
                 self.finish_fetch(url, img.clone());
-                img_log(&format!(
-                    "[IMG] disk_hit url={short} time={}ms",
-                    t.elapsed().as_millis()
-                ));
                 return Some(img);
             }
         }
 
         // 4. network
-        let t = Instant::now();
         let fetched = fetch_and_store(self, url).await;
-        img_log(&format!(
-            "[IMG] network_total url={short} time={}ms",
-            t.elapsed().as_millis()
-        ));
         let mut g = holder.lock().await;
         *g = fetched.clone();
         drop(g);
@@ -324,18 +279,10 @@ impl ImageCache {
 }
 
 async fn decode_image(bytes: Vec<u8>) -> Option<DynamicImage> {
-    tokio::task::spawn_blocking(move || {
-        let t = std::time::Instant::now();
-        let result = image::load_from_memory(&bytes).ok();
-        img_log(&format!(
-            "[IMG] decode_image time={}ms",
-            t.elapsed().as_millis()
-        ));
-        result
-    })
-    .await
-    .ok()
-    .flatten()
+    tokio::task::spawn_blocking(move || image::load_from_memory(&bytes).ok())
+        .await
+        .ok()
+        .flatten()
 }
 
 /// Heuristic check for SVG content (Bilibili serves mathjax formulas as SVG).
@@ -401,43 +348,20 @@ fn thumbnail_url(url: &str) -> String {
 
 async fn fetch_and_store(cache: &ImageCache, url: &str) -> Option<DynamicImage> {
     let _permit = download_semaphore().acquire().await.ok()?;
-    let t = Instant::now();
     let response = cache.http.get(&thumbnail_url(url)).send().await.ok()?;
     let bytes = response.bytes().await.ok()?;
-    let short_dl: String = url
-        .chars()
-        .rev()
-        .take(40)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    img_log(&format!(
-        "[IMG] http_download url={short_dl} time={}ms",
-        t.elapsed().as_millis()
-    ));
     // Bilibili mathjax formula images are served as SVG, which the `image`
     // crate cannot decode. Rasterize them to PNG first.
-    let t = Instant::now();
     let decoded = if is_svg(&bytes) {
         decode_svg(bytes.to_vec()).await?
     } else {
         decode_image(bytes.to_vec()).await?
     };
-    img_log(&format!(
-        "[IMG] decode url={short_dl} time={}ms",
-        t.elapsed().as_millis()
-    ));
     let img = decoded;
     // Store raw bytes on disk for next run.
-    let t = Instant::now();
     let path = cache.disk_path(url);
     let _ = tokio::fs::create_dir_all(cache.dir.clone()).await;
     let _ = tokio::fs::write(&path, &bytes).await;
-    img_log(&format!(
-        "[IMG] disk_write url={short_dl} time={}ms",
-        t.elapsed().as_millis()
-    ));
     {
         let mut meta = cache.meta.lock().unwrap();
         meta.insert(

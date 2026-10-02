@@ -62,7 +62,7 @@ pub struct MallPage {
 
 impl MallPage {
     pub fn new() -> Self {
-        let picker = Arc::new(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()));
+        let picker = crate::infrastructure::picker::shared();
         let (product_tx, product_rx) = mpsc::channel(64);
         Self {
             orders: Vec::new(),

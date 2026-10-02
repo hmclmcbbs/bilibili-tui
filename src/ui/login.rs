@@ -24,7 +24,7 @@ pub struct LoginPage {
 
 impl LoginPage {
     pub fn new() -> Self {
-        let picker = Arc::new(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()));
+        let picker = crate::infrastructure::picker::shared();
         Self {
             qrcode_data: None,
             error_message: None,

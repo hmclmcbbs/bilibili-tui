@@ -72,6 +72,9 @@ pub struct App {
     avatar_picker: Arc<Picker>,
     avatar_tx: tokio::sync::mpsc::Sender<Option<StatefulProtocol>>,
     avatar_rx: tokio::sync::mpsc::Receiver<Option<StatefulProtocol>>,
+    /// Result channel for the background sidebar-profile refresh kicked off at
+    /// startup (see [`Self::spawn_current_user_refresh`]).
+    user_refresh_rx: Option<std::sync::mpsc::Receiver<Result<Option<CurrentUser>, ()>>>,
 
     pub previous_page: Option<PreviousPage>,
     /// Full page instances for nested detail navigation (list -> video -> UP).
@@ -147,8 +150,7 @@ impl App {
         // Always start from home. Login is now an optional flow.
         let current_page = Page::Home(HomePage::new());
 
-        let avatar_picker =
-            Arc::new(Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks()));
+        let avatar_picker = crate::infrastructure::picker::shared();
         let (avatar_tx, avatar_rx) = tokio::sync::mpsc::channel(4);
 
         Self {
@@ -166,6 +168,7 @@ impl App {
             avatar_picker,
             avatar_tx,
             avatar_rx,
+            user_refresh_rx: None,
             previous_page: None,
             navigation_stack: Vec::new(),
             theme,
@@ -220,7 +223,52 @@ impl App {
             self.user_avatar = None;
             return;
         }
-        match self.api_client.get_current_user().await {
+        let result = self.api_client.get_current_user().await;
+        self.apply_current_user(result.map_err(|_| ()));
+    }
+
+    /// Non-blocking variant of [`Self::refresh_current_user`]: kicks off the
+    /// nav request in the background so startup doesn't wait for a network
+    /// round-trip before the first frame (a dead API would otherwise delay
+    /// the first paint by the full 5–20s request timeout). The result is
+    /// applied by [`Self::poll_current_user`] on a later tick.
+    pub fn spawn_current_user_refresh(&mut self) {
+        if self.credentials.is_none() {
+            self.current_user = None;
+            self.user_avatar = None;
+            return;
+        }
+        let client = Arc::clone(&self.api_client);
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.user_refresh_rx = Some(rx);
+        tokio::spawn(async move {
+            let result = client.get_current_user().await.map_err(|_| ());
+            let _ = tx.send(result);
+        });
+    }
+
+    /// Apply a background user-profile refresh if one has completed.
+    /// Returns `true` when a result was applied (visible state changed).
+    pub fn poll_current_user(&mut self) -> bool {
+        let Some(rx) = &self.user_refresh_rx else {
+            return false;
+        };
+        match rx.try_recv() {
+            Ok(result) => {
+                self.user_refresh_rx = None;
+                self.apply_current_user(result);
+                true
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.user_refresh_rx = None;
+                false
+            }
+        }
+    }
+
+    fn apply_current_user(&mut self, result: Result<Option<CurrentUser>, ()>) {
+        match result {
             Ok(Some(user)) => {
                 let changed = self
                     .current_user
@@ -266,21 +314,26 @@ impl App {
     }
 
     /// Poll for a completed avatar download (called every tick).
-    pub fn poll_user_avatar(&mut self) {
+    /// Returns `true` when a new avatar arrived (redraw worth).
+    pub fn poll_user_avatar(&mut self) -> bool {
+        let mut changed = false;
         while let Ok(protocol) = self.avatar_rx.try_recv() {
             self.user_avatar = protocol;
             self.user_avatar_pending = false;
+            changed = true;
         }
+        changed
     }
 
     /// Auto-refresh the theme when the matugen color file changes.
     /// Polling is rate-limited to every ~2s and only does a cheap stat().
-    pub fn poll_matugen_theme(&mut self) {
+    /// Returns `true` when the theme was reloaded (redraw worth).
+    pub fn poll_matugen_theme(&mut self) -> bool {
         if self.theme_id != "matugen" {
-            return;
+            return false;
         }
         if self.last_matugen_check.elapsed() < std::time::Duration::from_secs(2) {
-            return;
+            return false;
         }
         self.last_matugen_check = std::time::Instant::now();
         let mtime = std::fs::metadata(crate::ui::Theme::matugen_path())
@@ -289,7 +342,9 @@ impl App {
         if mtime != self.last_matugen_mtime {
             self.last_matugen_mtime = mtime;
             self.theme = crate::ui::Theme::load_or_default("matugen").0;
+            return true;
         }
+        false
     }
 }
 

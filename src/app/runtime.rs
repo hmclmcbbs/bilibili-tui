@@ -17,24 +17,42 @@ impl App {
         // Initialize the first page
         self.init_current_page().await;
 
-        // Load the logged-in user profile for the sidebar (no-op when logged out).
-        self.refresh_current_user().await;
+        // Load the logged-in user profile for the sidebar in the background.
+        // Blocking here delayed the first frame by a full nav-API round-trip
+        // (up to the 5–20s HTTP timeout on a bad network); the profile is
+        // applied by poll_current_user() a tick later instead.
+        self.spawn_current_user_refresh();
 
         // Store the last content area for mouse handling
         let mut last_content_area = Rect::default();
 
-        // Scroll accumulator for high-resolution mouse wheel throttling
-        // Many modern mice generate multiple scroll events per physical "click"
-        const SCROLL_THRESHOLD: i32 = 15; // Accumulate 15 events before scrolling
-        let mut scroll_accumulator: i32 = 0;
+        // Redraw only when something actually changed (input, network reply,
+        // playback event, theme/avatar update) plus a slow fallback for
+        // time-driven UI such as 3-second message expiry. The old loop
+        // rebuilt and diffed the whole widget tree on every 100ms poll
+        // timeout even when nothing happened — pure waste while idle.
+        const REDRAW_FALLBACK: std::time::Duration = std::time::Duration::from_millis(300);
+        // Cap wheel scrolling at one row per 50ms. The previous scheme
+        // required 15 events per row (a standard wheel notch did nothing 14
+        // times out of 15); a cooldown passes the first event through
+        // immediately and coalesces bursts (touchpad/high-res wheels) to a
+        // bounded 20 rows/s.
+        const SCROLL_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(50);
+        let mut dirty = true;
+        let mut last_draw = std::time::Instant::now();
+        let mut last_scroll_apply: Option<std::time::Instant> = None;
 
         while !self.should_quit {
-            terminal.draw(|frame| {
-                last_content_area = self.get_content_area(frame.area());
-                self.draw(frame);
-            })?;
+            if dirty || last_draw.elapsed() >= REDRAW_FALLBACK {
+                terminal.draw(|frame| {
+                    last_content_area = self.get_content_area(frame.area());
+                    self.draw(frame);
+                })?;
+                dirty = false;
+                last_draw = std::time::Instant::now();
+            }
 
-            if event::poll(std::time::Duration::from_millis(100))? {
+            if event::poll(std::time::Duration::from_millis(16))? {
                 match event::read()? {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
                         // mpv runs as an external window with --input-terminal=no,
@@ -42,33 +60,44 @@ impl App {
                         // keys normally even while playback is active; draining
                         // keys here made the TUI feel frozen during playback.
                         self.handle_input(key.code, key.modifiers).await;
+                        dirty = true;
                     }
                     Event::Mouse(mouse) => match mouse.kind {
                         MouseEventKind::ScrollDown => {
-                            scroll_accumulator += 1;
-                            if scroll_accumulator >= SCROLL_THRESHOLD {
-                                scroll_accumulator = 0;
+                            let now = std::time::Instant::now();
+                            if last_scroll_apply
+                                .is_none_or(|last| now.duration_since(last) >= SCROLL_COOLDOWN)
+                            {
+                                last_scroll_apply = Some(now);
                                 self.handle_mouse(mouse, last_content_area).await;
+                                dirty = true;
                             }
                         }
                         MouseEventKind::ScrollUp => {
-                            scroll_accumulator -= 1;
-                            if scroll_accumulator <= -SCROLL_THRESHOLD {
-                                scroll_accumulator = 0;
+                            let now = std::time::Instant::now();
+                            if last_scroll_apply
+                                .is_none_or(|last| now.duration_since(last) >= SCROLL_COOLDOWN)
+                            {
+                                last_scroll_apply = Some(now);
                                 self.handle_mouse(mouse, last_content_area).await;
+                                dirty = true;
                             }
                         }
                         _ => {
                             // Other mouse events (clicks) are handled immediately
                             self.handle_mouse(mouse, last_content_area).await;
+                            dirty = true;
                         }
                     },
+                    Event::Resize(..) => dirty = true,
                     _ => {}
                 }
             }
 
             // Handle background tasks (like QR code polling)
-            self.tick().await;
+            if self.tick().await {
+                dirty = true;
+            }
         }
         Ok(())
     }
@@ -223,6 +252,16 @@ impl App {
     }
 
     async fn handle_input(&mut self, key: KeyCode, modifiers: KeyModifiers) {
+        // Global quit shortcuts: every page binds its own keys, so Ctrl+C /
+        // Ctrl+Q are handled once here and work no matter what state the app
+        // is in (mid-load, input box focused, sidebar active). `q` alone is
+        // still page-specific because several pages use it as "back".
+        if modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key, KeyCode::Char('c') | KeyCode::Char('q'))
+        {
+            self.should_quit = true;
+            return;
+        }
         // Playback errors remain visible until the user acknowledges them with
         // the next key press; the key still performs its normal action.
         self.playback.last_error = None;
@@ -443,14 +482,21 @@ impl App {
         }
     }
 
-    pub(super) async fn tick(&mut self) {
-        self.drain_network_events();
-        self.poll_user_avatar();
-        self.poll_matugen_theme();
+    /// Periodic housekeeping. Returns `true` when visible state may have
+    /// changed, so the run loop knows a redraw is due (see the dirty flag).
+    pub(super) async fn tick(&mut self) -> bool {
+        let mut changed = self.drain_network_events();
+        changed |= self.poll_current_user();
+        changed |= self.poll_user_avatar();
+        changed |= self.poll_matugen_theme();
         if let Some((items, source, start_index, order)) = self.pending_playlist.take() {
             self.start_playlist(items, source, start_index, order).await;
+            changed = true;
         }
         while let Ok(event) = self.playback_event_rx.try_recv() {
+            // Any playback event can flip UI state (error banner, auto-return,
+            // stream-support probe), so treat them all as redraw-worthy.
+            changed = true;
             let accepted = self.playback.apply_event(&event);
             match event {
                 crate::domain::playback::PlaybackEvent::Finished {
@@ -549,6 +595,7 @@ impl App {
         };
         if let Some((return_bvid, action)) = auto_play {
             self.handle_action(action).await;
+            changed = true;
             if let (Some(bvid), Some(session_id)) = (return_bvid, self.playback.session_id) {
                 self.auto_return_after_playback = Some((session_id, bvid));
             }
@@ -558,6 +605,7 @@ impl App {
                 let client = &self.api_client;
                 if let Some(action) = page.tick(client).await {
                     self.handle_action(action).await;
+                    changed = true;
                 }
             }
             Page::Home(page) => {
@@ -622,5 +670,6 @@ impl App {
             }
             _ => {}
         }
+        changed
     }
 }
