@@ -60,7 +60,12 @@ out = rife(
     sc=True,                 # 硬切镜不插帧, 避免转场鬼影
     sc_threshold=None,       # 用上面已置好的 _SceneChangeNext (绕开 misc 插件)
     trt=True,                # TensorRT (pypi wheel 自带运行时, 不依赖系统 CUDA)
-    trt_static_shape=False,  # 动态形状: 一套引擎覆盖 720p~4K 片源
+    trt_static_shape=False,  # 动态形状: 一套引擎覆盖范围内所有分辨率
+    # vsrife 默认 opt/max=1920x1080, 超出的 4K 源会因引擎形状不符被拒
+    # (mpv 会停用滤镜继续无补帧播放)。显式放宽到 4K, 代价是引擎稍大。
+    trt_min_shape=[128, 128],
+    trt_opt_shape=[1920, 1080],
+    trt_max_shape=[3840, 2160],
     trt_cache_dir=TRT_CACHE,
 )
 out.resize.Bicubic(
