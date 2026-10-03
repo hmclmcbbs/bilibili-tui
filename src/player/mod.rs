@@ -167,6 +167,28 @@ fn apply_mpv_common(cmd: &mut tokio::process::Command) {
     // call sites must re-assert this after --profile=low-latency
     // (mpv last-argument-wins).
     cmd.arg("--audio-buffer=0.5");
+    // 启动提速: gpu-next 的 vulkan 后端在这台机器上创建设备要 ~900ms,
+    // opengl 后端 ~240ms (冷启动实测, spawn→time-pos>0 各 3 次)。两者
+    // 都是同一个 libplacebo 渲染器, 画质引擎不变, 省下的是每次打开
+    // 视频都付的 ~650ms。想换回: mpv_extra_args --gpu-api=vulkan。
+    cmd.arg("--gpu-api=opengl");
+    // 画质套件 (此前 mpv 全默认, 无任何缩放调优):
+    // - ewa_lanczossharp: 放大时最锐利的高质量滤波 (片源分辨率低于
+    //   窗口时的清晰度关键, 在位 GPU 上开销可忽略)
+    // - dscale=mitchell: 缩小 (窗口/分辨率切换) 用平衡的 Mitchell
+    // - correct/linear-downscaling: 缩小前先降采样到目标分辨率、
+    //   线性空间缩放 — 消除缩小后的锯齿与闪烁
+    // - sigmoid-upscaling: 上放大前做 S 曲线变换, 减少高对比边缘的
+    //   振铃光晕 (字幕/线条周围)
+    // - deband: 压制 Bilibili 压缩暗场的色带 (banding)
+    // 全部被 mpv_extra_args 覆盖 (最后传入者生效)。
+    cmd.arg("--scale=ewa_lanczossharp");
+    cmd.arg("--cscale=ewa_lanczossharp");
+    cmd.arg("--dscale=mitchell");
+    cmd.arg("--correct-downscaling=yes");
+    cmd.arg("--linear-downscaling=yes");
+    cmd.arg("--sigmoid-upscaling=yes");
+    cmd.arg("--deband=yes");
     cmd.arg("--msg-level=ffmpeg=error,vd=warn");
     // Default window title follows media-title (which we set per session via
     // --force-media-title) and brands the fallback as bilibili-tui instead of
@@ -431,6 +453,11 @@ pub async fn play_video(
         cmd.arg(&webpage_url);
     }
     apply_mpv_vo(&mut cmd);
+    // 用户 mpv.conf 常带 keep-open=yes: 自然播完时 mpv 既不发 end-file
+    // 也不退出 (实测进程存活、eof-reached 卡住), 自动连播链和 Finished
+    // 事件都收不到。单视频会话必须自己退出 — CLI 覆盖配置文件, 想恢复
+    // 定格行为可用 mpv_extra_args --keep-open=yes。
+    cmd.arg("--keep-open=no");
     if loop_item {
         // 单曲循环交给 mpv: 文件播完自动重开, 不再产生 eof, 应用侧的
         // 自动连播链因此永远不会被触发 (用户按 q 退出除外)。
@@ -1251,6 +1278,9 @@ pub async fn play_playlist(
     cmd.stderr(Stdio::piped());
     apply_mpv_common(&mut cmd);
     cmd.arg("--idle=yes");
+    // 同 play_video: run_playlist 靠 end-file 逐项推进, 用户 mpv.conf 的
+    // keep-open=yes 会把列表卡死在第一项结尾; idle=yes 负责项间保活。
+    cmd.arg("--keep-open=no");
     apply_mpv_hwdec(&mut cmd);
     cmd.arg("--ytdl=no");
     cmd.arg("--script-opts-append=double_video_fps=yes");
@@ -2747,6 +2777,14 @@ mod playlist_tests {
         // --profile=low-latency (whose audio-buffer=0 breaks under
         // audio-graph churn).
         assert!(args.iter().any(|arg| arg == "--audio-buffer=0.5"));
+        // 启动提速: libplacebo 走 opengl 后端 (vulkan 设备创建 ~900ms)。
+        assert!(args.iter().any(|arg| arg == "--gpu-api=opengl"));
+        // 画质套件: 锐化缩放 + 降采样校正 + 去色带。
+        assert!(args.iter().any(|arg| arg == "--scale=ewa_lanczossharp"));
+        assert!(args.iter().any(|arg| arg == "--dscale=mitchell"));
+        assert!(args.iter().any(|arg| arg == "--correct-downscaling=yes"));
+        assert!(args.iter().any(|arg| arg == "--sigmoid-upscaling=yes"));
+        assert!(args.iter().any(|arg| arg == "--deband=yes"));
         assert!(
             args.iter()
                 .any(|arg| arg.starts_with("--title=") && arg.contains("bilibili-tui"))

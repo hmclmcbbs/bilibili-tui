@@ -55,6 +55,8 @@ pub struct VideoDetailPage {
     /// Scroll position in episode list
     pub episode_scroll: usize,
     pub auto_play_pending: bool,
+    /// 自动连播链打开的页面: 无视 auto_play=false 强制续播 (消费即清)。
+    pub chain_play: bool,
     /// Playback quality / HDR / Hi-Res selection for the next play action.
     pub playback: PlaybackOptions,
     /// Whether the current video has an HDR stream. None = unknown / probe failed.
@@ -128,6 +130,7 @@ impl VideoDetailPage {
             current_page_index: 0,
             episode_scroll: 0,
             auto_play_pending: true,
+            chain_play: false,
             playback: PlaybackOptions::default(),
             hdr_supported: None,
             hires_supported: None,

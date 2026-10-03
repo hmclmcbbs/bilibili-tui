@@ -2225,8 +2225,10 @@ impl App {
     /// 来源列表仍在 navigation_stack 顶部, 按返回键依然回到链开始的地方;
     /// 新详情页默认 auto_play_pending=true, 信息加载完即自动续播。
     pub(super) fn open_auto_next_video(&mut self, target: crate::domain::playback::AutoNextTarget) {
-        let detail_page =
+        let mut detail_page =
             crate::presentation::tui::VideoDetailPage::new(target.bvid.clone(), target.aid);
+        // 连播链页: 即使用户关闭了"打开详情页自动播放"也强制续播。
+        detail_page.chain_play = true;
         self.current_page = Page::VideoDetail(Box::new(detail_page));
         let req_id = self.next_request_id("video_detail");
         self.send_network_command(network::NetworkCommand::LoadVideoDetail {

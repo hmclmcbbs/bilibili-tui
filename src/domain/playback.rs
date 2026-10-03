@@ -163,8 +163,13 @@ pub enum AutoHop {
 /// Decide whether a naturally-finished single video should auto-continue.
 ///
 /// Pure so the mode matrix is unit-testable. Guards:
-/// * `auto_play` off or the loop mode is `Item` → no chain (Item is handled
-///   by mpv `--loop-file=inf`; a Finished there means the user quit).
+/// * The loop mode is `Item` → no chain (Item is handled by mpv
+///   `--loop-file=inf`; a Finished there means the user quit).
+///
+/// NOTE: deliberately NOT gated on `config.auto_play` — that setting means
+/// "autoplay when a detail page is opened"; auto-continue happens after the
+/// user already watched something and must work with auto-play off (the
+/// chain forces the next page itself via `chain_play`).
 /// * `dwell_ok` false (video ended suspiciously fast, e.g. history seek
 ///   landed at the very end) → no chain, so already-watched lists cannot
 ///   be ripped through in a storm.
@@ -172,13 +177,12 @@ pub enum AutoHop {
 ///   part does the source list decide (next video / List-wrap / stop).
 pub fn decide_auto_next(
     loop_mode: PlayLoop,
-    auto_play: bool,
     dwell_ok: bool,
     next_part: Option<usize>,
     origin: &AutoNextOutcome,
     finished_bvid: &str,
 ) -> Option<AutoHop> {
-    if !auto_play || !dwell_ok || loop_mode == PlayLoop::Item {
+    if !dwell_ok || loop_mode == PlayLoop::Item {
         return None;
     }
     if let Some(index) = next_part {
@@ -501,41 +505,36 @@ mod tests {
         let next = AutoNextOutcome::Next(target(2));
         // Stop: advance through the list, stop at its end.
         assert_eq!(
-            decide_auto_next(PlayLoop::Stop, true, true, None, &next, "BV1"),
+            decide_auto_next(PlayLoop::Stop, true, None, &next, "BV1"),
             Some(AutoHop::NewVideo(target(2)))
         );
         assert_eq!(
-            decide_auto_next(PlayLoop::Stop, true, true, None, &end, "BV1"),
+            decide_auto_next(PlayLoop::Stop, true, None, &end, "BV1"),
             None
         );
         // List: wrap to the first video at the end.
         assert_eq!(
-            decide_auto_next(PlayLoop::List, true, true, None, &end, "BV3"),
+            decide_auto_next(PlayLoop::List, true, None, &end, "BV3"),
             Some(AutoHop::NewVideo(target(1)))
         );
         // Never wrap a single-item list into itself (seek-to-end storm).
         assert_eq!(
-            decide_auto_next(PlayLoop::List, true, true, None, &end, "BV1"),
+            decide_auto_next(PlayLoop::List, true, None, &end, "BV1"),
             None
         );
         // Item: mpv loops the file; a Finished is a user quit → no chain.
         assert_eq!(
-            decide_auto_next(PlayLoop::Item, true, true, None, &next, "BV1"),
+            decide_auto_next(PlayLoop::Item, true, None, &next, "BV1"),
             None
         );
-        // auto_play off / suspiciously short dwell / not a member.
+        // Suspiciously short dwell / not a member.
         assert_eq!(
-            decide_auto_next(PlayLoop::Stop, false, true, None, &next, "BV1"),
-            None
-        );
-        assert_eq!(
-            decide_auto_next(PlayLoop::Stop, true, false, None, &next, "BV1"),
+            decide_auto_next(PlayLoop::Stop, false, None, &next, "BV1"),
             None
         );
         assert_eq!(
             decide_auto_next(
                 PlayLoop::Stop,
-                true,
                 true,
                 None,
                 &AutoNextOutcome::NotMember,
@@ -545,11 +544,11 @@ mod tests {
         );
         // Multi-part videos advance part-by-part before consulting the list.
         assert_eq!(
-            decide_auto_next(PlayLoop::Stop, true, true, Some(2), &next, "BV1"),
+            decide_auto_next(PlayLoop::Stop, true, Some(2), &next, "BV1"),
             Some(AutoHop::NextPart(2))
         );
         assert_eq!(
-            decide_auto_next(PlayLoop::List, true, true, Some(2), &end, "BV1"),
+            decide_auto_next(PlayLoop::List, true, Some(2), &end, "BV1"),
             Some(AutoHop::NextPart(2))
         );
     }

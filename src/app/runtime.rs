@@ -488,7 +488,9 @@ impl App {
     /// 下一 P、来源列表的下一条/环绕、3 秒停留守卫。
     async fn chain_auto_next(&mut self, finished_bvid: &str) -> bool {
         use crate::domain::playback::{AutoNextOutcome, PlayLoop, decide_auto_next};
-        if !self.config.auto_play || self.config.playback_loop == PlayLoop::Item {
+        // 注意: 不看 config.auto_play — 那是"打开详情页自动播放"的开关;
+        // 连播发生在用户已经看完一条之后, 由链自己强制续播 (chain_play)。
+        if self.config.playback_loop == PlayLoop::Item {
             return false;
         }
         let Page::VideoDetail(detail) = &self.current_page else {
@@ -515,7 +517,6 @@ impl App {
             .unwrap_or(AutoNextOutcome::NotMember);
         let Some(hop) = decide_auto_next(
             self.config.playback_loop,
-            self.config.auto_play,
             dwell_ok,
             next_part,
             &origin,
@@ -620,32 +621,44 @@ impl App {
             }
         }
 
-        let auto_play = if self.config.auto_play {
-            match &mut self.current_page {
-                Page::VideoDetail(page)
-                    if page.auto_play_pending && !page.loading && page.video_info.is_some() =>
-                {
-                    page.auto_play_pending = false;
-                    Some((Some(page.bvid.clone()), page.play_action()))
-                }
-                Page::BangumiDetail(page)
-                    if page.auto_play_pending && !page.loading && page.season.is_some() =>
-                {
-                    page.auto_play_pending = false;
-                    page.play_action().map(|action| (None, action))
-                }
-                _ => None,
-            }
-        } else {
-            // Auto-play disabled: clear the pending flag so it doesn't fire
-            // once the user re-enables the setting mid-session.
-            if let Page::VideoDetail(page) = &mut self.current_page {
+        let auto_play = match &mut self.current_page {
+            // 连播链打开的页面 (chain_play) 无视 auto_play 开关强制续播;
+            // 普通页面仍按 auto_play 设置行事。
+            Page::VideoDetail(page)
+                if page.auto_play_pending
+                    && !page.loading
+                    && page.video_info.is_some()
+                    && (self.config.auto_play || page.chain_play) =>
+            {
                 page.auto_play_pending = false;
+                page.chain_play = false;
+                Some((Some(page.bvid.clone()), page.play_action()))
             }
-            if let Page::BangumiDetail(page) = &mut self.current_page {
+            Page::BangumiDetail(page)
+                if self.config.auto_play
+                    && page.auto_play_pending
+                    && !page.loading
+                    && page.season.is_some() =>
+            {
                 page.auto_play_pending = false;
+                page.play_action().map(|action| (None, action))
             }
-            None
+            _ => {
+                // Auto-play disabled: clear the pending flag so it doesn't
+                // fire once the user re-enables the setting mid-session.
+                // 连播链页除外 (它的 pending 是链的续播句柄)。
+                if !self.config.auto_play {
+                    if let Page::VideoDetail(page) = &mut self.current_page
+                        && !page.chain_play
+                    {
+                        page.auto_play_pending = false;
+                    }
+                    if let Page::BangumiDetail(page) = &mut self.current_page {
+                        page.auto_play_pending = false;
+                    }
+                }
+                None
+            }
         };
         if let Some((return_bvid, action)) = auto_play {
             self.handle_action(action).await;
