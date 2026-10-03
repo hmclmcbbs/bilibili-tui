@@ -962,6 +962,14 @@ impl ApiClient {
         // Always also pull the XML endpoint for the regular danmaku it
         // carries (the segmented endpoint can be almost all mode 7/8).
         let xml_url = format!("https://comment.bilibili.com/{cid}.xml");
+        // comment.bilibili.com answers with a RAW deflate stream (no zlib
+        // header) and ignores Accept-Encoding negotiation. This only works
+        // while reqwest's `deflate` feature is off (see Cargo.toml): its
+        // built-in inflater speaks zlib only, would fail the body read, and
+        // that failure used to propagate via `?`, throwing away the already
+        // parsed segmented history — zero danmaku on every video. The body
+        // read below is also non-fatal now: a flaky CDN reply must not erase
+        // what seg.so returned.
         if let Ok(response) = self.client.get(&xml_url).send().await
             && response.status().is_success()
         {
@@ -971,7 +979,12 @@ impl ApiClient {
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default()
                 .to_ascii_lowercase();
-            let bytes = response.bytes().await?;
+            // Body read failures are no longer fatal: the segmented danmaku
+            // already in `all` must survive a flaky CDN response.
+            let Ok(bytes) = response.bytes().await else {
+                all.sort_by(|left, right| left.time.total_cmp(&right.time));
+                return Ok(all);
+            };
             let body = if encoding.contains("deflate") {
                 let mut decoded = Vec::new();
                 if flate2::read::DeflateDecoder::new(bytes.as_ref())
@@ -979,11 +992,31 @@ impl ApiClient {
                     .is_err()
                 {
                     decoded.clear();
-                    flate2::read::ZlibDecoder::new(bytes.as_ref()).read_to_end(&mut decoded)?;
+                    if flate2::read::ZlibDecoder::new(bytes.as_ref())
+                        .read_to_end(&mut decoded)
+                        .is_err()
+                    {
+                        // Undecodable body: skip the XML merge entirely, keep
+                        // whatever the segmented endpoint returned.
+                        all.sort_by(|left, right| left.time.total_cmp(&right.time));
+                        return Ok(all);
+                    }
                 }
-                String::from_utf8(decoded)?
+                match String::from_utf8(decoded) {
+                    Ok(body) => body,
+                    Err(_) => {
+                        all.sort_by(|left, right| left.time.total_cmp(&right.time));
+                        return Ok(all);
+                    }
+                }
             } else {
-                String::from_utf8(bytes.to_vec())?
+                match String::from_utf8(bytes.to_vec()) {
+                    Ok(body) => body,
+                    Err(_) => {
+                        all.sort_by(|left, right| left.time.total_cmp(&right.time));
+                        return Ok(all);
+                    }
+                }
             };
             if let Ok(xml_items) = super::danmaku::parse_xml(&body) {
                 for item in xml_items {
@@ -3345,6 +3378,34 @@ mod live_contract_tests {
         });
         let playurl = ApiClient::parse_bangumi_play_url(&value).unwrap();
         assert_eq!(playurl.dash.video[0].id, 80);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires network access"]
+    async fn danmaku_history_endpoints_merge() {
+        // Regression guard for the "danmaku all disappeared" bug: the XML
+        // endpoint (comment.bilibili.com) returns raw deflate, reqwest's
+        // built-in inflater spoke zlib only, and the resulting `?` threw away
+        // the segmented history too — get_video_danmaku returned 0 for every
+        // video. Both endpoints must contribute after the merge.
+        let client = ApiClient::new();
+        let cid = 40040008614_i64;
+        let danmaku = client
+            .get_video_danmaku(cid, None, 600)
+            .await
+            .expect("danmaku fetch must not fail on a decode error of one endpoint");
+        assert!(
+            !danmaku.is_empty(),
+            "both endpoints are up but the merged list is empty"
+        );
+        let regular = danmaku
+            .iter()
+            .filter(|d| matches!(d.mode, 1 | 4 | 5))
+            .count();
+        assert!(
+            regular > 10,
+            "regular (mode 1/4/5) danmaku come from the XML endpoint; got only {regular}"
+        );
     }
 
     #[tokio::test]
