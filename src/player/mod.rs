@@ -167,11 +167,13 @@ fn apply_mpv_common(cmd: &mut tokio::process::Command) {
     // call sites must re-assert this after --profile=low-latency
     // (mpv last-argument-wins).
     cmd.arg("--audio-buffer=0.5");
-    // 启动提速: gpu-next 的 vulkan 后端在这台机器上创建设备要 ~900ms,
-    // opengl 后端 ~240ms (冷启动实测, spawn→time-pos>0 各 3 次)。两者
-    // 都是同一个 libplacebo 渲染器, 画质引擎不变, 省下的是每次打开
-    // 视频都付的 ~650ms。想换回: mpv_extra_args --gpu-api=vulkan。
-    cmd.arg("--gpu-api=opengl");
+    // 刻意不传 --gpu-api: 让 mpv 自动选择 (本机 = vulkan)。
+    // 历史教训 (2026-10): 曾为提速改传 opengl (~240ms vs vulkan ~900ms
+    // 首帧), 但混合显卡笔记本上 GL 上下文落在 Intel 核显, 与 nvdec
+    // (NVIDIA) 设备错配 → mpv 禁用硬解退回软解, 画质套件也随之在核显
+    // 上跑: 实测 8 秒掉 31 帧 (vulkan+nvdec 为 0 帧、display 满 165fps)。
+    // 正确路线是 vulkan + nvdec 同卡 + 套件跑独显; 启动慢的 600ms 宁可
+    // 付。若将来要提速, 需整机 PRIME offload 方案, 不能只切 GL。
     // 画质套件 (此前 mpv 全默认, 无任何缩放调优):
     // - ewa_lanczossharp: 放大时最锐利的高质量滤波 (片源分辨率低于
     //   窗口时的清晰度关键, 在位 GPU 上开销可忽略)
@@ -2777,8 +2779,6 @@ mod playlist_tests {
         // --profile=low-latency (whose audio-buffer=0 breaks under
         // audio-graph churn).
         assert!(args.iter().any(|arg| arg == "--audio-buffer=0.5"));
-        // 启动提速: libplacebo 走 opengl 后端 (vulkan 设备创建 ~900ms)。
-        assert!(args.iter().any(|arg| arg == "--gpu-api=opengl"));
         // 画质套件: 锐化缩放 + 降采样校正 + 去色带。
         assert!(args.iter().any(|arg| arg == "--scale=ewa_lanczossharp"));
         assert!(args.iter().any(|arg| arg == "--dscale=mitchell"));
