@@ -136,6 +136,8 @@ pub enum AppAction {
     /// `l` on the UP page: cycle the end-of-playback mode (停止/列表循环/
     /// 单曲循环) and persist it to the config.
     SetPlayLoop(PlayLoop),
+    /// 详情页 `i`: 开/关补帧并写入配置。
+    SetFrameInterpolation(bool),
     /// Navigate to next sidebar item
     NavNext,
     /// Navigate to previous sidebar item

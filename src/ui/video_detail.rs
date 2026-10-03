@@ -57,6 +57,9 @@ pub struct VideoDetailPage {
     pub auto_play_pending: bool,
     /// 自动连播链打开的页面: 无视 auto_play=false 强制续播 (消费即清)。
     pub chain_play: bool,
+    /// 补帧 (mpv 时间插值) 当前状态; `i` 切换并经 SetFrameInterpolation
+    /// 持久化。初始化时从配置读取, 播放参数由 play_video 取同源配置。
+    pub frame_interpolation: bool,
     /// Playback quality / HDR / Hi-Res selection for the next play action.
     pub playback: PlaybackOptions,
     /// Whether the current video has an HDR stream. None = unknown / probe failed.
@@ -131,6 +134,9 @@ impl VideoDetailPage {
             episode_scroll: 0,
             auto_play_pending: true,
             chain_play: false,
+            frame_interpolation: crate::storage::load_config()
+                .map(|config| config.frame_interpolation)
+                .unwrap_or(false),
             playback: PlaybackOptions::default(),
             hdr_supported: None,
             hires_supported: None,
@@ -535,7 +541,11 @@ impl VideoDetailPage {
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(theme.border_subtle))
             .title(Span::styled(
-                " 📹 视频信息 ",
+                if self.frame_interpolation {
+                    " 📹 视频信息 · 🎞 补帧 "
+                } else {
+                    " 📹 视频信息 "
+                },
                 Style::default().fg(theme.bilibili_pink),
             ));
 
@@ -1275,6 +1285,10 @@ impl Component for VideoDetailPage {
                 playback_keys.push_str("/f");
                 playback_label.push_str("/Hi-Res");
             }
+            // 补帧键并入画质键组 (页脚行已接近满宽, 独立项会被截断);
+            // 开/关状态由页头徽标 (🎞 补帧) 承担。
+            playback_keys.push_str("/i");
+            playback_label.push_str("/补帧");
             items.push((playback_keys, playback_label, theme.fg_accent));
             items.push(("x".into(), self.download_quality_label(), theme.fg_accent));
             items.push(("Space".into(), "多选".into(), theme.fg_accent));
@@ -1503,6 +1517,12 @@ impl Component for VideoDetailPage {
         if key == KeyCode::Char('f') {
             self.playback.prefer_hires = !self.playback.prefer_hires;
             return Some(AppAction::None);
+        }
+        // 补帧: mpv 时间插值 (--interpolation), 翻转状态并持久化。
+        // 下次播放 (play_video/play_playlist) 从配置读取并传给 mpv。
+        if key == KeyCode::Char('i') {
+            self.frame_interpolation = !self.frame_interpolation;
+            return Some(AppAction::SetFrameInterpolation(self.frame_interpolation));
         }
         // 三连：点赞 / 投币 / 收藏
         if key == KeyCode::Char('a') {
@@ -1807,5 +1827,28 @@ fn truncate_str(s: &str, max_len: usize) -> String {
             + "..."
     } else {
         s.to_string()
+    }
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use super::*;
+
+    #[test]
+    fn i_key_toggles_frame_interpolation() {
+        let mut page = VideoDetailPage::new("BV1xx411c7mD".into(), 0);
+        let keys = crate::storage::Keybindings::default();
+        let before = page.frame_interpolation;
+        // AppAction 只派生了 Debug, 用模式匹配断言变体与载荷。
+        match page.handle_input(KeyCode::Char('i'), &keys) {
+            Some(AppAction::SetFrameInterpolation(v)) => assert_eq!(v, !before),
+            other => panic!("unexpected action: {other:?}"),
+        }
+        assert_eq!(page.frame_interpolation, !before);
+        match page.handle_input(KeyCode::Char('i'), &keys) {
+            Some(AppAction::SetFrameInterpolation(v)) => assert_eq!(v, before),
+            other => panic!("unexpected action: {other:?}"),
+        }
+        assert_eq!(page.frame_interpolation, before);
     }
 }

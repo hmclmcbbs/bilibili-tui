@@ -545,6 +545,14 @@ pub struct AppConfig {
     /// starts with the same mode.
     #[serde(default)]
     pub playback_loop: crate::domain::playback::PlayLoop,
+    /// 补帧 (mpv 时间插值 --interpolation)。`i` 在视频详情页切换并持久化,
+    /// 仅 VOD/多P 会话 (play_video / play_playlist) 生效。
+    #[serde(default)]
+    pub frame_interpolation: bool,
+    /// 插值用的时间缩放器 (mpv --tscale)。UI 不暴露; 手改配置可选
+    /// linear (默认, 平滑与拖影平衡) / oversample (无伪影) / mitchell 等。
+    #[serde(default = "default_interpolation_tscale")]
+    pub interpolation_tscale: String,
     /// mpv video output override. Empty/unset means mpv's default (external
     /// window); "kitty" / "tct" draw inside the terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -576,6 +584,8 @@ impl Default for AppConfig {
             danmaku: DanmakuConfig::default(),
             auto_play: true,
             playback_loop: Default::default(),
+            frame_interpolation: false,
+            interpolation_tscale: default_interpolation_tscale(),
             mpv_vo: None,
             mpv_hwdec: None,
             mpv_extra_args: None,
@@ -678,6 +688,10 @@ fn default_true() -> bool {
 
 fn default_sixteen() -> u64 {
     16
+}
+
+fn default_interpolation_tscale() -> String {
+    "linear".to_string()
 }
 
 fn default_one() -> f64 {

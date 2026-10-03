@@ -199,6 +199,29 @@ fn apply_mpv_common(cmd: &mut tokio::process::Command) {
     cmd.arg("--title=${?media-title:${media-title} - bilibili-tui}${!media-title:bilibili-tui}");
 }
 
+/// 补帧: 详情页 `i` 开关 (config.frame_interpolation)。必须在
+/// --profile=low-latency 之后调用 (mpv 后传参数生效); tscale 手改配置可选
+/// linear (平衡) / oversample (无伪影) / mitchell 等, 非法值回落 linear。
+fn apply_interpolation(cmd: &mut tokio::process::Command) {
+    let Ok(config) = crate::storage::load_config() else {
+        return;
+    };
+    if !config.frame_interpolation {
+        return;
+    }
+    cmd.arg("--interpolation=yes");
+    let tscale = config.interpolation_tscale.trim();
+    if tscale.is_empty()
+        || !tscale
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        cmd.arg("--tscale=linear");
+    } else {
+        cmd.arg(format!("--tscale={tscale}"));
+    }
+}
+
 /// Split a user-supplied argument string on whitespace, honoring single and
 /// double quotes so values like `--term-status-msg='a b'` stay one argument.
 /// Unterminated quotes consume the rest of the string.
@@ -460,6 +483,8 @@ pub async fn play_video(
     // 事件都收不到。单视频会话必须自己退出 — CLI 覆盖配置文件, 想恢复
     // 定格行为可用 mpv_extra_args --keep-open=yes。
     cmd.arg("--keep-open=no");
+    // 补帧 (可选): 在 profile 重申之后追加, 低延迟 profile 不会覆盖。
+    apply_interpolation(&mut cmd);
     if loop_item {
         // 单曲循环交给 mpv: 文件播完自动重开, 不再产生 eof, 应用侧的
         // 自动连播链因此永远不会被触发 (用户按 q 退出除外)。
@@ -1283,6 +1308,8 @@ pub async fn play_playlist(
     // 同 play_video: run_playlist 靠 end-file 逐项推进, 用户 mpv.conf 的
     // keep-open=yes 会把列表卡死在第一项结尾; idle=yes 负责项间保活。
     cmd.arg("--keep-open=no");
+    // 补帧 (可选): 多P列表会话与单视频同源配置。
+    apply_interpolation(&mut cmd);
     apply_mpv_hwdec(&mut cmd);
     cmd.arg("--ytdl=no");
     cmd.arg("--script-opts-append=double_video_fps=yes");
