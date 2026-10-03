@@ -120,7 +120,11 @@ fn apply_mpv_vo(cmd: &mut tokio::process::Command) {
 /// points cannot drift apart again (they previously disagreed on
 /// `--input-terminal`, `--hr-seek`, and `--msg-level`).
 fn apply_mpv_common(cmd: &mut tokio::process::Command) {
-    cmd.arg("--force-window=immediate");
+    // 不要 immediate: 立即建窗 = 网络打开/探测期间先黑屏 (用户实测
+    // "长时间黑屏" 的主体)。no → 有视频帧才建窗, 加载期 TUI 始终可见,
+    // mpv 窗口带画面弹出 (fifo 实测: immediate 秒建黑窗, no 阻塞在
+    // open 期间不建窗)。
+    cmd.arg("--force-window=no");
     // The TUI owns the terminal; mpv's window receives keyboard via the
     // display server. Never let mpv read our stdin.
     cmd.arg("--input-terminal=no");
@@ -241,13 +245,13 @@ fn smooth_motion_pacing_args(
     }
 }
 
-/// 各模式的着色器清单 (相对 anime4k/glsl 目录)。定义取自官方低配模板
-/// stage3 与 final 都用 x2_S 时官方要求文件不可复用 ("use each shader
-/// file once"), final 槽用 `_final` 改名副本 (anime4k_shader_args 幂等
-/// 复制)。结构取自 CTRL+1/2/3, 变体按实测定档 (4060 笔记本, 无 shader
-/// 基线 0.99-0.996): 高配 VL 套 0.826 弃, Fast(M) 套 0.965-0.979,
-/// 全 S 套 0.979/0.982/0.972 (A1080p/B720p/C720p, drops=0) → 三模式
-/// 统一全 S, 净开销 ~1-2%。mpv 按给定顺序执行。
+/// 各模式的着色器清单 (相对 anime4k/glsl 目录), 官方低配模板 Fast
+/// (CTRL+1/2/3) 结构: stage3 Upscale 用 M、final 用 S — 每文件只出现
+/// 一次 (官方: "use each shader file once"), 不需要改名副本。
+/// 变体实测定档 (4060 笔记本, 无 shader 基线 0.99-0.996, drops=0):
+/// 高配 VL 套 0.826 弃; 官方 Fast 0.965-0.979 (采用, 修复"没效果"
+/// —先前为压性能降 S 后修复力度过弱); 全 S 套 0.972-0.982, 与 Fast
+/// 差在噪声内 (±0.015), 故取官方画质。mpv 按给定顺序执行。
 fn anime4k_mode_files(mode: &crate::domain::playback::Anime4kMode) -> &'static [&'static str] {
     use crate::domain::playback::Anime4kMode;
     match mode {
@@ -255,25 +259,25 @@ fn anime4k_mode_files(mode: &crate::domain::playback::Anime4kMode) -> &'static [
         // A: Clamp → Restore → Upscale×2 (AutoDownscalePre 收口) — 1080p
         Anime4kMode::A => &[
             "Restore/Anime4K_Clamp_Highlights.glsl",
-            "Restore/Anime4K_Restore_CNN_S.glsl",
-            "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
+            "Restore/Anime4K_Restore_CNN_M.glsl",
+            "Upscale/Anime4K_Upscale_CNN_x2_M.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
-            "Upscale/Anime4K_Upscale_CNN_x2_S_final.glsl",
+            "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
         ],
         // B: 同 A 但 Restore_Soft — 720p/低模糊源
         Anime4kMode::B => &[
             "Restore/Anime4K_Clamp_Highlights.glsl",
-            "Restore/Anime4K_Restore_CNN_Soft_S.glsl",
-            "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
+            "Restore/Anime4K_Restore_CNN_Soft_M.glsl",
+            "Upscale/Anime4K_Upscale_CNN_x2_M.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
-            "Upscale/Anime4K_Upscale_CNN_x2_S_final.glsl",
+            "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
         ],
         // C: Upscale_Denoise → Upscale — 480p/无损图源
         Anime4kMode::C => &[
             "Restore/Anime4K_Clamp_Highlights.glsl",
-            "Upscale+Denoise/Anime4K_Upscale_Denoise_CNN_x2_S.glsl",
+            "Upscale+Denoise/Anime4K_Upscale_Denoise_CNN_x2_M.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
             "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
@@ -294,23 +298,13 @@ fn anime4k_shader_args(mode: &crate::domain::playback::Anime4kMode) -> Vec<Strin
     anime4k_args_in(&dir, files)
 }
 
-/// [`anime4k_shader_args`] 的核心 (目录参数化, 便于测试): 逐文件校验并
-/// 按需生成 `_final` 改名副本 (官方允许 copy+rename 复用同一着色器,
-/// 每文件只能挂一次钩子); 任一源/目标缺失 → 整体返回空 (不启用,
-/// 保证可播 — mpv 直接吃缺失文件会退化到 ~0.55 实时)。
+/// [`anime4k_shader_args`] 的核心 (目录参数化, 便于测试): 逐文件校验;
+/// 任一缺失 → 整体返回空 (不启用, 保证可播 — 缺文件的清单直接喂给
+/// mpv 实测退化到 ~0.55 实时)。
 fn anime4k_args_in(dir: &std::path::Path, files: &[&str]) -> Vec<String> {
     let mut args = Vec::with_capacity(files.len());
     for file in files {
         let path = dir.join(file);
-        if let Some(base) = file.strip_suffix("_final.glsl") {
-            let src = dir.join(format!("{base}.glsl"));
-            if !src.is_file() {
-                return Vec::new();
-            }
-            if !path.is_file() && std::fs::copy(&src, &path).is_err() {
-                return Vec::new();
-            }
-        }
         if !path.is_file() {
             return Vec::new();
         }
@@ -2089,6 +2083,9 @@ pub async fn play_bangumi_episode(
         cmd.arg(&video_url);
     }
     apply_mpv_vo(&mut cmd);
+    // 补帧/A4K (可选): 番剧与普通视频同源配置 — 先前漏挂导致
+    // "Anime4K 没效果" (番剧路径从不带增强参数)。
+    apply_video_enhancements(&mut cmd);
     apply_mpv_extra_args(&mut cmd);
 
     let mut child = match cmd.spawn() {
@@ -2245,6 +2242,8 @@ pub async fn play_local_file(
         cmd.arg(format!("--sub-file={}", srt_path.display()));
     }
     cmd.arg(&path);
+    // 补帧/A4K (可选): 本地文件同样吃增强配置。
+    apply_video_enhancements(&mut cmd);
     apply_mpv_extra_args(&mut cmd);
 
     let mut child = cmd.spawn().context("启动 mpv 播放本地文件失败")?;
@@ -2922,7 +2921,7 @@ mod playlist_tests {
             .collect::<Vec<_>>();
         assert!(args.iter().any(|arg| arg == "--hr-seek=yes"));
         assert!(args.iter().any(|arg| arg == "--network-timeout=15"));
-        assert!(args.iter().any(|arg| arg == "--force-window=immediate"));
+        assert!(args.iter().any(|arg| arg == "--force-window=no"));
         assert!(args.iter().any(|arg| arg == "--deinterlace=yes"));
         // Display-paced presentation: the danmaku overlay only reaches the
         // screen at present time, so its update rate follows video-sync.
@@ -2948,7 +2947,7 @@ mod playlist_tests {
         // Exactly one of each: entry points must not re-add these themselves.
         let count = |needle: &str| args.iter().filter(|arg| *arg == needle).count();
         assert_eq!(count("--input-terminal=no"), 1);
-        assert_eq!(count("--force-window=immediate"), 1);
+        assert_eq!(count("--force-window=no"), 1);
         assert_eq!(count("--hr-seek=yes"), 1);
     }
 
@@ -2998,29 +2997,27 @@ mod playlist_tests {
         // B 用 Soft 修复, C 用去噪上采样 — 与 A 区分。
         assert!(anime4k_mode_files(&M::B)[1].contains("Soft"));
         assert!(anime4k_mode_files(&M::C)[1].contains("Denoise"));
+        // 官方 Fast 档位守卫: 修复/上采样阶段必须 M (曾整体降 S 导致
+        // 修复力度过弱、用户报"没效果"; 实测 M/S 性能差在噪声内)。
+        assert!(anime4k_mode_files(&M::A)[1].ends_with("Restore_CNN_M.glsl"));
+        assert!(anime4k_mode_files(&M::A)[2].ends_with("Upscale_CNN_x2_M.glsl"));
+        assert!(anime4k_mode_files(&M::A)[5].ends_with("Upscale_CNN_x2_S.glsl"));
+        assert!(anime4k_mode_files(&M::B)[2].ends_with("Upscale_CNN_x2_M.glsl"));
+        assert!(anime4k_mode_files(&M::C)[1].ends_with("Upscale_Denoise_CNN_x2_M.glsl"));
     }
 
     #[test]
-    fn anime4k_args_copies_final_and_guards_missing_src() {
+    fn anime4k_args_guards_missing_files() {
         use crate::domain::playback::Anime4kMode as M;
         let base = std::env::temp_dir().join(format!("a4k_args_{}", std::process::id()));
         std::fs::create_dir_all(base.join("Upscale")).unwrap();
         std::fs::create_dir_all(base.join("Restore")).unwrap();
         for f in anime4k_mode_files(&M::A) {
-            if f.ends_with("_final.glsl") {
-                continue;
-            }
             std::fs::write(base.join(f), "// test shader").unwrap();
         }
         let args = anime4k_args_in(&base, anime4k_mode_files(&M::A));
-        assert_eq!(args.len(), 6, "六段链路齐全");
-        let final_copy = base.join("Upscale/Anime4K_Upscale_CNN_x2_S_final.glsl");
-        assert!(final_copy.is_file(), "_final 副本须按需生成");
-        assert_eq!(
-            std::fs::read_to_string(&final_copy).unwrap(),
-            "// test shader"
-        );
-        // 源文件缺失 → 整体不启用 (返回空), 且不误把副本当源。
+        assert_eq!(args.len(), 6, "官方 Fast 六段链路齐全");
+        // 缺任一文件 → 整体不启用 (返回空), 不给 mpv 半份清单。
         std::fs::remove_file(base.join("Upscale/Anime4K_Upscale_CNN_x2_S.glsl")).unwrap();
         assert!(anime4k_args_in(&base, anime4k_mode_files(&M::A)).is_empty());
         std::fs::remove_dir_all(&base).ok();
