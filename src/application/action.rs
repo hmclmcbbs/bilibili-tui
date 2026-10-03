@@ -4,7 +4,9 @@ use crate::api::recommend::HomeFeed;
 use crate::api::space::SpaceVideoOrder;
 use crate::api::video::VideoPage;
 use crate::domain::playback::PlaybackOptions;
-use crate::domain::playback::{PlayLoop, PlayOrder, PlaylistItem, PlaylistSource};
+use crate::domain::playback::{
+    InterpolationMode, PlayLoop, PlayOrder, PlaylistItem, PlaylistSource,
+};
 use crate::infrastructure::persistence::{Credentials, DanmakuConfig, Keybindings, VideoQuality};
 use crate::presentation::tui::DynamicTab;
 use crate::presentation::tui::NavItem;
@@ -136,8 +138,8 @@ pub enum AppAction {
     /// `l` on the UP page: cycle the end-of-playback mode (停止/列表循环/
     /// 单曲循环) and persist it to the config.
     SetPlayLoop(PlayLoop),
-    /// 详情页 `i`: 开/关补帧并写入配置。
-    SetFrameInterpolation(bool),
+    /// 详情页 `i`: 循环切换补帧模式 (关/混合/光流) 并写入配置。
+    SetInterpolationMode(InterpolationMode),
     /// Navigate to next sidebar item
     NavNext,
     /// Navigate to previous sidebar item

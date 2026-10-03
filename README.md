@@ -317,7 +317,24 @@ cargo build --release --target x86_64-unknown-linux-musl
 | **视频详情页** |                     |                                |
 | 切换焦点       | `Tab`               | 在评论和相关推荐区域间切换     |
 | 展开收起回复   | `r`                 | 展开/收起评论回复              |
-| 补帧开关       | `i`                 | mpv 运动插值平滑低帧率片源, 状态显示在页头与页脚并持久化 |
+| 补帧三态       | `i`                 | 循环 关→混合 (mpv 时间插值)→光流 (RIFE 真补帧) →关; 状态在页头徽标, 持久化 |
+
+#### ✨ 光流补帧 (RIFE)
+
+详情页按 `i` 切到 **光流** 模式后, 播放走 RIFE 运动补偿帧生成 (真·光流补帧,
+不是相邻帧混合)。整套运行时全部装在用户目录, **无需 sudo、不动系统包**:
+
+- `~/.local/share/bilibili-tui/mpv-prefix/` — 本地编译的 mpv (启用
+  `vf=vapoursynth`; 系统 mpv 因上游 `vapoursynth-script.pc` 缺失问题没编该过滤器)
+- `~/.local/share/bilibili-tui/rife-venv/` — vsrife + torch + torch_tensorrt
+  (TensorRT 推理, 模型权重随包)
+- `~/.config/bilibili-tui/rife.vpy` — 每次播放按配置重写的补帧脚本
+- `~/.cache/bilibili-tui/rife-engine/` — TensorRT 引擎缓存 (首播按形状编译一次)
+
+相关配置键: `mpv_path` (应用已预置本地 mpv), `interpolation_mode`
+(off/blend/rife), `rife_multiplier` (输出倍率, 默认 2), `rife_model`
+(默认 "4.25"; 性能不足可改 "4.22.lite")。依赖缺失时自动回落混合模式,
+播放不受影响。重装系统 mpv 不影响本功能 (本地副本独立)。
 
 ### 🖱️ 鼠标操作
 

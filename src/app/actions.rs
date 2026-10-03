@@ -509,8 +509,8 @@ impl App {
                 self.config.playback_loop = loop_mode;
                 let _ = persistence::save_config(&self.config);
             }
-            AppAction::SetFrameInterpolation(enabled) => {
-                self.config.frame_interpolation = enabled;
+            AppAction::SetInterpolationMode(mode) => {
+                self.config.interpolation_mode = mode;
                 let _ = persistence::save_config(&self.config);
             }
             AppAction::PlayPlaylist {

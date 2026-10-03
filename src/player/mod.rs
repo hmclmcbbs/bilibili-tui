@@ -202,28 +202,172 @@ fn apply_mpv_common(cmd: &mut tokio::process::Command) {
     cmd.arg("--title=${?media-title:${media-title} - bilibili-tui}${!media-title:bilibili-tui}");
 }
 
-/// 补帧: 详情页 `i` 开关 (config.frame_interpolation)。必须在
-/// --profile=low-latency 之后调用 (mpv 后传参数生效); tscale 手改配置可选
-/// linear (平衡) / oversample (无伪影) / mitchell 等, 非法值回落 linear。
+/// 补帧脚本模板: 占位符按配置注入 (site-packages/倍率/模型)。
+const RIFE_VPY: &str = include_str!("rife.vpy");
+
+/// mpv 可执行路径: 配置 `mpv_path` 覆盖 (光流补帧用本地编译的、
+/// 带 vf=vapoursynth 的 mpv), 否则取 PATH 里的 mpv。
+fn mpv_bin() -> String {
+    crate::storage::load_config()
+        .ok()
+        .and_then(|config| config.mpv_path)
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+        .unwrap_or_else(|| "mpv".to_string())
+}
+
+/// 补帧: 详情页 `i` 循环 (off/blend/rife), 从配置读取。必须在
+/// --profile=low-latency 之后调用 (mpv 后传参数生效)。
 fn apply_interpolation(cmd: &mut tokio::process::Command) {
     let Ok(config) = crate::storage::load_config() else {
         return;
     };
-    if !config.frame_interpolation {
-        return;
-    }
-    cmd.arg("--interpolation=yes");
-    let tscale = config.interpolation_tscale.trim();
-    if tscale.is_empty()
-        || !tscale
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-    {
-        // 非法值回落到无伪影的 oversample。
-        cmd.arg("--tscale=oversample");
+    // 仅 rife 模式做依赖探测 (探测含子进程, 进程内只跑一次);
+    // 通过后按配置重写 rife.vpy (倍率注入), 再统一构造参数。
+    let rife_ok = if config.interpolation_mode == crate::domain::playback::InterpolationMode::Rife {
+        rife_deps_ok() && ensure_rife_script(&config).is_some()
     } else {
-        cmd.arg(format!("--tscale={tscale}"));
+        false
+    };
+    for arg in interpolation_args(&config, rife_ok) {
+        cmd.arg(arg);
     }
+}
+
+/// 构造补帧相关的 mpv 参数 (纯函数, 便于测试)。
+///
+/// - `off`: 无参数
+/// - `blend`: `--interpolation=yes` + tscale (手改配置可选 linear /
+///   mitchell 等, 非法值回落无伪影的 oversample)
+/// - `rife`: `--vf=vapoursynth=file=rife.vpy` 光流真补帧; 依赖缺失
+///   (`rife_deps_ok()==false`) 时回落 blend 保证可播。RIFE 输出倍率
+///   帧率后仍追加 blend 参数, 由 display-resample 平滑到屏幕刷新率。
+fn interpolation_args(config: &crate::storage::AppConfig, rife_deps_ok: bool) -> Vec<String> {
+    use crate::domain::playback::InterpolationMode;
+    let tscale = {
+        let t = config.interpolation_tscale.trim();
+        if t.is_empty()
+            || !t
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            "oversample".to_string()
+        } else {
+            t.to_string()
+        }
+    };
+    let blend_args = vec![
+        "--interpolation=yes".to_string(),
+        format!("--tscale={tscale}"),
+    ];
+    match config.interpolation_mode {
+        InterpolationMode::Off => Vec::new(),
+        InterpolationMode::Blend => blend_args,
+        InterpolationMode::Rife => {
+            if !rife_deps_ok {
+                return blend_args;
+            }
+            let mut args = match rife_script_path() {
+                Some(path) => vec![format!("--vf=vapoursynth=file={}", path.display())],
+                None => return blend_args,
+            };
+            args.extend(blend_args);
+            args
+        }
+    }
+}
+
+/// rife.vpy 落盘路径 (~/.config/bilibili-tui/rife.vpy)。
+fn rife_script_path() -> Option<std::path::PathBuf> {
+    crate::storage::config_dir()
+        .ok()
+        .map(|dir| dir.join("rife.vpy"))
+}
+
+/// 按当前配置写 (或免重写) rife.vpy, 返回其路径。
+/// 注入: site-packages 路径 / 倍率 / 模型版本 (模型名做字符白名单)。
+fn ensure_rife_script(config: &crate::storage::AppConfig) -> Option<std::path::PathBuf> {
+    let path = rife_script_path()?;
+    let site = rife_site_packages()?;
+    let model = config.rife_model.trim();
+    let model_ok = !model.is_empty()
+        && model
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_');
+    let model = if model_ok { model } else { "4.25" };
+    let content = RIFE_VPY
+        .replace("__SITE_PKGS__", &site.to_string_lossy())
+        .replace("__MULTI__", &config.rife_multiplier.clamp(2, 8).to_string())
+        .replace("__MODEL__", &format!("\"{model}\""));
+    let up_to_date = std::fs::read_to_string(&path)
+        .map(|existing| existing == content)
+        .unwrap_or(false);
+    if !up_to_date {
+        std::fs::write(&path, content).ok()?;
+    }
+    Some(path)
+}
+
+/// 应用数据目录 (~/.local/share/bilibili-tui), 由配置目录推出家目录。
+fn app_data_dir() -> Option<std::path::PathBuf> {
+    let config = crate::storage::config_dir().ok()?;
+    let home = config.parent()?.parent()?;
+    Some(home.join(".local/share/bilibili-tui"))
+}
+
+/// rife-venv 的 site-packages (须含 vsrife 与 torch)。
+fn rife_site_packages() -> Option<std::path::PathBuf> {
+    let lib = app_data_dir()?.join("rife-venv/lib");
+    for entry in std::fs::read_dir(lib).ok()?.filter_map(Result::ok) {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("python") {
+            let site = entry.path().join("site-packages");
+            if site.join("vsrife").is_dir() && site.join("torch").is_dir() {
+                return Some(site);
+            }
+        }
+    }
+    None
+}
+
+/// 光流依赖探测 (进程内缓存一次):
+/// 1. 系统 mpv 编译了 vf=vapoursynth (CachyOS 官方包默认没有, 需重建);
+/// 2. /usr/lib/vapoursynth 下有任一 vs-mlrt 运行时插件;
+/// 3. 插件目录 models/rife/ 下有 RIFE .onnx 模型;
+/// 4. python site-packages 里有 vsmlrt.py 包装层。
+/// 缺任一项 → rife 模式回落 blend。
+/// 光流依赖探测 (进程内只跑一次):
+/// 1. 配置的 mpv (mpv_path) 编译了 vf=vapoursynth — 系统包没有, 用应用
+///    本地编译到 ~/.local/share/bilibili-tui/mpv-prefix 的那份 (见 README);
+/// 2. rife-venv 里装好了 vsrife + torch;
+/// 3. 指定模型的权重文件已下载 (否则要到播放中途才报错, 提前拦下)。
+/// 缺任一项 → rife 模式回落 blend 保证可播。
+fn rife_deps_ok() -> bool {
+    static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PROBE.get_or_init(|| {
+        let mpv_has_vf = std::process::Command::new(mpv_bin())
+            .arg("--vf=help")
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).contains("vapoursynth"))
+            .unwrap_or(false);
+        if !mpv_has_vf {
+            return false;
+        }
+        let Some(site) = rife_site_packages() else {
+            return false;
+        };
+        let model = crate::storage::load_config()
+            .map(|c| c.rife_model.trim().to_string())
+            .unwrap_or_else(|_| "4.25".to_string());
+        let model_ok = !model.is_empty()
+            && model
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_');
+        let model = if model_ok { model } else { "4.25".to_string() };
+        site.join(format!("vsrife/models/flownet_v{model}.pkl"))
+            .is_file()
+    })
 }
 
 /// Split a user-supplied argument string on whitespace, honoring single and
@@ -404,7 +548,7 @@ pub async fn play_video(
     remove_stale_mpv_ipc(&ipc_path);
     let danmaku_script_path = create_live_danmaku_script()?;
 
-    let mut cmd = Command::new("mpv");
+    let mut cmd = Command::new(mpv_bin());
 
     cmd.stdout(mpv_stdout());
     cmd.stderr(Stdio::piped());
@@ -1304,7 +1448,7 @@ pub async fn play_playlist(
     };
     log_skipped_playlist_items(&skipped);
 
-    let mut cmd = Command::new("mpv");
+    let mut cmd = Command::new(mpv_bin());
     cmd.stdout(mpv_stdout());
     cmd.stderr(Stdio::piped());
     apply_mpv_common(&mut cmd);
@@ -1919,7 +2063,7 @@ pub async fn play_bangumi_episode(
     remove_stale_mpv_ipc(&ipc_path);
     let danmaku_script_path = create_live_danmaku_script()?;
 
-    let mut cmd = Command::new("mpv");
+    let mut cmd = Command::new(mpv_bin());
     cmd.stdout(mpv_stdout());
     cmd.stderr(Stdio::null());
 
@@ -2091,7 +2235,7 @@ pub async fn play_local_file(
     remove_stale_mpv_ipc(&ipc_path);
     let danmaku_script_path = create_live_danmaku_script()?;
 
-    let mut cmd = Command::new("mpv");
+    let mut cmd = Command::new(mpv_bin());
     cmd.stdout(mpv_stdout());
     cmd.stderr(Stdio::null());
     apply_mpv_common(&mut cmd);
@@ -2437,7 +2581,7 @@ fn spawn_live_mpv(
     danmaku_script_path: &std::path::Path,
     title: &str,
 ) -> Result<tokio::process::Child> {
-    let mut cmd = Command::new("mpv");
+    let mut cmd = Command::new(mpv_bin());
     cmd.stdout(mpv_stdout());
     cmd.stderr(Stdio::null());
     configure_live_mpv(&mut cmd, ipc_path);
@@ -2826,6 +2970,52 @@ mod playlist_tests {
         assert_eq!(count("--input-terminal=no"), 1);
         assert_eq!(count("--force-window=immediate"), 1);
         assert_eq!(count("--hr-seek=yes"), 1);
+    }
+
+    #[test]
+    fn interpolation_args_by_mode() {
+        use crate::domain::playback::InterpolationMode as Mode;
+        let config = crate::storage::AppConfig {
+            interpolation_mode: Mode::Off,
+            ..Default::default()
+        };
+        assert!(interpolation_args(&config, true).is_empty());
+
+        let mut config = config;
+
+        // blend → interpolation + tscale, 无 vf
+        config.interpolation_mode = Mode::Blend;
+        let blend = interpolation_args(&config, false);
+        assert!(blend.contains(&"--interpolation=yes".to_string()));
+        assert!(blend.iter().any(|arg| arg.starts_with("--tscale=")));
+        assert!(!blend.iter().any(|arg| arg.starts_with("--vf=")));
+
+        // rife + 依赖缺失 → 回落 blend (保证可播)
+        config.interpolation_mode = Mode::Rife;
+        let fallback = interpolation_args(&config, false);
+        assert!(
+            !fallback
+                .iter()
+                .any(|arg| arg.starts_with("--vf=vapoursynth"))
+        );
+        assert!(fallback.contains(&"--interpolation=yes".to_string()));
+
+        // rife + 依赖齐全 → vf 在前, blend 参数尾随
+        let full = interpolation_args(&config, true);
+        assert!(
+            full.iter()
+                .any(|arg| arg.starts_with("--vf=vapoursynth=file="))
+        );
+        assert!(full.contains(&"--interpolation=yes".to_string()));
+        assert!(
+            full.iter().position(|arg| arg.starts_with("--vf="))
+                < full.iter().position(|arg| arg == "--interpolation=yes")
+        );
+
+        // 非法 tscale (含空格/分号) 回落 oversample
+        config.interpolation_tscale = "bad value;rm -rf".to_string();
+        let safe = interpolation_args(&config, false);
+        assert!(safe.contains(&"--tscale=oversample".to_string()));
     }
 
     #[test]

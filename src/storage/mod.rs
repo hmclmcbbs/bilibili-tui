@@ -545,10 +545,22 @@ pub struct AppConfig {
     /// starts with the same mode.
     #[serde(default)]
     pub playback_loop: crate::domain::playback::PlayLoop,
-    /// 补帧 (mpv 时间插值 --interpolation)。`i` 在视频详情页切换并持久化,
-    /// 仅 VOD/多P 会话 (play_video / play_playlist) 生效。
+    /// 补帧模式 (详情页 `i`): off / blend (mpv 时间混合) / rife (光流
+    /// 真补帧)。rife 依赖缺失时应用自动回落 blend。仅 VOD/多P 会话生效。
     #[serde(default)]
-    pub frame_interpolation: bool,
+    pub interpolation_mode: crate::domain::playback::InterpolationMode,
+    /// RIFE 输出倍率 (仅 rife 模式): 输出 fps = 输入 fps × N。
+    /// 4060 上 1080p 建议 2 (默认); 720p 可试 4; 4K/高帧率源建议 2 或关。
+    #[serde(default = "default_rife_multiplier")]
+    pub rife_multiplier: u32,
+    /// vsrife 模型版本 (仅 rife 模式)。"4.25" 平衡; 性能不足时改
+    /// "4.22.lite" (更快, 略损画质)。需要与已下载模型文件对应。
+    #[serde(default = "default_rife_model")]
+    pub rife_model: String,
+    /// mpv 可执行路径覆盖。光流补帧需要带 vf=vapoursynth 的 mpv
+    /// (应用可本地源码编译到 ~/.local, 见 README); 留空用 PATH 里的 mpv。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mpv_path: Option<String>,
     /// 插值用的时间缩放器 (mpv --tscale)。UI 不暴露; 手改配置可选
     /// oversample (默认, 无伪影) / linear / mitchell 等。
     #[serde(default = "default_interpolation_tscale")]
@@ -584,7 +596,10 @@ impl Default for AppConfig {
             danmaku: DanmakuConfig::default(),
             auto_play: true,
             playback_loop: Default::default(),
-            frame_interpolation: false,
+            interpolation_mode: Default::default(),
+            rife_multiplier: default_rife_multiplier(),
+            rife_model: default_rife_model(),
+            mpv_path: None,
             interpolation_tscale: default_interpolation_tscale(),
             mpv_vo: None,
             mpv_hwdec: None,
@@ -690,6 +705,14 @@ fn default_sixteen() -> u64 {
     16
 }
 
+fn default_rife_multiplier() -> u32 {
+    2
+}
+
+fn default_rife_model() -> String {
+    "4.25".to_string()
+}
+
 fn default_interpolation_tscale() -> String {
     // oversample = mpv 社区推荐的无伪影默认 (时间加权平均, 不产生
     // linear 那种快速运动拖影); 追求更"平滑"观感可改 "linear"/"mitchell"。
@@ -716,6 +739,11 @@ fn get_config_dir() -> Result<PathBuf> {
 /// Get the credentials file path
 fn get_credentials_path() -> Result<PathBuf> {
     Ok(get_config_dir()?.join("credentials.json"))
+}
+
+/// 配置目录 (光流补帧脚本 rife.vpy 也写在这里)。
+pub fn config_dir() -> Result<PathBuf> {
+    get_config_dir()
 }
 
 /// Get the config file path

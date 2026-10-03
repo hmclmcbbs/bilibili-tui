@@ -89,6 +89,42 @@ pub enum PlayLoop {
     Item,
 }
 
+/// 补帧模式 (视频详情页 `i` 循环切换, 持久化于 `AppConfig::interpolation_mode`)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterpolationMode {
+    /// 不补帧。
+    #[default]
+    Off,
+    /// mpv 时间混合插值 (display-resample + --interpolation/--tscale)。
+    /// 零额外依赖; 相邻帧加权平均, 快速运动有轻微拖影。
+    Blend,
+    /// RIFE 光流真补帧 (VapourSynth + vs-mlrt): 逐对帧估计光流生成真实
+    /// 中间帧。需要额外安装依赖 (缺失时应用自动回落 Blend); 首次播放
+    /// 某分辨率含 TensorRT 引擎编译等待。
+    Rife,
+}
+
+impl InterpolationMode {
+    /// Off → Blend → Rife → Off 循环。
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Blend,
+            Self::Blend => Self::Rife,
+            Self::Rife => Self::Off,
+        }
+    }
+
+    /// 页头徽标用的短标签 ("关"/"混合"/"光流")。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "关",
+            Self::Blend => "混合",
+            Self::Rife => "光流",
+        }
+    }
+}
+
 impl PlayLoop {
     pub fn next(self) -> Self {
         match self {
