@@ -513,10 +513,6 @@ impl App {
                 self.config.interpolation_mode = mode;
                 let _ = persistence::save_config(&self.config);
             }
-            AppAction::SetRifeAutoFallback(auto) => {
-                self.config.rife_auto_fallback = auto;
-                let _ = persistence::save_config(&self.config);
-            }
             AppAction::PlayPlaylist {
                 items,
                 source,

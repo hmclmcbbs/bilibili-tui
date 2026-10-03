@@ -317,55 +317,7 @@ cargo build --release --target x86_64-unknown-linux-musl
 | **视频详情页** |                     |                                |
 | 切换焦点       | `Tab`               | 在评论和相关推荐区域间切换     |
 | 展开收起回复   | `r`                 | 展开/收起评论回复              |
-| 补帧三态       | `i`                 | 循环 关→混合 (mpv 时间插值)→光流 (RIFE 真补帧) →关; 状态在页头徽标, 持久化 |
-
-#### ✨ 光流补帧 (RIFE)
-
-详情页按 `i` 切到 **光流** 模式后, 播放走 RIFE 运动补偿帧生成 (真·光流补帧,
-不是相邻帧混合)。整套运行时全部装在用户目录, **无需 sudo、不动系统包**:
-
-- `~/.local/share/bilibili-tui/mpv-prefix/` — 本地编译的 mpv (启用
-  `vf=vapoursynth`; 系统 mpv 因上游 `vapoursynth-script.pc` 缺失问题没编该过滤器)
-- `~/.local/share/bilibili-tui/rife-venv/` — vsrife + torch + torch_tensorrt
-  (TensorRT 推理, 模型权重随包)
-- `~/.config/bilibili-tui/rife.vpy` — 每次播放按配置重写的补帧脚本
-- `~/.cache/bilibili-tui/rife-engine/` — TensorRT 引擎缓存 (首播按形状编译一次)
-
-相关配置键: `mpv_path` (应用已预置本地 mpv), `interpolation_mode`
-(off/blend/rife), `rife_multiplier` (请求倍率上限, 默认 2), `rife_model`
-(默认 "4.25"; 性能不足可改 "4.22.lite"), `rife_scale` (光流推理分辨率,
-默认 auto=1.0), `rife_auto_fallback` (运行策略, 默认 true)。
-
-**运行策略 (`rife_auto_fallback`, 选择权在用户)**:
-- `true` = **自动** (默认): 按经验容量式 `(输入fps+输出fps)×像素 ≤ 210M/s`
-  估算, 放不下时逐档降倍率 (2→1.75→1.5→1.25), 连 ×1.25 都放不下
-  (如 4K、1080p60) 则跳过光流回落混合 — 宁可混合也不半速卡顿;
-- `false` = **手动**: 严格按 `rife_multiplier` 运行, 不降级不跳过,
-  掉帧也照跑。
-详情页光流模式下按 `I` 键在线切换 (页头徽标显示 `补帧·光流·自动/手动`,
-切换与配置持久化)。播放时 mpv 会弹 OSD 报告实际状态: 启用倍率/目标 fps、
-或回落原因, 并提示 `按 I 键切换手动`。依赖缺失时同样回落混合, 播放不受
-影响。开播黑屏 ≈2.5-6s (torch/引擎预热, vsrife 方案固有), seek 重载 ≈1s。
-重装系统 mpv 不影响本功能 (本地副本独立)。
-
-**本地 mpv 重建** (启用 vf=vapoursynth + nvdec; 头文件依赖全部无 sudo 装在
-用户目录 — 缺 ffnvcodec 会静默裁掉 nvdec 退化软解, 缺 vulkan-headers 会
-裁掉 gpu-api=vulkan 回落 GL, 混合显卡上 CUDA-GL 互操作必失败):
-
-```bash
-BASE=~/.local/share/bilibili-tui
-git clone --depth 1 https://github.com/FFmpeg/nv-codec-headers.git $BASE/nv-codec-headers
-make -C $BASE/nv-codec-headers install PREFIX=$BASE/ffnvcodec
-git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git $BASE/vkhdr-src
-mkdir -p $BASE/vkhdr && cp -r $BASE/vkhdr-src/include $BASE/vkhdr/
-# 手写 $BASE/ffnvcodec/lib/pkgconfig/ffnvcodec.pc 与 $BASE/vkhdr/lib/pkgconfig/vulkan.pc
-PKG_CONFIG_PATH="$BASE/vkhdr/lib/pkgconfig:$BASE/ffnvcodec/lib/pkgconfig" \
-$BASE/build-venv/bin/meson setup $BASE/mpv-src/build-final \
-  --prefix=$BASE/mpv-prefix --buildtype=release \
-  -Dvapoursynth=enabled -Dcuda-hwaccel=enabled -Dcuda-interop=enabled
-$BASE/build-venv/bin/ninja -C $BASE/mpv-src/build-final && \
-  $BASE/build-venv/bin/ninja -C $BASE/mpv-src/build-final install
-```
+| 补帧开关       | `i`                 | 循环 关→混合 (mpv 时间插值) →关; 状态在页头徽标, 持久化 |
 
 ### 🖱️ 鼠标操作
 

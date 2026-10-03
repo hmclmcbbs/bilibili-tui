@@ -98,29 +98,25 @@ pub enum InterpolationMode {
     Off,
     /// mpv 时间混合插值 (display-resample + --interpolation/--tscale)。
     /// 零额外依赖; 相邻帧加权平均, 快速运动有轻微拖影。
+    /// alias: 旧配置值 "rife" (光流功能已移除) 映射为混合, 旧配置可读。
+    #[serde(alias = "rife")]
     Blend,
-    /// RIFE 光流真补帧 (VapourSynth + vs-mlrt): 逐对帧估计光流生成真实
-    /// 中间帧。需要额外安装依赖 (缺失时应用自动回落 Blend); 首次播放
-    /// 某分辨率含 TensorRT 引擎编译等待。
-    Rife,
 }
 
 impl InterpolationMode {
-    /// Off → Blend → Rife → Off 循环。
+    /// Off → Blend → Off 循环。
     pub fn next(self) -> Self {
         match self {
             Self::Off => Self::Blend,
-            Self::Blend => Self::Rife,
-            Self::Rife => Self::Off,
+            Self::Blend => Self::Off,
         }
     }
 
-    /// 页头徽标用的短标签 ("关"/"混合"/"光流")。
+    /// 页头徽标用的短标签 ("关"/"混合")。
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "关",
             Self::Blend => "混合",
-            Self::Rife => "光流",
         }
     }
 }
@@ -401,6 +397,14 @@ impl PlaybackState {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn legacy_rife_value_deserializes_to_blend() {
+        // 光流已移除: 旧配置里的 "rife" 不应让整个配置反序列化失败。
+        let mode: super::InterpolationMode = serde_json::from_str("\"rife\"").unwrap();
+        assert_eq!(mode, super::InterpolationMode::Blend);
+        assert_eq!(serde_json::to_string(&mode).unwrap(), "\"blend\"");
+    }
+
     use super::*;
 
     fn item(id: i64) -> PlaylistItem {
