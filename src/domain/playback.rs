@@ -438,6 +438,19 @@ impl Anime4kMode {
             Self::C => "C",
         }
     }
+
+    /// 每模式说明 (播放选项块内联展示, 定位取自官方 Modes 文档):
+    /// - A: 1080p 动画, 重建退化线稿, 感知质量最高 (副作用也最明显)
+    /// - B: 720p 动画, 去振铃/抗锯齿, 中度修复
+    /// - C: 480p/无损图, 最高 PSNR, 只降噪不重修线条
+    pub fn desc(self) -> &'static str {
+        match self {
+            Self::Off => "",
+            Self::A => "1080p动画·线稿重建",
+            Self::B => "720p动画·去振铃抗锯齿",
+            Self::C => "480p·高保真轻处理",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -450,6 +463,10 @@ mod tests {
         assert_eq!(M::B.next(), M::C);
         assert_eq!(M::C.next(), M::Off);
         assert_eq!(M::A.label(), "A");
+        assert_eq!(M::A.desc(), "1080p动画·线稿重建");
+        assert_eq!(M::B.desc(), "720p动画·去振铃抗锯齿");
+        assert_eq!(M::C.desc(), "480p·高保真轻处理");
+        assert_eq!(M::Off.desc(), "");
         assert_eq!(serde_json::from_str::<M>("\"c\"").unwrap(), M::C);
     }
 

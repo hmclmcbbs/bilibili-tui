@@ -547,13 +547,8 @@ impl VideoDetailPage {
             .border_style(Style::default().fg(theme.border_subtle))
             .title(Span::styled(
                 {
-                    let mode = self.interpolation_mode;
-                    if mode == crate::domain::playback::InterpolationMode::Off {
-                        " 📹 视频信息 ".to_string()
-                    } else {
-                        // 页头徽标 = 补帧状态 (混合)
-                        format!(" 📹 视频信息 · 🎞 补帧·{} ", mode.label())
-                    }
+                    // 不在页头放补帧提示 (状态统一在「播放选项」块)。
+                    " 📹 视频信息 ".to_string()
                 },
                 Style::default().fg(theme.bilibili_pink),
             ));
@@ -760,7 +755,7 @@ impl VideoDetailPage {
             ),
             Span::styled("[i]", Style::default().fg(theme.fg_secondary)),
         ]));
-        lines.push(Line::from(vec![
+        let mut a4k_spans = vec![
             Span::styled("Anime4K:", Style::default().fg(theme.fg_primary)),
             Span::styled(
                 format!(" {} ", self.anime4k_mode.label()),
@@ -768,8 +763,16 @@ impl VideoDetailPage {
                     .fg(theme.bilibili_pink)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("[e]", Style::default().fg(theme.fg_secondary)),
-        ]));
+        ];
+        // 模式说明内联展示 (Off 无说明); 行宽受块宽 ~60 列约束。
+        if self.anime4k_mode != crate::domain::playback::Anime4kMode::Off {
+            a4k_spans.push(Span::styled(
+                format!("{} ", self.anime4k_mode.desc()),
+                Style::default().fg(theme.fg_secondary),
+            ));
+        }
+        a4k_spans.push(Span::styled("[e]", Style::default().fg(theme.fg_secondary)));
+        lines.push(Line::from(a4k_spans));
         if self.streams_probing {
             lines.push(Line::from(Span::styled(
                 "检测中...",
@@ -1929,6 +1932,36 @@ mod detail_tests {
         let interp_row = interp_row.expect("补帧 状态行未渲染");
         let a4k_row = a4k_row.expect("Anime4K 状态行未渲染");
         assert_ne!(interp_row, a4k_row, "补帧与 Anime4K 必须分属不同行");
+    }
+
+    #[test]
+    fn header_has_no_interpolation_hint() {
+        // 用户要求: 视频信息旁不放补帧提示 — 状态只在「播放选项」块。
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut page = VideoDetailPage::new("BV1xx411c7mD".into(), 0);
+        page.interpolation_mode = crate::domain::playback::InterpolationMode::SmoothMotion;
+        page.anime4k_mode = crate::domain::playback::Anime4kMode::A;
+        let theme = Theme::default();
+        let mut terminal = Terminal::new(TestBackend::new(70, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                page.render_video_info(frame, area, &theme);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut screen = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                screen.push_str(buf[(x, y)].symbol());
+            }
+        }
+        // 宽字符续格在 TestBackend 是空格, 先归一化。
+        let screen = screen.replace(' ', "");
+        assert!(screen.contains("视频信息"), "标题须在");
+        assert!(!screen.contains("🎞"), "页头不得出现补帧提示");
+        assert!(!screen.contains("补帧·"), "页头不得出现补帧徽标");
     }
 
     #[test]

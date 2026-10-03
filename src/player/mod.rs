@@ -217,16 +217,37 @@ fn apply_video_enhancements(cmd: &mut tokio::process::Command) {
         // 隐式层, 驱动 AI 在呈现层补帧 (仅 Vulkan; Wayland 下 mpv 自动选
         // vulkan VO, 见驱动 README "NVIDIA Smooth Motion" 章)。
         cmd.env("NVPRESENT_ENABLE_SMOOTH_MOTION", "1");
+        // 呈现节奏让位驱动层: mpv 按音频时钟、只在新帧时提交 present。
+        // 实测 (1080p24) 较 display-resample: GPU 41%→31%,
+        // vo-delayed 11→0, 实时比 0.999→1.003。仅本模式生效,
+        // 其余模式的 display-resample (弹幕平滑) 保持不动。
+        for arg in smooth_motion_pacing_args(&config.interpolation_mode) {
+            cmd.arg(arg);
+        }
     }
     for arg in anime4k_shader_args(&config.anime4k_mode) {
         cmd.arg(arg);
     }
 }
 
+/// Smooth Motion 模式的呈现节奏参数 (纯函数, 便于测试): 驱动层接管呈现
+/// 后 mpv 不再按 vsync 重排 — 后传参数覆盖基础 args 里的 display-resample。
+fn smooth_motion_pacing_args(
+    mode: &crate::domain::playback::InterpolationMode,
+) -> &'static [&'static str] {
+    match mode {
+        crate::domain::playback::InterpolationMode::SmoothMotion => &["--video-sync=audio"],
+        _ => &[],
+    }
+}
+
 /// 各模式的着色器清单 (相对 anime4k/glsl 目录)。定义取自官方低配模板
-/// input.conf 的 CTRL+1/2/3 ("Fast", M 变体): 笔记本 4060 + 2560x1600 下
-/// 实测 Fast 套 0.975 实时, 高配 VL 套只有 0.826 (超预算)。mpv 按给定
-/// 顺序执行。
+/// stage3 与 final 都用 x2_S 时官方要求文件不可复用 ("use each shader
+/// file once"), final 槽用 `_final` 改名副本 (anime4k_shader_args 幂等
+/// 复制)。结构取自 CTRL+1/2/3, 变体按实测定档 (4060 笔记本, 无 shader
+/// 基线 0.99-0.996): 高配 VL 套 0.826 弃, Fast(M) 套 0.965-0.979,
+/// 全 S 套 0.979/0.982/0.972 (A1080p/B720p/C720p, drops=0) → 三模式
+/// 统一全 S, 净开销 ~1-2%。mpv 按给定顺序执行。
 fn anime4k_mode_files(mode: &crate::domain::playback::Anime4kMode) -> &'static [&'static str] {
     use crate::domain::playback::Anime4kMode;
     match mode {
@@ -234,25 +255,25 @@ fn anime4k_mode_files(mode: &crate::domain::playback::Anime4kMode) -> &'static [
         // A: Clamp → Restore → Upscale×2 (AutoDownscalePre 收口) — 1080p
         Anime4kMode::A => &[
             "Restore/Anime4K_Clamp_Highlights.glsl",
-            "Restore/Anime4K_Restore_CNN_M.glsl",
-            "Upscale/Anime4K_Upscale_CNN_x2_M.glsl",
+            "Restore/Anime4K_Restore_CNN_S.glsl",
+            "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
-            "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
+            "Upscale/Anime4K_Upscale_CNN_x2_S_final.glsl",
         ],
         // B: 同 A 但 Restore_Soft — 720p/低模糊源
         Anime4kMode::B => &[
             "Restore/Anime4K_Clamp_Highlights.glsl",
-            "Restore/Anime4K_Restore_CNN_Soft_M.glsl",
-            "Upscale/Anime4K_Upscale_CNN_x2_M.glsl",
+            "Restore/Anime4K_Restore_CNN_Soft_S.glsl",
+            "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
-            "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
+            "Upscale/Anime4K_Upscale_CNN_x2_S_final.glsl",
         ],
         // C: Upscale_Denoise → Upscale — 480p/无损图源
         Anime4kMode::C => &[
             "Restore/Anime4K_Clamp_Highlights.glsl",
-            "Upscale+Denoise/Anime4K_Upscale_Denoise_CNN_x2_M.glsl",
+            "Upscale+Denoise/Anime4K_Upscale_Denoise_CNN_x2_S.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
             "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
@@ -270,9 +291,26 @@ fn anime4k_shader_args(mode: &crate::domain::playback::Anime4kMode) -> Vec<Strin
     let Some(dir) = dirs::data_local_dir().map(|d| d.join("bilibili-tui/anime4k/glsl")) else {
         return Vec::new();
     };
+    anime4k_args_in(&dir, files)
+}
+
+/// [`anime4k_shader_args`] 的核心 (目录参数化, 便于测试): 逐文件校验并
+/// 按需生成 `_final` 改名副本 (官方允许 copy+rename 复用同一着色器,
+/// 每文件只能挂一次钩子); 任一源/目标缺失 → 整体返回空 (不启用,
+/// 保证可播 — mpv 直接吃缺失文件会退化到 ~0.55 实时)。
+fn anime4k_args_in(dir: &std::path::Path, files: &[&str]) -> Vec<String> {
     let mut args = Vec::with_capacity(files.len());
     for file in files {
         let path = dir.join(file);
+        if let Some(base) = file.strip_suffix("_final.glsl") {
+            let src = dir.join(format!("{base}.glsl"));
+            if !src.is_file() {
+                return Vec::new();
+            }
+            if !path.is_file() && std::fs::copy(&src, &path).is_err() {
+                return Vec::new();
+            }
+        }
         if !path.is_file() {
             return Vec::new();
         }
@@ -2960,6 +2998,43 @@ mod playlist_tests {
         // B 用 Soft 修复, C 用去噪上采样 — 与 A 区分。
         assert!(anime4k_mode_files(&M::B)[1].contains("Soft"));
         assert!(anime4k_mode_files(&M::C)[1].contains("Denoise"));
+    }
+
+    #[test]
+    fn anime4k_args_copies_final_and_guards_missing_src() {
+        use crate::domain::playback::Anime4kMode as M;
+        let base = std::env::temp_dir().join(format!("a4k_args_{}", std::process::id()));
+        std::fs::create_dir_all(base.join("Upscale")).unwrap();
+        std::fs::create_dir_all(base.join("Restore")).unwrap();
+        for f in anime4k_mode_files(&M::A) {
+            if f.ends_with("_final.glsl") {
+                continue;
+            }
+            std::fs::write(base.join(f), "// test shader").unwrap();
+        }
+        let args = anime4k_args_in(&base, anime4k_mode_files(&M::A));
+        assert_eq!(args.len(), 6, "六段链路齐全");
+        let final_copy = base.join("Upscale/Anime4K_Upscale_CNN_x2_S_final.glsl");
+        assert!(final_copy.is_file(), "_final 副本须按需生成");
+        assert_eq!(
+            std::fs::read_to_string(&final_copy).unwrap(),
+            "// test shader"
+        );
+        // 源文件缺失 → 整体不启用 (返回空), 且不误把副本当源。
+        std::fs::remove_file(base.join("Upscale/Anime4K_Upscale_CNN_x2_S.glsl")).unwrap();
+        assert!(anime4k_args_in(&base, anime4k_mode_files(&M::A)).is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn smooth_motion_pacing_overrides_video_sync() {
+        use crate::domain::playback::InterpolationMode as M;
+        assert_eq!(
+            smooth_motion_pacing_args(&M::SmoothMotion),
+            &["--video-sync=audio"]
+        );
+        assert!(smooth_motion_pacing_args(&M::Off).is_empty());
+        assert!(smooth_motion_pacing_args(&M::Blend).is_empty());
     }
 
     #[test]

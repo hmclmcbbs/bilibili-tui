@@ -317,26 +317,48 @@ cargo build --release --target x86_64-unknown-linux-musl
 | **视频详情页** |                     |                                |
 | 切换焦点       | `Tab`               | 在评论和相关推荐区域间切换     |
 | 展开收起回复   | `r`                 | 展开/收起评论回复              |
-| 补帧三态       | `i`                 | 循环 关→混合 (mpv 时间插值)→Smooth Motion (NVIDIA 驱动插帧) →关; 状态在页头徽标与「播放选项」块, 持久化 |
-| 画质增强 A4K   | `e`                 | 循环 关→A→B→C (Anime4K 动画超分); 状态同上 |
+| 补帧三态       | `i`                 | 循环 关→混合 (mpv 时间插值)→Smooth Motion (NVIDIA 驱动插帧) →关; 状态在「播放选项」块 (页头不放提示), 持久化 |
+| 画质增强 A4K   | `e`                 | 循环 关→A→B→C (Anime4K 动画超分); 状态与模式说明同在「播放选项」块 |
 
 #### 🖼️ Anime4K 动画增强 & 🎞 NVIDIA Smooth Motion
 
 详情页「播放选项」块（画质/HDR 下方）显示 `补帧:` 与 `Anime4K:` 状态，
 快捷键与画质键 `m` 同组：
 
-- **Anime4K**（`e` 循环 关→A→B→C）：实时动画超分/修复着色器，定义取自
-  官方低配模板 input.conf（CTRL+1/2/3，"Fast"/M 变体——实测 VL 高配套在
-  4060 笔记本 + 2560x1600 只有 0.826 实时，Fast 套 0.975）。Mode A 优化
-  1080p 动画（Restore→Upscale×2）、B 优化 720p/低模糊源（Restore_Soft）、
-  C 优化 480p/无损图源（Upscale_Denoise）。
+- **Anime4K**（`e` 循环 关→A→B→C）：实时动画超分/修复着色器，三模式结构
+  取自官方模板 CTRL+1/2/3；**每个模式的说明随按键即时显示**在「播放选项」
+  块的 `Anime4K:` 行内（Off 不显示说明）：
+
+  | 模式 | 定位 | 行内说明 |
+  |------|------|----------|
+  | A | 1080p 动画 | `1080p动画·线稿重建` — 重建退化线条/去压缩伪影，感知质量最高 |
+  | B | 720p 动画 | `720p动画·去振铃抗锯齿` — 中度修复，适合轻度模糊与下采样伪影 |
+  | C | 480p/无损图 | `480p·高保真轻处理` — 最高 PSNR，只降噪不重修线条 |
+
+  着色器变体按实测定档（4060 笔记本 + 2560x1600，实测实时比 =
+  time-pos/墙钟，无 shader 基线 0.99-0.996，drops 全程 0）：
+
+  | 变体 | 实测实时比 |
+  |------|-----------|
+  | 高配 VL 套 | 0.826（超预算，弃） |
+  | 官方 Fast (M) 套 | 0.965-0.979 |
+  | **全 S 套（当前）** | **A 0.979 (1080p)、B 0.982、C 0.972 (720p)，采用** |
+
+  即着色器净开销 ~1-2%（drops=0）。stage3 与 final 均用 x2_S，按官方要求
+  以 `_final` 改名副本挂第二次钩子（首次播放由应用自动复制；缺文件时
+  应用整体不启用着色器——mpv 直接吃缺失文件会退化到 0.55，已由存在性
+  检查拦住）。
   着色器目录缺失/缺文件时静默不启用，播放不受影响。重建：
   `git clone --depth 1 https://github.com/bloc97/Anime4K.git ~/.local/share/bilibili-tui/anime4k`
 - **Smooth Motion**（`i` 循环到第三态）：NVIDIA 驱动级插帧。播放进程注入
   `NVPRESENT_ENABLE_SMOOTH_MOTION=1` 启用 `VK_LAYER_NV_present` 隐式层，
   驱动 AI 在呈现层补帧（**RTX 40 系+，需 Vulkan** — Wayland 下 mpv 自动选
-  vulkan VO）。该模式下 mpv 不叠加自身插值，避免双重补帧。排查：
-  `NVPRESENT_LOG_LEVEL=4`（stderr 日志）、`VK_LOADER_DEBUG=layer`
+  vulkan VO）。该模式下 mpv 不叠加自身插值，避免双重补帧；且呈现节奏让位
+  驱动层：**追加 `--video-sync=audio` 覆盖基础参数里的 display-resample**
+  （仅本模式；其他模式的 display-resample 不动，弹幕平滑不受影响）。
+  实测收益（1080p24）：GPU 41%→31%、vo-delayed 11→0、实时比
+  0.999→1.003；与 A 模式同时开 0.999 / GPU 29%。
+  排查：`NVPRESENT_LOG_LEVEL=4`（stderr 日志）、`VK_LOADER_DEBUG=layer`
   （层加载），见驱动 README "NVIDIA Smooth Motion" 章。
 
 ### 🖱️ 鼠标操作
