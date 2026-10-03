@@ -359,6 +359,11 @@ cargo build --release --target x86_64-unknown-linux-musl
   0.999→1.003；与 A 模式同时开 0.999 / GPU 29%。
   排查：`NVPRESENT_LOG_LEVEL=4`（stderr 日志）、`VK_LOADER_DEBUG=layer`
   （层加载），见驱动 README "NVIDIA Smooth Motion" 章。
+- **方案回显（持久化可见）**：补帧/Anime4K 的选择保存在本地
+  `config.json`，重启应用后详情页状态与播放参数**默认沿用上次方案**；
+  非默认方案在每次播放开始时 OSD 回显 2.5s（`--osd-playing-msg`，
+  每文件仅弹一次，loop 循环实测不重复）。注意：播放中 mpv 独占输入
+  （此时按 `i` 是 mpv 自己的统计面板），切换方案要退回详情页按 `i`/`e`。
 - **启动黑屏治理**：`--force-window=no`（原 `immediate`）——网络打开、
   探测、缓冲期间**不创建 mpv 窗口**，TUI 全程可见，画面就绪才弹窗。
   fifo 实测：`immediate` 阻塞打开时秒建黑窗（Vulkan 立即初始化），
