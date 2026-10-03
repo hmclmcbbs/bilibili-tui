@@ -482,6 +482,50 @@ impl App {
         }
     }
 
+    /// 单视频自动连播: 决策并执行下一段播放。返回 true = 已开启下一条。
+    ///
+    /// 决策是纯函数 (`decide_auto_next`), 这里只负责收集现场: 多 P 的
+    /// 下一 P、来源列表的下一条/环绕、3 秒停留守卫。
+    async fn chain_auto_next(&mut self, finished_bvid: &str) -> bool {
+        use crate::domain::playback::{AutoNextOutcome, PlayLoop, decide_auto_next};
+        if !self.config.auto_play || self.config.playback_loop == PlayLoop::Item {
+            return false;
+        }
+        let Page::VideoDetail(detail) = &self.current_page else {
+            return false;
+        };
+        if detail.bvid != finished_bvid {
+            return false;
+        }
+        let next_part = detail.get_pages().and_then(|pages| {
+            if pages.len() > 1 {
+                let next = detail.current_page_index + 1;
+                (next < pages.len()).then_some(next)
+            } else {
+                None
+            }
+        });
+        let dwell_ok = self
+            .play_started_at
+            .is_some_and(|at| at.elapsed() >= std::time::Duration::from_secs(3));
+        let origin = self
+            .navigation_stack
+            .last()
+            .map(|page| page.auto_next_after(finished_bvid))
+            .unwrap_or(AutoNextOutcome::NotMember);
+        let Some(hop) = decide_auto_next(
+            self.config.playback_loop,
+            self.config.auto_play,
+            dwell_ok,
+            next_part,
+            &origin,
+            finished_bvid,
+        ) else {
+            return false;
+        };
+        self.run_auto_hop(hop, finished_bvid).await
+    }
+
     /// Periodic housekeeping. Returns `true` when visible state may have
     /// changed, so the run loop knows a redraw is due (see the dirty flag).
     pub(super) async fn tick(&mut self) -> bool {
@@ -502,8 +546,14 @@ impl App {
                 crate::domain::playback::PlaybackEvent::Finished {
                     session_id,
                     bvid: Some(bvid),
+                    natural_end,
                 } => {
-                    if accepted
+                    // 自动连播: 只有"真的播到片尾"才续下一条 — 用户按 q
+                    // 退出意味着"不看了", 绝不能触发下一条。链成功开启后
+                    // 旧的自动返回绑定由下一次 auto_play tick 重新绑定。
+                    if natural_end && self.chain_auto_next(&bvid).await {
+                        // chained: 下一条已开始
+                    } else if accepted
                         && self.auto_return_after_playback.as_ref()
                             == Some(&(session_id, bvid.clone()))
                         && matches!(&self.current_page, Page::VideoDetail(page) if page.bvid == bvid)
@@ -537,6 +587,10 @@ impl App {
                 } if accepted => {
                     if !success {
                         self.playback.last_error = error;
+                    } else {
+                        // 连播链的"停留时间"守卫基准: 打开 3 秒内就结束
+                        // (历史进度顶到片尾) 的会话不进链, 防止整表风暴。
+                        self.play_started_at = Some(std::time::Instant::now());
                     }
                     // Refresh stream support info on the detail page once the
                     // player has started (mirrors the old inline behaviour).

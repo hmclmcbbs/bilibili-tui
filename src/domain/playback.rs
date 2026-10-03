@@ -72,6 +72,129 @@ pub enum PlayOrder {
     Shuffle,
 }
 
+/// What happens when playback reaches the end of a video / playlist.
+///
+/// Persisted in `AppConfig::playback_loop` (toggled with `l` on the UP page);
+/// every playback entry point reads the config value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayLoop {
+    /// Play to the end of the list, then stop (single videos auto-advance
+    /// through their source list first — see `decide_auto_next`).
+    #[default]
+    Stop,
+    /// Restart the list from the beginning when it ends.
+    List,
+    /// Repeat the current item forever (implemented as mpv `--loop-file=inf`).
+    Item,
+}
+
+impl PlayLoop {
+    pub fn next(self) -> Self {
+        match self {
+            PlayLoop::Stop => PlayLoop::List,
+            PlayLoop::List => PlayLoop::Item,
+            PlayLoop::Item => PlayLoop::Stop,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PlayLoop::Stop => "播完停止",
+            PlayLoop::List => "列表循环",
+            PlayLoop::Item => "单曲循环",
+        }
+    }
+}
+
+/// One video a list page can hand to the auto-continue chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoNextTarget {
+    pub bvid: String,
+    pub aid: i64,
+}
+
+/// Where the current video sits inside a list page's loaded items.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoNextOutcome {
+    /// The finished video is not part of this list (or the page has no
+    /// suitable list): auto-continue must not use this page.
+    NotMember,
+    /// Another video follows the finished one.
+    Next(AutoNextTarget),
+    /// The finished video was the last one. `first` (when present and
+    /// different from the finished video) is where a List-loop wraps to.
+    End { first: Option<AutoNextTarget> },
+}
+
+impl AutoNextOutcome {
+    /// Build the outcome from a list page's loaded targets, in display
+    /// order. Targets without ids (ads, user cards, …) are skipped.
+    pub fn from_targets(
+        targets: impl IntoIterator<Item = Option<(String, i64)>>,
+        finished_bvid: &str,
+    ) -> Self {
+        let list: Vec<(String, i64)> = targets.into_iter().flatten().collect();
+        match list.iter().position(|(bvid, _)| bvid == finished_bvid) {
+            None => AutoNextOutcome::NotMember,
+            Some(index) if index + 1 < list.len() => AutoNextOutcome::Next(AutoNextTarget {
+                bvid: list[index + 1].0.clone(),
+                aid: list[index + 1].1,
+            }),
+            Some(_) => AutoNextOutcome::End {
+                first: list.first().map(|(bvid, aid)| AutoNextTarget {
+                    bvid: bvid.clone(),
+                    aid: *aid,
+                }),
+            },
+        }
+    }
+}
+
+/// The next hop of the single-video auto-continue chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutoHop {
+    /// Play the next part of the current multi-part video.
+    NextPart(usize),
+    /// Open (and auto-play) the next video from the source list.
+    NewVideo(AutoNextTarget),
+}
+
+/// Decide whether a naturally-finished single video should auto-continue.
+///
+/// Pure so the mode matrix is unit-testable. Guards:
+/// * `auto_play` off or the loop mode is `Item` → no chain (Item is handled
+///   by mpv `--loop-file=inf`; a Finished there means the user quit).
+/// * `dwell_ok` false (video ended suspiciously fast, e.g. history seek
+///   landed at the very end) → no chain, so already-watched lists cannot
+///   be ripped through in a storm.
+/// * Multi-part videos advance part-by-part first; only after the last
+///   part does the source list decide (next video / List-wrap / stop).
+pub fn decide_auto_next(
+    loop_mode: PlayLoop,
+    auto_play: bool,
+    dwell_ok: bool,
+    next_part: Option<usize>,
+    origin: &AutoNextOutcome,
+    finished_bvid: &str,
+) -> Option<AutoHop> {
+    if !auto_play || !dwell_ok || loop_mode == PlayLoop::Item {
+        return None;
+    }
+    if let Some(index) = next_part {
+        return Some(AutoHop::NextPart(index));
+    }
+    match origin {
+        AutoNextOutcome::Next(target) => Some(AutoHop::NewVideo(target.clone())),
+        AutoNextOutcome::End { first: Some(first) }
+            if loop_mode == PlayLoop::List && first.bvid != finished_bvid =>
+        {
+            Some(AutoHop::NewVideo(first.clone()))
+        }
+        _ => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlaylistSource {
     Manual,
@@ -107,6 +230,10 @@ pub enum PlaybackEvent {
     Finished {
         session_id: u64,
         bvid: Option<String>,
+        /// True only when mpv reached a real end-of-file. `q` / errors also
+        /// end a session with a Finished event — those must not trigger the
+        /// auto-continue chain (quitting means "stop watching").
+        natural_end: bool,
     },
     Failed {
         session_id: u64,
@@ -284,7 +411,8 @@ mod tests {
         state.begin_session(2);
         assert!(!state.apply_event(&PlaybackEvent::Finished {
             session_id: 1,
-            bvid: None
+            bvid: None,
+            natural_end: false,
         }));
         assert_eq!(state.status, PlaybackStatus::Playing);
         assert!(state.apply_event(&PlaybackEvent::ItemChanged {
@@ -317,5 +445,112 @@ mod tests {
         assert!(state.advance());
         assert_eq!(state.current_index, Some(1));
         assert!(!state.advance());
+    }
+
+    #[test]
+    fn play_loop_cycles_and_labels() {
+        assert_eq!(PlayLoop::default(), PlayLoop::Stop);
+        assert_eq!(PlayLoop::Stop.next(), PlayLoop::List);
+        assert_eq!(PlayLoop::List.next(), PlayLoop::Item);
+        assert_eq!(PlayLoop::Item.next(), PlayLoop::Stop);
+        assert_eq!(PlayLoop::Stop.label(), "播完停止");
+        assert_eq!(PlayLoop::List.label(), "列表循环");
+        assert_eq!(PlayLoop::Item.label(), "单曲循环");
+    }
+
+    fn target(id: i64) -> AutoNextTarget {
+        AutoNextTarget {
+            bvid: format!("BV{id}"),
+            aid: id,
+        }
+    }
+
+    fn origin_of(ids: &[i64], finished: &str) -> AutoNextOutcome {
+        AutoNextOutcome::from_targets(
+            ids.iter().map(|id| Some((format!("BV{id}"), *id))),
+            finished,
+        )
+    }
+
+    #[test]
+    fn auto_next_outcome_walks_then_ends_then_wraps() {
+        assert_eq!(
+            origin_of(&[1, 2, 3], "BV2"),
+            AutoNextOutcome::Next(target(3))
+        );
+        assert_eq!(
+            origin_of(&[1, 2, 3], "BV3"),
+            AutoNextOutcome::End {
+                first: Some(target(1))
+            }
+        );
+        assert_eq!(origin_of(&[1, 2, 3], "BV9"), AutoNextOutcome::NotMember);
+        // Non-video cards (None entries) are skipped when building the list.
+        let mixed = AutoNextOutcome::from_targets(
+            vec![Some(("BV1".into(), 1)), None, Some(("BV2".into(), 2))],
+            "BV1",
+        );
+        assert_eq!(mixed, AutoNextOutcome::Next(target(2)));
+    }
+
+    #[test]
+    fn decide_auto_next_mode_matrix() {
+        let end = AutoNextOutcome::End {
+            first: Some(target(1)),
+        };
+        let next = AutoNextOutcome::Next(target(2));
+        // Stop: advance through the list, stop at its end.
+        assert_eq!(
+            decide_auto_next(PlayLoop::Stop, true, true, None, &next, "BV1"),
+            Some(AutoHop::NewVideo(target(2)))
+        );
+        assert_eq!(
+            decide_auto_next(PlayLoop::Stop, true, true, None, &end, "BV1"),
+            None
+        );
+        // List: wrap to the first video at the end.
+        assert_eq!(
+            decide_auto_next(PlayLoop::List, true, true, None, &end, "BV3"),
+            Some(AutoHop::NewVideo(target(1)))
+        );
+        // Never wrap a single-item list into itself (seek-to-end storm).
+        assert_eq!(
+            decide_auto_next(PlayLoop::List, true, true, None, &end, "BV1"),
+            None
+        );
+        // Item: mpv loops the file; a Finished is a user quit → no chain.
+        assert_eq!(
+            decide_auto_next(PlayLoop::Item, true, true, None, &next, "BV1"),
+            None
+        );
+        // auto_play off / suspiciously short dwell / not a member.
+        assert_eq!(
+            decide_auto_next(PlayLoop::Stop, false, true, None, &next, "BV1"),
+            None
+        );
+        assert_eq!(
+            decide_auto_next(PlayLoop::Stop, true, false, None, &next, "BV1"),
+            None
+        );
+        assert_eq!(
+            decide_auto_next(
+                PlayLoop::Stop,
+                true,
+                true,
+                None,
+                &AutoNextOutcome::NotMember,
+                "BV1"
+            ),
+            None
+        );
+        // Multi-part videos advance part-by-part before consulting the list.
+        assert_eq!(
+            decide_auto_next(PlayLoop::Stop, true, true, Some(2), &next, "BV1"),
+            Some(AutoHop::NextPart(2))
+        );
+        assert_eq!(
+            decide_auto_next(PlayLoop::List, true, true, Some(2), &end, "BV1"),
+            Some(AutoHop::NextPart(2))
+        );
     }
 }

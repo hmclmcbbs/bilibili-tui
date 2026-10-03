@@ -424,6 +424,14 @@ impl VideoCard {
 }
 
 /// Video card grid manager for async cover loading
+impl VideoCard {
+    /// (bvid, aid) 当这张卡片是一个可播放视频 — 自动连播链用它遍历
+    /// 各列表页 (无 bvid 的卡片: 广告/用户卡 → None)。
+    pub(crate) fn auto_target(&self) -> Option<(String, i64)> {
+        Some((self.bvid.clone()?, self.aid?))
+    }
+}
+
 pub struct VideoCardGrid {
     pub cards: Vec<VideoCard>,
     pub selected_index: usize,

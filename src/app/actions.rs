@@ -367,12 +367,16 @@ impl App {
                 playback,
             } => {
                 let session_id = self.allocate_playback_session();
-                self.playback.session_id = None;
+                // 记录会话 id: 否则 Started/Finished 会被 apply_event 以
+                // "会话不匹配"拒收 — 自动连播、自动返回与错误提示都会失效。
+                self.playback.session_id = Some(session_id);
                 self.playback.status = crate::domain::playback::PlaybackStatus::Starting;
                 let api_client = self.api_client.clone();
                 let credentials = self.credentials.clone();
                 let danmaku = self.config.danmaku.clone();
                 let video_quality = self.config.video_quality;
+                let loop_item =
+                    self.config.playback_loop == crate::domain::playback::PlayLoop::Item;
                 let tx = self.playback_event_tx.clone();
                 let bvid2 = bvid.clone();
                 let preheat = self.preheat.clone();
@@ -380,12 +384,18 @@ impl App {
                 // subtitles + danmaku) on a background task so the TUI keeps
                 // rendering while mpv is being prepared.
                 tokio::spawn(async move {
-                    let start_position = api_client
-                        .get_video_history_progress(&bvid2)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|p| p as f64);
+                    // 单曲循环忽略历史进度: 进度若停在片尾, 一进来就 eof,
+                    // 自动连播链会以风暴方式扫完整张列表。
+                    let start_position = if loop_item {
+                        None
+                    } else {
+                        api_client
+                            .get_video_history_progress(&bvid2)
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|p| p as f64)
+                    };
                     let result = media::play_video(
                         api_client,
                         &bvid2,
@@ -402,6 +412,7 @@ impl App {
                         tx.clone(),
                         session_id,
                         preheat,
+                        loop_item,
                     )
                     .await;
                     let (success, error) = match result {
@@ -428,8 +439,11 @@ impl App {
                 // Play only the selected episode
                 if current_index < pages.len() {
                     let session_id = self.allocate_playback_session();
-                    self.playback.session_id = None;
+                    // 见 PlayVideo: 让事件能被 apply_event 接受。
+                    self.playback.session_id = Some(session_id);
                     self.playback.status = crate::domain::playback::PlaybackStatus::Starting;
+                    let loop_item =
+                        self.config.playback_loop == crate::domain::playback::PlayLoop::Item;
                     let page = pages[current_index].clone();
                     let api_client = self.api_client.clone();
                     let credentials = self.credentials.clone();
@@ -447,12 +461,17 @@ impl App {
                     // Run the network startup on a background task so the TUI
                     // keeps rendering while mpv is being prepared.
                     tokio::spawn(async move {
-                        let start_position = api_client
-                            .get_video_history_progress(&bvid2)
-                            .await
-                            .ok()
-                            .flatten()
-                            .map(|p| p as f64);
+                        // 单曲循环忽略历史进度: 见 PlayVideo。
+                        let start_position = if loop_item {
+                            None
+                        } else {
+                            api_client
+                                .get_video_history_progress(&bvid2)
+                                .await
+                                .ok()
+                                .flatten()
+                                .map(|p| p as f64)
+                        };
                         let result = media::play_video(
                             api_client,
                             &bvid2,
@@ -469,6 +488,7 @@ impl App {
                             tx.clone(),
                             session_id,
                             preheat,
+                            loop_item,
                         )
                         .await;
                         let (success, error) = match result {
@@ -484,6 +504,10 @@ impl App {
                         });
                     });
                 }
+            }
+            AppAction::SetPlayLoop(loop_mode) => {
+                self.config.playback_loop = loop_mode;
+                let _ = persistence::save_config(&self.config);
             }
             AppAction::PlayPlaylist {
                 items,
@@ -711,7 +735,9 @@ impl App {
                 }
             }
             AppAction::OpenUpPage(mid) => {
-                let page = UpPage::new(mid);
+                let mut page = UpPage::new(mid);
+                // 循环模式是全局配置, UP 页只是它的切换入口与展示位。
+                page.play_loop = self.config.playback_loop;
                 let previous = std::mem::replace(&mut self.current_page, Page::Up(Box::new(page)));
                 self.navigation_stack.push(previous);
                 let req_id = self.next_request_id("up_page");
@@ -2160,6 +2186,9 @@ impl App {
         self.playback.order = order;
         let _ = self.playback.play_from(start_index);
         let session_id = self.allocate_playback_session();
+        // 见 PlayVideo: 让 Started/Finished 被 apply_event 接受。
+        self.playback.session_id = Some(session_id);
+        let loop_mode = self.config.playback_loop;
         let api_client = self.api_client.clone();
         let video_quality = self.config.video_quality;
         let tx = self.playback_event_tx.clone();
@@ -2170,6 +2199,7 @@ impl App {
                 api_client,
                 items,
                 order,
+                loop_mode,
                 start_index,
                 None,
                 video_quality,
@@ -2189,6 +2219,61 @@ impl App {
                 error,
             });
         });
+    }
+
+    /// 打开自动连播的下一条视频 — *原地替换* 当前详情页而不是压栈:
+    /// 来源列表仍在 navigation_stack 顶部, 按返回键依然回到链开始的地方;
+    /// 新详情页默认 auto_play_pending=true, 信息加载完即自动续播。
+    pub(super) fn open_auto_next_video(&mut self, target: crate::domain::playback::AutoNextTarget) {
+        let detail_page =
+            crate::presentation::tui::VideoDetailPage::new(target.bvid.clone(), target.aid);
+        self.current_page = Page::VideoDetail(Box::new(detail_page));
+        let req_id = self.next_request_id("video_detail");
+        self.send_network_command(network::NetworkCommand::LoadVideoDetail {
+            req_id,
+            bvid: target.bvid,
+            aid: target.aid,
+            preheat_cid: None,
+            preheat_playback: None,
+        });
+    }
+
+    /// 执行一次自动连播跳跃。返回 false 表示跳不动 (调用方回退到旧的
+    /// Finished 行为: 自动返回列表或停在详情页)。
+    pub(super) async fn run_auto_hop(
+        &mut self,
+        hop: crate::domain::playback::AutoHop,
+        finished_bvid: &str,
+    ) -> bool {
+        use crate::domain::playback::AutoHop;
+        match hop {
+            AutoHop::NextPart(index) => {
+                let Page::VideoDetail(page) = &mut self.current_page else {
+                    return false;
+                };
+                let total = page.get_pages().map_or(0, |pages| pages.len());
+                if index >= total {
+                    return false;
+                }
+                page.current_page_index = index;
+                page.auto_play_pending = false;
+                let action = page.play_action();
+                let was_armed = self.auto_return_after_playback.is_some();
+                self.handle_action(action).await;
+                if was_armed {
+                    // 新会话已分配, 把"播完自动返回"重新绑到新会话上。
+                    self.auto_return_after_playback = self
+                        .playback
+                        .session_id
+                        .map(|sid| (sid, finished_bvid.to_string()));
+                }
+                true
+            }
+            AutoHop::NewVideo(target) => {
+                self.open_auto_next_video(target);
+                true
+            }
+        }
     }
 
     async fn switch_to_nav_page(&mut self) {

@@ -7,7 +7,7 @@ use crate::api::{
     },
 };
 use crate::application::AppAction;
-use crate::domain::playback::PlayOrder;
+use crate::domain::playback::{PlayLoop, PlayOrder};
 use crate::storage::Keybindings;
 use ratatui::{
     Frame,
@@ -33,6 +33,9 @@ pub struct UpPage {
     pub tab: UpTab,
     pub video_order: SpaceVideoOrder,
     pub play_order: PlayOrder,
+    /// 结束模式 (停止/列表循环/单曲循环), 打开页面时从配置初始化,
+    /// `l` 键循环切换并写回配置 (AppAction::SetPlayLoop)。
+    pub play_loop: PlayLoop,
     pub videos: VideoCardGrid,
     pub video_page: i32,
     pub video_total: i64,
@@ -75,6 +78,29 @@ pub struct UpPage {
 }
 
 impl UpPage {
+    /// 自动连播支持: 在本页已加载的列表中定位 `finished_bvid` 的下一条。
+    pub(crate) fn auto_next_after(
+        &self,
+        finished_bvid: &str,
+    ) -> crate::domain::playback::AutoNextOutcome {
+        let grid = if self.active_series.is_some() {
+            Some(&self.series_videos)
+        } else if self.active_folder.is_some() {
+            Some(&self.favorite_videos)
+        } else {
+            match self.tab {
+                UpTab::Videos => Some(&self.videos),
+                _ => None,
+            }
+        };
+        match grid {
+            Some(grid) => crate::domain::playback::AutoNextOutcome::from_targets(
+                grid.cards.iter().map(|card| card.auto_target()),
+                finished_bvid,
+            ),
+            None => crate::domain::playback::AutoNextOutcome::NotMember,
+        }
+    }
     pub fn new(mid: i64) -> Self {
         Self {
             mid,
@@ -83,6 +109,7 @@ impl UpPage {
             tab: UpTab::Videos,
             video_order: SpaceVideoOrder::Latest,
             play_order: PlayOrder::Forward,
+            play_loop: PlayLoop::Stop,
             videos: VideoCardGrid::new(),
             video_page: 1,
             video_total: 0,
@@ -514,13 +541,14 @@ impl Component for UpPage {
             })
             .highlight_style(Style::default().fg(theme.bilibili_pink))
             .block(Block::default().borders(Borders::ALL).title(format!(
-                " {} · {play_order} ",
+                " {} · {play_order} · {} ",
                 match self.tab {
                     UpTab::Videos => sort,
                     UpTab::Favorites => favorite_sort,
                     UpTab::Collections => "合集",
                     UpTab::Articles => "专栏",
-                }
+                },
+                self.play_loop.label()
             )));
         frame.render_widget(tabs, chunks[1]);
 
@@ -589,6 +617,7 @@ impl Component for UpPage {
                     ),
                     ("o".into(), "最新/热门".into(), theme.info),
                     ("s".into(), "顺序/倒序/随机".into(), theme.info),
+                    ("l".into(), "循环模式".into(), theme.info),
                     (keys.play.clone(), "连播".into(), theme.success),
                     (keys.confirm.clone(), "打开".into(), theme.success),
                     (keys.back.clone(), "返回".into(), theme.info),
@@ -669,6 +698,10 @@ impl Component for UpPage {
                     PlayOrder::Shuffle => PlayOrder::Forward,
                 };
                 return Some(AppAction::None);
+            }
+            KeyCode::Char('l') => {
+                self.play_loop = self.play_loop.next();
+                return Some(AppAction::SetPlayLoop(self.play_loop));
             }
             KeyCode::Char('f') => {
                 return Some(AppAction::ToggleFollow { mid: self.mid });
@@ -871,6 +904,19 @@ mod tests {
         assert_eq!(page.play_order, PlayOrder::Shuffle);
         page.handle_input(KeyCode::Char('s'), &keys);
         assert_eq!(page.play_order, PlayOrder::Forward);
+    }
+
+    #[test]
+    fn play_loop_cycles_through_all_modes() {
+        let mut page = UpPage::new(1);
+        let keys = Keybindings::default();
+        assert_eq!(page.play_loop, PlayLoop::Stop);
+        page.handle_input(KeyCode::Char('l'), &keys);
+        assert_eq!(page.play_loop, PlayLoop::List);
+        page.handle_input(KeyCode::Char('l'), &keys);
+        assert_eq!(page.play_loop, PlayLoop::Item);
+        page.handle_input(KeyCode::Char('l'), &keys);
+        assert_eq!(page.play_loop, PlayLoop::Stop);
     }
 
     #[test]

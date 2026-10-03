@@ -99,6 +99,9 @@ pub struct App {
     playback_event_tx: mpsc::Sender<PlaybackEvent>,
     playback_event_rx: mpsc::Receiver<PlaybackEvent>,
     auto_return_after_playback: Option<(u64, String)>,
+    /// 最近一次播放成功启动的时刻; 自动连播链用它挡住"进度在片尾"的
+    /// 秒退视频 (见 chain_auto_next)。
+    play_started_at: Option<std::time::Instant>,
     next_playback_session_id: u64,
     /// Pre-warmed media proxy for the video currently being previewed, so
     /// playback reuses an already-cached first segment (faster first frame).
@@ -193,6 +196,7 @@ impl App {
             playback_event_tx,
             playback_event_rx,
             auto_return_after_playback: None,
+            play_started_at: None,
             next_playback_session_id: 1,
             preheat: preheat_store,
             pending_playlist: None,
@@ -488,6 +492,7 @@ mod tests {
             .send(PlaybackEvent::Finished {
                 session_id: 7,
                 bvid: Some("BV1test".to_string()),
+                natural_end: false,
             })
             .unwrap();
 
@@ -551,6 +556,7 @@ mod tests {
             .send(PlaybackEvent::Finished {
                 session_id: 7,
                 bvid: Some("BV1test".to_string()),
+                natural_end: false,
             })
             .unwrap();
         app.tick().await;

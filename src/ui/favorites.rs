@@ -50,6 +50,16 @@ pub enum InputMode {
 }
 
 impl FavoritesPage {
+    /// 自动连播支持: 在本页已加载的列表中定位 `finished_bvid` 的下一条。
+    pub(crate) fn auto_next_after(
+        &self,
+        finished_bvid: &str,
+    ) -> crate::domain::playback::AutoNextOutcome {
+        crate::domain::playback::AutoNextOutcome::from_targets(
+            self.videos.cards.iter().map(|card| card.auto_target()),
+            finished_bvid,
+        )
+    }
     pub fn new(mid: i64) -> Self {
         Self {
             mid,

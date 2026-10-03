@@ -961,7 +961,7 @@ impl VideoDetailPage {
     }
 
     /// Get the video pages
-    fn get_pages(&self) -> Option<&Vec<crate::api::video::VideoPage>> {
+    pub(crate) fn get_pages(&self) -> Option<&Vec<crate::api::video::VideoPage>> {
         self.video_info
             .as_ref()
             .and_then(|info| info.pages.as_ref())

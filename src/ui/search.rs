@@ -63,6 +63,16 @@ pub struct SearchPage {
 }
 
 impl SearchPage {
+    /// 自动连播支持: 在本页已加载的列表中定位 `finished_bvid` 的下一条。
+    pub(crate) fn auto_next_after(
+        &self,
+        finished_bvid: &str,
+    ) -> crate::domain::playback::AutoNextOutcome {
+        crate::domain::playback::AutoNextOutcome::from_targets(
+            self.grid.cards.iter().map(|card| card.auto_target()),
+            finished_bvid,
+        )
+    }
     pub fn new() -> Self {
         let mut user_grid = VideoCardGrid::new_list();
         user_grid.card_height = 8;

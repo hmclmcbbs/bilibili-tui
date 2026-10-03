@@ -540,6 +540,11 @@ pub struct AppConfig {
     pub danmaku: DanmakuConfig,
     #[serde(default = "default_true")]
     pub auto_play: bool,
+    /// What to do at the end of playback (see `PlayLoop`). Toggled with `l`
+    /// on the UP page and persisted here so every playback entry point
+    /// starts with the same mode.
+    #[serde(default)]
+    pub playback_loop: crate::domain::playback::PlayLoop,
     /// mpv video output override. Empty/unset means mpv's default (external
     /// window); "kitty" / "tct" draw inside the terminal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -570,6 +575,7 @@ impl Default for AppConfig {
             keybindings: Keybindings::default(),
             danmaku: DanmakuConfig::default(),
             auto_play: true,
+            playback_loop: Default::default(),
             mpv_vo: None,
             mpv_hwdec: None,
             mpv_extra_args: None,

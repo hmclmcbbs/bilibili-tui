@@ -120,3 +120,23 @@ pub enum Page {
     Notifications(NotificationsPage),
     Mall(MallPage),
 }
+
+impl Page {
+    /// 自动连播: 本页作为"来源列表"时, finished_bvid 的下一条视频。
+    /// 非列表页与详情页返回 NotMember (链不会基于它们续播)。
+    pub(crate) fn auto_next_after(
+        &self,
+        finished_bvid: &str,
+    ) -> crate::domain::playback::AutoNextOutcome {
+        use crate::domain::playback::AutoNextOutcome;
+        match self {
+            Page::Home(page) => page.auto_next_after(finished_bvid),
+            Page::Search(page) => page.auto_next_after(finished_bvid),
+            Page::History(page) => page.auto_next_after(finished_bvid),
+            Page::Favorites(page) => page.auto_next_after(finished_bvid),
+            Page::Up(page) => page.auto_next_after(finished_bvid),
+            Page::Dynamic(page) => page.auto_next_after(finished_bvid),
+            _ => AutoNextOutcome::NotMember,
+        }
+    }
+}

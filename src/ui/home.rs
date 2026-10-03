@@ -85,6 +85,18 @@ pub const RANKING_SECTIONS: &[(i64, &str)] = &[
 ];
 
 impl HomePage {
+    /// 自动连播支持: 在本页已加载的列表中定位 `finished_bvid` 的下一条。
+    pub(crate) fn auto_next_after(
+        &self,
+        finished_bvid: &str,
+    ) -> crate::domain::playback::AutoNextOutcome {
+        crate::domain::playback::AutoNextOutcome::from_targets(
+            self.videos
+                .iter()
+                .map(|card| card.video.bvid.clone().map(|bvid| (bvid, card.video.id))),
+            finished_bvid,
+        )
+    }
     fn draw_sources(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
         let items = (0..self.source_count())
             .map(|index| {

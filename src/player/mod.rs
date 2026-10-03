@@ -3,7 +3,7 @@ use crate::api::danmaku::VideoDanmaku;
 use crate::api::live_danmaku_hub::LiveDanmakuHub;
 use crate::api::live_ws::LiveMessage;
 use crate::domain::playback::PlaybackOptions;
-use crate::domain::playback::{PlayOrder, PlaybackEvent, PlaylistItem};
+use crate::domain::playback::{PlayLoop, PlayOrder, PlaybackEvent, PlaylistItem};
 use crate::storage::{Credentials, DanmakuConfig, VideoQuality};
 use anyhow::{Context, Result};
 use std::collections::VecDeque;
@@ -245,6 +245,9 @@ pub async fn play_video(
     playback_event_tx: Sender<PlaybackEvent>,
     session_id: u64,
     preheat: crate::application::network::PreheatStore,
+    // 单曲循环: let mpv repeat this file forever. Under this mode a
+    // Finished event therefore always means the user quit, never eof.
+    loop_item: bool,
 ) -> Result<()> {
     let webpage_url = match page_num {
         Some(p) if p > 1 => format!("https://www.bilibili.com/video/{}?p={}", bvid, p),
@@ -428,6 +431,11 @@ pub async fn play_video(
         cmd.arg(&webpage_url);
     }
     apply_mpv_vo(&mut cmd);
+    if loop_item {
+        // 单曲循环交给 mpv: 文件播完自动重开, 不再产生 eof, 应用侧的
+        // 自动连播链因此永远不会被触发 (用户按 q 退出除外)。
+        cmd.arg("--loop-file=inf");
+    }
     apply_mpv_extra_args(&mut cmd);
 
     let first_frame_ipc = ipc_path.clone();
@@ -477,6 +485,21 @@ pub async fn play_video(
     // Spawn a background task to handle heartbeat and cleanup
     // This prevents blocking the TUI
     tokio::spawn(async move {
+        // 区分自然播放完毕 (end-file reason=eof → 可自动连播) 与用户按 q
+        // 退出 (reason=quit → 停止)。尽力而为: IPC 起不来就记不到 reason,
+        // natural_end 保持 false, 连播链保守地不动作。
+        let (end_tx, mut end_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut observer_alive = wait_for_ipc(&ipc_path, &mut child).await.is_ok();
+        let mut end_reason: Option<String> = None;
+        if observer_alive {
+            let (ready_tx, _ready_rx) = tokio::sync::oneshot::channel();
+            let event_path = ipc_path.clone();
+            tokio::spawn(async move {
+                let _ = observe_end_files(&event_path, end_tx, ready_tx).await;
+            });
+        } else {
+            drop(end_tx);
+        }
         let start_time = Instant::now();
         let mut played_time: i64 = 0;
         let mut heartbeat_interval = interval_at(
@@ -660,6 +683,13 @@ pub async fn play_video(
                         .await;
                     }
                 }
+                reason = end_rx.recv(), if observer_alive => {
+                    match reason {
+                        Some(reason) => end_reason = Some(reason),
+                        // 观察器连接断开 (mpv 正在退出): 关闭分支避免忙轮询。
+                        None => observer_alive = false,
+                    }
+                }
                 result = child.wait() => {
                     let real_played_time = start_time.elapsed().as_secs() as i64;
 
@@ -752,6 +782,7 @@ pub async fn play_video(
             None => PlaybackEvent::Finished {
                 session_id,
                 bvid: Some(bvid),
+                natural_end: end_reason.as_deref() == Some("eof"),
             },
         };
         let _ = playback_event_tx.send(event);
@@ -1200,6 +1231,7 @@ pub async fn play_playlist(
     api_client: Arc<ApiClient>,
     items: Vec<PlaylistItem>,
     order: PlayOrder,
+    loop_mode: PlayLoop,
     start_index: usize,
     _credentials: Option<&Credentials>,
     video_quality: VideoQuality,
@@ -1226,6 +1258,11 @@ pub async fn play_playlist(
     remove_stale_mpv_ipc(&ipc_path);
     cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
     apply_mpv_vo(&mut cmd);
+    if loop_mode == PlayLoop::Item {
+        // 单曲循环: mpv 无限重播当前文件, run_playlist 的 eof 驱动推进
+        // 永远不会触发 — 这正是 Item 的语义。
+        cmd.arg("--loop-file=inf");
+    }
     apply_mpv_extra_args(&mut cmd);
 
     let mut child = match cmd.spawn() {
@@ -1247,6 +1284,7 @@ pub async fn play_playlist(
             start_index,
             first,
             video_quality,
+            loop_mode,
             playback_event_tx.clone(),
             session_id,
         )
@@ -1260,6 +1298,9 @@ pub async fn play_playlist(
             Ok(()) => PlaybackEvent::Finished {
                 session_id,
                 bvid: None,
+                // 单视频自动连播链只看 bvid 会话; 播放列表的推进在
+                // run_playlist 内部完成, 这里无需 natural 标记。
+                natural_end: false,
             },
             Err(error) => PlaybackEvent::Failed {
                 session_id,
@@ -1386,6 +1427,7 @@ async fn run_playlist(
     mut index: usize,
     mut prepared: PreparedPlaylistItem,
     video_quality: VideoQuality,
+    loop_mode: PlayLoop,
     tx: Sender<PlaybackEvent>,
     session_id: u64,
 ) -> Result<()> {
@@ -1443,14 +1485,23 @@ async fn run_playlist(
             _ = position.tick() => {
                 if let Some(value) = mpv_time_pos(ipc_path).await { played_time = value.max(0.0) as i64; }
                 let remaining = prepared.duration.saturating_sub(played_time);
+                let prefetch_target = if index + 1 < items.len() {
+                    Some(index + 1)
+                } else if loop_mode == PlayLoop::List && items.len() > 1 {
+                    // 列表循环: 最后一项仍在播时预解析第一项。
+                    Some(0)
+                } else {
+                    None
+                };
                 if prefetch.is_none()
-                    && index + 1 < items.len()
+                    && prefetch_target.is_some()
+                    && loop_mode != PlayLoop::Item
                     && prepared.duration > 0
                     && remaining <= PLAYLIST_PREFETCH_LEAD_SECS
                 {
                     let api = api_client.clone();
                     let pending = items.clone();
-                    let start = index + 1;
+                    let start = prefetch_target.unwrap_or(0);
                     let handle = tokio::spawn(async move {
                         prepare_next_playlist_item(&api, &pending, start, video_quality).await
                     });
@@ -1511,22 +1562,28 @@ async fn run_playlist(
                     }
                     None => None,
                 };
-                let (next, skipped) = match prefetched {
-                    Some(handle) => match handle.await {
-                        Ok(result) => result,
-                        Err(_) => prepare_next_playlist_item(
+                // 列表循环: 回到第一项 (prepare 内部会跳过不可播项);
+                // 停止模式走到列表尾 → None → 退出会话。
+                let next_start = next_playlist_start(index, items.len(), loop_mode);
+                let (next, skipped) = match next_start {
+                    None => (None, Vec::new()),
+                    Some(start) => match prefetched {
+                        Some(handle) => match handle.await {
+                            Ok(result) => result,
+                            Err(_) => prepare_next_playlist_item(
+                                &api_client,
+                                &items,
+                                start,
+                                video_quality,
+                            ).await,
+                        },
+                        None => prepare_next_playlist_item(
                             &api_client,
                             &items,
-                            index + 1,
+                            start,
                             video_quality,
                         ).await,
                     },
-                    None => prepare_next_playlist_item(
-                        &api_client,
-                        &items,
-                        index + 1,
-                        video_quality,
-                    ).await,
                 };
                 log_skipped_playlist_items(&skipped);
                 let Some((next_index, next_prepared)) = next else {
@@ -1676,6 +1733,19 @@ async fn observe_end_files(
         }
     }
     Ok(())
+}
+
+/// 播放列表推进目标: 正常下一项 / (列表循环) 回到开头 / (停止) 无。
+///
+/// 单曲循环不会走到这里 — `--loop-file=inf` 让 eof 永不发生。
+fn next_playlist_start(index: usize, len: usize, loop_mode: PlayLoop) -> Option<usize> {
+    if index + 1 < len {
+        Some(index + 1)
+    } else if loop_mode == PlayLoop::List && len > 0 {
+        Some(0)
+    } else {
+        None
+    }
 }
 
 fn ordered_playlist(
@@ -1920,6 +1990,8 @@ pub async fn play_bangumi_episode(
             Some(status) if status.success() => PlaybackEvent::Finished {
                 session_id,
                 bvid: None,
+                // 番剧详情页不参与单视频自动连播 (bvid 为空, 页面类型也不匹配)。
+                natural_end: false,
             },
             Some(status) => PlaybackEvent::Failed {
                 session_id,
@@ -2465,6 +2537,21 @@ mod playlist_tests {
             );
         }
         assert_eq!(failures.len(), items.len());
+    }
+
+    #[test]
+    fn playlist_advance_wraps_only_in_list_loop() {
+        use super::PlayLoop;
+        use super::next_playlist_start;
+        // 停止: 正常前进, 列表尾结束。
+        assert_eq!(next_playlist_start(0, 3, PlayLoop::Stop), Some(1));
+        assert_eq!(next_playlist_start(2, 3, PlayLoop::Stop), None);
+        // 列表循环: 列表尾回开头; 单项列表重复自己。
+        assert_eq!(next_playlist_start(2, 3, PlayLoop::List), Some(0));
+        assert_eq!(next_playlist_start(0, 1, PlayLoop::List), Some(0));
+        assert_eq!(next_playlist_start(0, 1, PlayLoop::Stop), None);
+        // 单曲循环的 eof 永不发生 (mpv --loop-file=inf), 决策按"不推进"兜底。
+        assert_eq!(next_playlist_start(2, 3, PlayLoop::Item), None);
     }
 
     #[test]

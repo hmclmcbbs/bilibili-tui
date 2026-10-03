@@ -66,6 +66,22 @@ pub struct HistoryPage {
 }
 
 impl HistoryPage {
+    /// 自动连播支持: 在本页已加载的列表中定位 `finished_bvid` 的下一条。
+    pub(crate) fn auto_next_after(
+        &self,
+        finished_bvid: &str,
+    ) -> crate::domain::playback::AutoNextOutcome {
+        crate::domain::playback::AutoNextOutcome::from_targets(
+            self.items.iter().map(|card| {
+                card.item
+                    .history
+                    .bvid
+                    .clone()
+                    .map(|bvid| (bvid, card.item.history.oid))
+            }),
+            finished_bvid,
+        )
+    }
     const COLUMNS: usize = 4;
     const CARD_HEIGHT: u16 = 12;
     const PREFETCH_BUFFER_ROWS: usize = 2;
