@@ -158,7 +158,7 @@ src/
 
   > **跳转精度：** Bilibili DASH 的视频和音频是独立流。MPV 默认的相对跳转可能回退到视频关键帧，造成跳转后短暂无声。应用启动 MPV 时已自动传入 `--hr-seek=yes`，无需额外配置；只有在应用之外单独使用 MPV 时，才需要在 `~/.config/mpv/mpv.conf` 中加入 `hr-seek=yes`。
 
-  > **弹幕顺滑度与呈现节奏：** 应用启动 MPV 时传入 `--deinterlace=yes`：让 30fps 片源按场重建为 60fps 输出，弹幕 overlay 只在"呈现"时刻上屏，重建翻倍了可承载弹幕的呈现点位。`video-sync` 刻意保持 `audio`（MPV 默认）而**不用** `display-resample`：实测后者在其他程序播放声音时，PipeWire 图表重建会使 MPV 音频输出时钟跳变，`display-resample` 为维持音画同步会把视频帧错峰呈现（竞争音频持续期间每秒约 12 帧计时错误，表现为播放顿挫），而 `audio` 模式同条件实测为 0。当前组合实测弹幕位置更新约 65~70 次/秒；如更看重极限上屏顺滑、且不在意其他程序出声时的顿挫，可用 `mpv_extra_args` 传 `--video-sync=display-resample` 覆盖。`--deinterlace` 的代价是 bob 重建会轻微软化逐行素材的垂直细节；如某片源不希望处理，可用 `mpv_extra_args` 传 `--deinterlace=no` 覆盖。
+  > **弹幕顺滑度：** 应用启动 MPV 时传入 `--deinterlace=yes --video-sync=display-resample`：前者让 30fps 片源按场重建为 60fps 输出，后者把呈现节奏交给显示器的 vsync 时钟（低延迟 profile 会把 `video-sync` 改回 `audio`，应用已在 profile 之后重新覆盖）。弹幕 overlay 只在"呈现"时刻上屏，实测两项配合把位置更新从约 60 次/秒提升到约 120 次/秒，滚动糊影（画面冻结时长）从约 10.6ms 降到约 2.1ms。代价是 bob 重建会轻微软化逐行素材的垂直细节；如某片源不希望处理，可用 `mpv_extra_args` 传 `--deinterlace=no` 覆盖。
 
   > **CDN 隐私：** 应用会对维护目录中的 CDN 裸域名执行无 Cookie、无媒体路径、无签名参数的限时可达性探测，并将结果作为本地排名的少量先验。实际播放只使用 Bilibili `playurl` API 授权返回的地址，不会把签名 URL 改写到目录中的其他主机。
 
