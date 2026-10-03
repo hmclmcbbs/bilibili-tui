@@ -154,6 +154,19 @@ fn apply_mpv_common(cmd: &mut tokio::process::Command) {
     // bangumi/live entry points) sets `video-sync=audio`; those call sites
     // re-assert display-resample afterwards because mpv's last argument wins.
     cmd.arg("--video-sync=display-resample");
+    // Keep a real minimum audio buffer. The low-latency profile sets
+    // audio-buffer=0 (device buffer only), which leaves mpv's output path
+    // with no reserve: whenever another program churns the audio graph —
+    // a terminal bell creates and destroys a PipeWire stream per beep —
+    // mpv's stream gets stalled for tens of milliseconds and playback
+    // drops audio right where the stall lands. Measured with 20 bells/s:
+    // audio-buffer=0 shows 13-19 dropout events per 6 s (and dropouts
+    // even in quiet) plus a stalled playback clock, while 0.5 s measures
+    // ~5 short events and a healthy clock. The video hitches together
+    // with the audio because the AV clock freezes with the AO. Profile
+    // call sites must re-assert this after --profile=low-latency
+    // (mpv last-argument-wins).
+    cmd.arg("--audio-buffer=0.5");
     cmd.arg("--msg-level=ffmpeg=error,vd=warn");
     // Default window title follows media-title (which we set per session via
     // --force-media-title) and brands the fallback as bilibili-tui instead of
@@ -364,6 +377,10 @@ pub async fn play_video(
     apply_mpv_common(&mut cmd);
     // Use MPV's low-latency profile for Bilibili VOD playback.
     cmd.arg("--profile=low-latency");
+    // The profile sets audio-buffer=0; re-assert the real buffer so mpv
+    // can ride through audio-graph churn (terminal bells etc.). See
+    // apply_mpv_common for the measurements.
+    cmd.arg("--audio-buffer=0.5");
     // The profile forces `video-sync=audio`, undoing apply_mpv_common's
     // display-paced presentation (mpv last-argument-wins). Re-assert it: the
     // danmaku overlay only updates at present time, and audio-paced presents
@@ -1792,6 +1809,8 @@ pub async fn play_bangumi_episode(
     // Re-assert display-paced presentation after the profile's video-sync=audio
     // (mpv last-argument-wins); see play_video for the overlay rationale.
     cmd.arg("--video-sync=display-resample");
+    // audio-buffer survives the profile only if re-asserted after it.
+    cmd.arg("--audio-buffer=0.5");
     cmd.arg("--stream-buffer-size=4M");
     cmd.arg("--vd-lavc-threads=0");
     cmd.arg(format!("--force-media-title={}", episode.display_title()));
@@ -2304,6 +2323,8 @@ fn configure_live_mpv(cmd: &mut Command, ipc_path: &std::path::Path) {
     // Re-assert display-paced presentation after the profile's video-sync=audio
     // (mpv last-argument-wins); the danmaku overlay updates at present time.
     cmd.arg("--video-sync=display-resample");
+    // audio-buffer survives the profile only if re-asserted after it.
+    cmd.arg("--audio-buffer=0.5");
     cmd.arg("--keep-open=yes");
     // A live HLS window must always start at its live edge. Inheriting the
     // user's watch-later state resumes near the end of a finite playlist and
@@ -2603,6 +2624,17 @@ mod playlist_tests {
             last_sync > profile,
             "display-resample must follow the profile"
         );
+        // audio-buffer must also be re-asserted after the profile or the
+        // profile's audio-buffer=0 wins and bell/graph churn drops audio.
+        let last_buffer = args
+            .iter()
+            .rposition(|arg| arg.starts_with("--audio-buffer="))
+            .expect("audio-buffer present");
+        assert_eq!(args[last_buffer], "--audio-buffer=0.5");
+        assert!(
+            last_buffer > profile,
+            "audio-buffer must follow the profile"
+        );
     }
 
     #[test]
@@ -2624,6 +2656,10 @@ mod playlist_tests {
             args.iter()
                 .any(|arg| arg == "--video-sync=display-resample")
         );
+        // Non-zero audio buffer: profile sites re-assert this after
+        // --profile=low-latency (whose audio-buffer=0 breaks under
+        // audio-graph churn).
+        assert!(args.iter().any(|arg| arg == "--audio-buffer=0.5"));
         assert!(
             args.iter()
                 .any(|arg| arg.starts_with("--title=") && arg.contains("bilibili-tui"))
