@@ -747,9 +747,9 @@ impl VideoDetailPage {
             spans.push(Span::styled("[f]", Style::default().fg(theme.fg_secondary)));
             lines.push(Line::from(spans));
         }
-        // 补帧与 Anime4K 状态: 与画质/HDR 同块, 位于分辨率 (画质) 下方。
-        // 视频信息块高度固定 (Length(8) → 本块内区 4 行), 必须与 HDR/
-        // Hi-Res 合并预算: 两者并一行, 保证画质/HDR/Hi-Res/本行恒为 4 行。
+        // 补帧与 Anime4K 状态: 与画质/HDR 同块, 位于分辨率 (画质) 下方,
+        // 各占一行。视频信息块高度 Length(10) → 本块内区 6 行, 覆盖
+        // 画质/HDR/Hi-Res/补帧/Anime4K/检测中 的六行上限。
         lines.push(Line::from(vec![
             Span::styled("补帧:", Style::default().fg(theme.fg_primary)),
             Span::styled(
@@ -759,7 +759,9 @@ impl VideoDetailPage {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("[i]", Style::default().fg(theme.fg_secondary)),
-            Span::styled(" · Anime4K:", Style::default().fg(theme.fg_primary)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("Anime4K:", Style::default().fg(theme.fg_primary)),
             Span::styled(
                 format!(" {} ", self.anime4k_mode.label()),
                 Style::default()
@@ -1104,19 +1106,19 @@ impl Component for VideoDetailPage {
             Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(8), // Video info
-                    Constraint::Min(8),    // Comments + Related
-                    Constraint::Length(6), // Input box / Folder picker
-                    Constraint::Length(2), // Help
+                    Constraint::Length(10), // Video info (播放选项内区需 6 行)
+                    Constraint::Min(8),     // Comments + Related
+                    Constraint::Length(6),  // Input box / Folder picker
+                    Constraint::Length(2),  // Help
                 ])
                 .split(area)
         } else {
             Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([
-                    Constraint::Length(8), // Video info
-                    Constraint::Min(10),   // Comments + Related
-                    Constraint::Length(2), // Help
+                    Constraint::Length(10), // Video info (播放选项内区需 6 行)
+                    Constraint::Min(10),    // Comments + Related
+                    Constraint::Length(2),  // Help
                 ])
                 .split(area)
         };
@@ -1788,7 +1790,7 @@ impl Component for VideoDetailPage {
                 let chunks = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
-                        Constraint::Length(8),
+                        Constraint::Length(10),
                         Constraint::Min(10),
                         Constraint::Length(2),
                     ])
@@ -1889,6 +1891,44 @@ mod detail_tests {
         assert_eq!(Mode::Off.next(), Mode::Blend);
         assert_eq!(Mode::Blend.next(), Mode::SmoothMotion);
         assert_eq!(Mode::SmoothMotion.next(), Mode::Off);
+    }
+
+    #[test]
+    fn playback_options_statuses_on_separate_lines() {
+        // 用户要求两状态不并行: 用 TestBackend 权威判定渲染行号
+        // (屏幕抓取会被 CSI 剥离后的重绘粘连干扰, 不可靠)。
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut page = VideoDetailPage::new("BV1xx411c7mD".into(), 0);
+        page.interpolation_mode = crate::domain::playback::InterpolationMode::SmoothMotion;
+        page.anime4k_mode = crate::domain::playback::Anime4kMode::A;
+        let theme = Theme::default();
+        let mut terminal = Terminal::new(TestBackend::new(70, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                page.render_playback_options(frame, area, &theme);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut interp_row = None;
+        let mut a4k_row = None;
+        for y in 0..buf.area.height {
+            // TestBackend 对宽字符续格存空格 ("补 帧 :"), 去空格归一化。
+            let row: String = (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+                .replace(' ', "");
+            if row.contains("补帧:") {
+                interp_row = Some(y);
+            }
+            if row.contains("Anime4K:") {
+                a4k_row = Some(y);
+            }
+        }
+        let interp_row = interp_row.expect("补帧 状态行未渲染");
+        let a4k_row = a4k_row.expect("Anime4K 状态行未渲染");
+        assert_ne!(interp_row, a4k_row, "补帧与 Anime4K 必须分属不同行");
     }
 
     #[test]
