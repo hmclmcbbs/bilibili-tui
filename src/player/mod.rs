@@ -144,16 +144,20 @@ fn apply_mpv_common(cmd: &mut tokio::process::Command) {
     // on progressive content (mpv manual warns about this). Override via
     // mpv_extra_args (`--deinterlace=no`) if a source looks over-processed.
     cmd.arg("--deinterlace=yes");
-    // Pace presents to the display's vsync clock instead of the audio clock.
-    // The overlay is composited at present time, so in audio-sync mode its
-    // updates only reach the screen when a video frame happens to be due —
-    // on a 165 Hz panel that means uneven gaps and frozen text between
-    // presents (the "smear"). Together with the overlay's own render-rate
-    // fix this raised on-screen position updates from ~60/s to ~140/s.
-    // Note: `--profile=low-latency` (applied after this function at the VOD/
-    // bangumi/live entry points) sets `video-sync=audio`; those call sites
-    // re-assert display-resample afterwards because mpv's last argument wins.
-    cmd.arg("--video-sync=display-resample");
+    // Pace video to the audio clock (also mpv's default and what the
+    // low-latency profile sets). Deliberately NOT `display-resample`: that
+    // mode reacts to other programs starting/stopping audio. PipeWire
+    // re-quantizes the graph, mpv's AO delay jumps, and display-resample
+    // pays for the A/V re-sync by mistiming video frames — measured on this
+    // setup: ~12 mistimed frames per second for as long as a competing
+    // audio stream plays (that is the "playback stutters when another app
+    // makes sound" bug), while `audio` measures 0 in the same test. The
+    // cost of audio pacing is a lower danmaku overlay present rate
+    // (~65-70 position updates/s here vs ~80+ display-paced, on top of the
+    // deinterlace present-point boost above) — acceptable, and users who
+    // prefer display pacing can re-add `--video-sync=display-resample`
+    // through mpv_extra_args.
+    cmd.arg("--video-sync=audio");
     cmd.arg("--msg-level=ffmpeg=error,vd=warn");
     // Default window title follows media-title (which we set per session via
     // --force-media-title) and brands the fallback as bilibili-tui instead of
@@ -364,11 +368,10 @@ pub async fn play_video(
     apply_mpv_common(&mut cmd);
     // Use MPV's low-latency profile for Bilibili VOD playback.
     cmd.arg("--profile=low-latency");
-    // The profile forces `video-sync=audio`, undoing apply_mpv_common's
-    // display-paced presentation (mpv last-argument-wins). Re-assert it: the
-    // danmaku overlay only updates at present time, and audio-paced presents
-    // follow the 30 fps video cadence, which is what froze scrolling text.
-    cmd.arg("--video-sync=display-resample");
+    // The profile also sets `video-sync=audio`, agreeing with
+    // apply_mpv_common — nothing to re-assert (and display-resample must
+    // NOT come back: it mistimes video frames whenever another program
+    // plays audio; see apply_mpv_common).
     // The low-latency profile is tuned for real-time/live streams, and two of
     // its settings are actively harmful when mpv plays through the local
     // loopback MediaProxy:
@@ -1789,9 +1792,6 @@ pub async fn play_bangumi_episode(
     // through the local MediaProxy, so the profile's 4k stream buffer and
     // single-threaded decode need the same overrides (see play_video).
     cmd.arg("--profile=low-latency");
-    // Re-assert display-paced presentation after the profile's video-sync=audio
-    // (mpv last-argument-wins); see play_video for the overlay rationale.
-    cmd.arg("--video-sync=display-resample");
     cmd.arg("--stream-buffer-size=4M");
     cmd.arg("--vd-lavc-threads=0");
     cmd.arg(format!("--force-media-title={}", episode.display_title()));
@@ -2301,9 +2301,6 @@ fn configure_live_mpv(cmd: &mut Command, ipc_path: &std::path::Path) {
     apply_mpv_common(cmd);
     cmd.arg("--idle=yes");
     cmd.arg("--profile=low-latency");
-    // Re-assert display-paced presentation after the profile's video-sync=audio
-    // (mpv last-argument-wins); the danmaku overlay updates at present time.
-    cmd.arg("--video-sync=display-resample");
     cmd.arg("--keep-open=yes");
     // A live HLS window must always start at its live edge. Inheriting the
     // user's watch-later state resumes near the end of a finite playlist and
@@ -2587,21 +2584,21 @@ mod playlist_tests {
             args.iter()
                 .any(|arg| arg == "--msg-level=ffmpeg=error,vd=warn")
         );
-        // `--profile=low-latency` sets video-sync=audio; the profile sites
-        // must re-assert display-resample *after* it or the overlay reverts
-        // to audio-paced presents (mpv last-argument-wins).
+        // `video-sync=audio` everywhere: display-resample re-times video
+        // frames whenever another program's audio stream makes PipeWire
+        // re-quantize (~12 mistimed frames/s measured under a competing
+        // stream) — the stutter-when-something-else-plays-sound bug. No
+        // entry point may sneak it back in.
         let last_sync = args
             .iter()
             .rposition(|arg| arg.starts_with("--video-sync="))
             .expect("video-sync present");
-        assert_eq!(args[last_sync], "--video-sync=display-resample");
-        let profile = args
-            .iter()
-            .position(|arg| arg == "--profile=low-latency")
-            .expect("low-latency profile present");
+        assert_eq!(args[last_sync], "--video-sync=audio");
         assert!(
-            last_sync > profile,
-            "display-resample must follow the profile"
+            !args
+                .iter()
+                .any(|arg| arg == "--video-sync=display-resample"),
+            "display-resample must stay off: it stutters under competing audio"
         );
     }
 
@@ -2618,10 +2615,13 @@ mod playlist_tests {
         assert!(args.iter().any(|arg| arg == "--network-timeout=15"));
         assert!(args.iter().any(|arg| arg == "--force-window=immediate"));
         assert!(args.iter().any(|arg| arg == "--deinterlace=yes"));
-        // Display-paced presentation: the danmaku overlay only reaches the
-        // screen at present time, so its update rate follows video-sync.
+        // Audio-paced presentation by design (see apply_mpv_common's
+        // comment): display-resample mistimes ~12 video frames/s whenever
+        // another program plays audio.
+        assert!(args.iter().any(|arg| arg == "--video-sync=audio"));
         assert!(
-            args.iter()
+            !args
+                .iter()
                 .any(|arg| arg == "--video-sync=display-resample")
         );
         assert!(
