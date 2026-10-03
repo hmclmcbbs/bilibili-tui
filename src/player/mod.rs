@@ -175,8 +175,11 @@ fn apply_mpv_common(cmd: &mut tokio::process::Command) {
     // 正确路线是 vulkan + nvdec 同卡 + 套件跑独显; 启动慢的 600ms 宁可
     // 付。若将来要提速, 需整机 PRIME offload 方案, 不能只切 GL。
     // 画质套件 (此前 mpv 全默认, 无任何缩放调优):
-    // - ewa_lanczossharp: 放大时最锐利的高质量滤波 (片源分辨率低于
-    //   窗口时的清晰度关键, 在位 GPU 上开销可忽略)
+    // - spline36/lanczos: 清晰度明显优于 bilinear 的平衡缩放。
+    //   历史: 曾用最锐的 ewa_lanczossharp, 但 1080p 片源在 2560x1600
+    //   窗口放大 ~1.6x 时它把压缩噪点/振铃一起放大, 用户实测"锯齿严重"。
+    //   spline36 (亮度) + lanczos (色度) 保锐度且几乎无振铃; 想更锐可
+    //   用 mpv_extra_args --scale=ewa_lanczossharp 覆盖回去。
     // - dscale=mitchell: 缩小 (窗口/分辨率切换) 用平衡的 Mitchell
     // - correct/linear-downscaling: 缩小前先降采样到目标分辨率、
     //   线性空间缩放 — 消除缩小后的锯齿与闪烁
@@ -184,8 +187,8 @@ fn apply_mpv_common(cmd: &mut tokio::process::Command) {
     //   振铃光晕 (字幕/线条周围)
     // - deband: 压制 Bilibili 压缩暗场的色带 (banding)
     // 全部被 mpv_extra_args 覆盖 (最后传入者生效)。
-    cmd.arg("--scale=ewa_lanczossharp");
-    cmd.arg("--cscale=ewa_lanczossharp");
+    cmd.arg("--scale=spline36");
+    cmd.arg("--cscale=lanczos");
     cmd.arg("--dscale=mitchell");
     cmd.arg("--correct-downscaling=yes");
     cmd.arg("--linear-downscaling=yes");
@@ -216,7 +219,8 @@ fn apply_interpolation(cmd: &mut tokio::process::Command) {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
-        cmd.arg("--tscale=linear");
+        // 非法值回落到无伪影的 oversample。
+        cmd.arg("--tscale=oversample");
     } else {
         cmd.arg(format!("--tscale={tscale}"));
     }
@@ -2807,7 +2811,8 @@ mod playlist_tests {
         // audio-graph churn).
         assert!(args.iter().any(|arg| arg == "--audio-buffer=0.5"));
         // 画质套件: 锐化缩放 + 降采样校正 + 去色带。
-        assert!(args.iter().any(|arg| arg == "--scale=ewa_lanczossharp"));
+        assert!(args.iter().any(|arg| arg == "--scale=spline36"));
+        assert!(args.iter().any(|arg| arg == "--cscale=lanczos"));
         assert!(args.iter().any(|arg| arg == "--dscale=mitchell"));
         assert!(args.iter().any(|arg| arg == "--correct-downscaling=yes"));
         assert!(args.iter().any(|arg| arg == "--sigmoid-upscaling=yes"));

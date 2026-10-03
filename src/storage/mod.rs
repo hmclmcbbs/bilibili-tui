@@ -550,7 +550,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub frame_interpolation: bool,
     /// 插值用的时间缩放器 (mpv --tscale)。UI 不暴露; 手改配置可选
-    /// linear (默认, 平滑与拖影平衡) / oversample (无伪影) / mitchell 等。
+    /// oversample (默认, 无伪影) / linear / mitchell 等。
     #[serde(default = "default_interpolation_tscale")]
     pub interpolation_tscale: String,
     /// mpv video output override. Empty/unset means mpv's default (external
@@ -691,7 +691,9 @@ fn default_sixteen() -> u64 {
 }
 
 fn default_interpolation_tscale() -> String {
-    "linear".to_string()
+    // oversample = mpv 社区推荐的无伪影默认 (时间加权平均, 不产生
+    // linear 那种快速运动拖影); 追求更"平滑"观感可改 "linear"/"mitchell"。
+    "oversample".to_string()
 }
 
 fn default_one() -> f64 {
