@@ -332,9 +332,32 @@ cargo build --release --target x86_64-unknown-linux-musl
 - `~/.cache/bilibili-tui/rife-engine/` — TensorRT 引擎缓存 (首播按形状编译一次)
 
 相关配置键: `mpv_path` (应用已预置本地 mpv), `interpolation_mode`
-(off/blend/rife), `rife_multiplier` (输出倍率, 默认 2), `rife_model`
-(默认 "4.25"; 性能不足可改 "4.22.lite")。依赖缺失时自动回落混合模式,
-播放不受影响。重装系统 mpv 不影响本功能 (本地副本独立)。
+(off/blend/rife), `rife_multiplier` (请求倍率上限, 默认 2), `rife_model`
+(默认 "4.25"; 性能不足可改 "4.22.lite"), `rife_scale` (光流推理分辨率,
+默认 auto=1.0)。以下情况**自动回落混合模式**, 播放不受影响: 依赖缺失;
+或按经验容量式 `(输入fps+输出fps)×像素 ≤ 210M/s` 估算放不下 (如 4K、
+1080p60 — 光流保持实时优先, 宁可混合也不半速卡顿); 能放下的会自动
+逐档降倍率 (2→1.75→1.5→1.25)。开播黑屏 ≈2.5-6s (torch/引擎预热,
+vsrife 方案固有), seek 重载 ≈1s。重装系统 mpv 不影响本功能 (本地副本独立)。
+
+**本地 mpv 重建** (启用 vf=vapoursynth + nvdec; 头文件依赖全部无 sudo 装在
+用户目录 — 缺 ffnvcodec 会静默裁掉 nvdec 退化软解, 缺 vulkan-headers 会
+裁掉 gpu-api=vulkan 回落 GL, 混合显卡上 CUDA-GL 互操作必失败):
+
+```bash
+BASE=~/.local/share/bilibili-tui
+git clone --depth 1 https://github.com/FFmpeg/nv-codec-headers.git $BASE/nv-codec-headers
+make -C $BASE/nv-codec-headers install PREFIX=$BASE/ffnvcodec
+git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git $BASE/vkhdr-src
+mkdir -p $BASE/vkhdr && cp -r $BASE/vkhdr-src/include $BASE/vkhdr/
+# 手写 $BASE/ffnvcodec/lib/pkgconfig/ffnvcodec.pc 与 $BASE/vkhdr/lib/pkgconfig/vulkan.pc
+PKG_CONFIG_PATH="$BASE/vkhdr/lib/pkgconfig:$BASE/ffnvcodec/lib/pkgconfig" \
+$BASE/build-venv/bin/meson setup $BASE/mpv-src/build-final \
+  --prefix=$BASE/mpv-prefix --buildtype=release \
+  -Dvapoursynth=enabled -Dcuda-hwaccel=enabled -Dcuda-interop=enabled
+$BASE/build-venv/bin/ninja -C $BASE/mpv-src/build-final && \
+  $BASE/build-venv/bin/ninja -C $BASE/mpv-src/build-final install
+```
 
 ### 🖱️ 鼠标操作
 

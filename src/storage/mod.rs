@@ -557,6 +557,11 @@ pub struct AppConfig {
     /// "4.22.lite" (更快, 略损画质)。需要与已下载模型文件对应。
     #[serde(default = "default_rife_model")]
     pub rife_model: String,
+    /// 光流推理分辨率缩放 (仅 rife 模式)。null/缺省 = auto:
+    /// ≤1080p 且 <50fps 用 1.0, 更高分辨率或 ≥50fps 源自动用 0.5
+    /// (实测 1080p60/4K 全分辨率会严重卡顿)。可手填 0.25/0.5/1.0。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rife_scale: Option<f64>,
     /// mpv 可执行路径覆盖。光流补帧需要带 vf=vapoursynth 的 mpv
     /// (应用可本地源码编译到 ~/.local, 见 README); 留空用 PATH 里的 mpv。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -599,6 +604,7 @@ impl Default for AppConfig {
             interpolation_mode: Default::default(),
             rife_multiplier: default_rife_multiplier(),
             rife_model: default_rife_model(),
+            rife_scale: None,
             mpv_path: None,
             interpolation_tscale: default_interpolation_tscale(),
             mpv_vo: None,

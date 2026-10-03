@@ -295,10 +295,18 @@ fn ensure_rife_script(config: &crate::storage::AppConfig) -> Option<std::path::P
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_');
     let model = if model_ok { model } else { "4.25" };
+    // rife_scale: null = auto; 手填值须在 vsrife 允许集 {0.25,0.5,1,2,4} 内。
+    let scale = match config.rife_scale {
+        Some(value) if value.is_finite() && [0.25, 0.5, 1.0, 2.0, 4.0].contains(&value) => {
+            format!("{value}")
+        }
+        _ => "\"auto\"".to_string(),
+    };
     let content = RIFE_VPY
         .replace("__SITE_PKGS__", &site.to_string_lossy())
         .replace("__MULTI__", &config.rife_multiplier.clamp(2, 8).to_string())
-        .replace("__MODEL__", &format!("\"{model}\""));
+        .replace("__MODEL__", &format!("\"{model}\""))
+        .replace("__SCALE__", &scale);
     let up_to_date = std::fs::read_to_string(&path)
         .map(|existing| existing == content)
         .unwrap_or(false);
