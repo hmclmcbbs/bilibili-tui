@@ -60,6 +60,9 @@ pub struct VideoDetailPage {
     /// 补帧模式 (关/混合/光流); `i` 循环切换并经 SetInterpolationMode
     /// 持久化。初始化时从配置读取, 播放参数由 play_video 取同源配置。
     pub interpolation_mode: crate::domain::playback::InterpolationMode,
+    /// 光流运行策略: true=自动降级/回落 (默认), false=手动强制。
+    /// 光流模式下 `I` 键切换并经 SetRifeAutoFallback 持久化。
+    pub rife_auto_fallback: bool,
     /// Playback quality / HDR / Hi-Res selection for the next play action.
     pub playback: PlaybackOptions,
     /// Whether the current video has an HDR stream. None = unknown / probe failed.
@@ -137,6 +140,9 @@ impl VideoDetailPage {
             interpolation_mode: crate::storage::load_config()
                 .map(|config| config.interpolation_mode)
                 .unwrap_or_default(),
+            rife_auto_fallback: crate::storage::load_config()
+                .map(|config| config.rife_auto_fallback)
+                .unwrap_or(true),
             playback: PlaybackOptions::default(),
             hdr_supported: None,
             hires_supported: None,
@@ -545,6 +551,14 @@ impl VideoDetailPage {
                     let mode = self.interpolation_mode;
                     if mode == crate::domain::playback::InterpolationMode::Off {
                         " 📹 视频信息 ".to_string()
+                    } else if mode == crate::domain::playback::InterpolationMode::Rife {
+                        // 光流模式显式标注运行策略 (自动/手动), 让"谁在做决定"可见
+                        let policy = if self.rife_auto_fallback {
+                            "自动"
+                        } else {
+                            "手动"
+                        };
+                        format!(" 📹 视频信息 · 🎞 补帧·光流·{policy} ")
                     } else {
                         // 页头徽标 = 补帧状态 (混合/光流)
                         format!(" 📹 视频信息 · 🎞 补帧·{} ", mode.label())
@@ -1528,6 +1542,14 @@ impl Component for VideoDetailPage {
             self.interpolation_mode = self.interpolation_mode.next();
             return Some(AppAction::SetInterpolationMode(self.interpolation_mode));
         }
+        // 光流运行策略: 自动降级 ↔ 手动强制。选择权还给用户 —
+        // 手动 = 严格按 rife_multiplier 跑, 超实时算力也不降级不跳过。
+        if key == KeyCode::Char('I')
+            && self.interpolation_mode == crate::domain::playback::InterpolationMode::Rife
+        {
+            self.rife_auto_fallback = !self.rife_auto_fallback;
+            return Some(AppAction::SetRifeAutoFallback(self.rife_auto_fallback));
+        }
         // 三连：点赞 / 投币 / 收藏
         if key == KeyCode::Char('a') {
             return Some(AppAction::LikeVideo {
@@ -1856,5 +1878,28 @@ mod detail_tests {
         assert_eq!(Mode::Off.next(), Mode::Blend);
         assert_eq!(Mode::Blend.next(), Mode::Rife);
         assert_eq!(Mode::Rife.next(), Mode::Off);
+    }
+
+    #[test]
+    fn i_key_toggles_rife_auto_fallback() {
+        let mut page = VideoDetailPage::new("BV1xx411c7mD".into(), 0);
+        let keys = crate::storage::Keybindings::default();
+        // 非光流模式下 I 不产生策略切换动作 (handle_input 默认返回 None 动作)。
+        page.interpolation_mode = crate::domain::playback::InterpolationMode::Blend;
+        if let Some(AppAction::SetRifeAutoFallback(v)) =
+            page.handle_input(KeyCode::Char('I'), &keys)
+        {
+            panic!("blend 模式不应切换策略: {v}");
+        }
+        // 光流模式下 I 循环 自动→手动→自动 并触发持久化动作。
+        page.interpolation_mode = crate::domain::playback::InterpolationMode::Rife;
+        let start = page.rife_auto_fallback;
+        for expected in [!start, start] {
+            match page.handle_input(KeyCode::Char('I'), &keys) {
+                Some(AppAction::SetRifeAutoFallback(v)) => assert_eq!(v, expected),
+                other => panic!("unexpected action: {other:?}"),
+            }
+            assert_eq!(page.rife_auto_fallback, expected);
+        }
     }
 }

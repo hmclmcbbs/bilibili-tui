@@ -21,6 +21,7 @@ MULT = __MULTI__    # 应用注入: 请求倍率上限 (输出 fps ≈ 输入 fp
 MODEL = __MODEL__   # 应用注入: vsrife 模型版本 (4.25 / 4.22.lite 等)
 SCALE = __SCALE__   # 应用注入: 光流推理分辨率; "auto" = 1.0
 IPC = __IPC__       # 应用注入: mpv JSON IPC socket (空串 = 不通知)
+AUTO = __AUTO__     # 应用注入: True=自动降级/回落 (默认), False=手动强制
 SC_THRESHOLD = 0.15  # 场景切换阈值 (帧间归一化差, 同 vsrife 默认)
 TRT_CACHE = os.path.expanduser("~/.cache/bilibili-tui/rife-engine")
 os.makedirs(TRT_CACHE, exist_ok=True)
@@ -48,17 +49,22 @@ SCALE_USED = SCALE if SCALE != "auto" else 1.0
 # 实时 0.999; 4K24 连输入都放不下 (24×8.29M=199M 无输出余量)。
 _MP = float(video_in.width * video_in.height)
 _budget_out = 210.0e6 / _MP - _fps  # 可承载的输出帧率
-_used = float(MULT)
-while _used > 1.25 and _fps * _used > _budget_out:
-    _used -= 0.25
-skip_rife = _fps * 1.25 > _budget_out  # 连 ×1.25 都放不下 → 跳过
+if AUTO:
+    _used = float(MULT)
+    while _used > 1.25 and _fps * _used > _budget_out:
+        _used -= 0.25
+    skip_rife = _fps * 1.25 > _budget_out  # 连 ×1.25 都放不下 → 跳过
+else:
+    # 手动模式: 选择权交给用户 — 严格按请求倍率, 不降级不跳过, 掉帧也照跑。
+    _used = float(MULT)
+    skip_rife = False
 
 try:  # 诊断转储 (每帧求值覆盖一次, 便于排查决策)
     with open("/tmp/rife_decision.txt", "w") as _dbg:
         _dbg.write(
             f"container_fps={container_fps} vfps={video_in.fps_num}/{video_in.fps_den}"
             f" res={video_in.width}x{video_in.height} budget_out={_budget_out:.0f}"
-            f" fps={_fps:.1f} used={_used} skip={skip_rife}\n"
+            f" fps={_fps:.1f} used={_used} skip={skip_rife} auto={AUTO}\n"
         )
 except Exception:
     pass
@@ -101,7 +107,7 @@ def _osd(text):
 
 if skip_rife:
     out = video_in
-    _osd("🎞 光流补帧: 该片源超出实时算力(帧率×分辨率), 已自动回落混合播放")
+    _osd("🎞 光流补帧: 超出实时算力, 已自动回落混合 (按 I 键切换手动)")
 else:
     # RIFE 在 RGB 上推理。RGBH = FP16 (vsrife 精度由像素格式决定,
     # RGBS 是 FP32 慢一倍); 矩阵/范围进出一致 (bt709/limited) 往返抵消。
@@ -153,6 +159,11 @@ else:
     out = rife_out.resize.Bicubic(
         format=_out_format.id, matrix_s="709", range_s="limited"
     )
-    _osd(f"🎞 光流补帧已启用 (RIFE ×{_used:g} → {(_fps * _used):.0f}fps)")
+    _target = _fps * _used
+    if AUTO:
+        _osd(f"🎞 光流补帧已启用 (RIFE ×{_used:g} → {_target:.0f}fps)")
+    else:
+        _warn = ", 超出实时算力, 可能掉帧" if _target > _budget_out else ""
+        _osd(f"🎞 光流补帧·手动已启用 (RIFE ×{_used:g} → {_target:.0f}fps){_warn}")
 
 out.set_output()

@@ -140,6 +140,9 @@ pub enum AppAction {
     SetPlayLoop(PlayLoop),
     /// 详情页 `i`: 循环切换补帧模式 (关/混合/光流) 并写入配置。
     SetInterpolationMode(InterpolationMode),
+    /// 光流运行策略: true=自动降级/回落混合 (默认), false=手动强制。
+    /// 仅在光流模式下经详情页 `I` 键切换并持久化。
+    SetRifeAutoFallback(bool),
     /// Navigate to next sidebar item
     NavNext,
     /// Navigate to previous sidebar item

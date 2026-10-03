@@ -320,7 +320,15 @@ fn ensure_rife_script(config: &crate::storage::AppConfig, ipc: &str) -> Option<s
         .replace("__MULTI__", &config.rife_multiplier.clamp(2, 8).to_string())
         .replace("__MODEL__", &format!("\"{model}\""))
         .replace("__SCALE__", &scale)
-        .replace("__IPC__", &format!("\"{ipc}\""));
+        .replace("__IPC__", &format!("\"{ipc}\""))
+        .replace(
+            "__AUTO__",
+            if config.rife_auto_fallback {
+                "True"
+            } else {
+                "False"
+            },
+        );
     let up_to_date = std::fs::read_to_string(&path)
         .map(|existing| existing == content)
         .unwrap_or(false);

@@ -334,11 +334,19 @@ cargo build --release --target x86_64-unknown-linux-musl
 相关配置键: `mpv_path` (应用已预置本地 mpv), `interpolation_mode`
 (off/blend/rife), `rife_multiplier` (请求倍率上限, 默认 2), `rife_model`
 (默认 "4.25"; 性能不足可改 "4.22.lite"), `rife_scale` (光流推理分辨率,
-默认 auto=1.0)。以下情况**自动回落混合模式**, 播放不受影响: 依赖缺失;
-或按经验容量式 `(输入fps+输出fps)×像素 ≤ 210M/s` 估算放不下 (如 4K、
-1080p60 — 光流保持实时优先, 宁可混合也不半速卡顿); 能放下的会自动
-逐档降倍率 (2→1.75→1.5→1.25)。开播黑屏 ≈2.5-6s (torch/引擎预热,
-vsrife 方案固有), seek 重载 ≈1s。重装系统 mpv 不影响本功能 (本地副本独立)。
+默认 auto=1.0), `rife_auto_fallback` (运行策略, 默认 true)。
+
+**运行策略 (`rife_auto_fallback`, 选择权在用户)**:
+- `true` = **自动** (默认): 按经验容量式 `(输入fps+输出fps)×像素 ≤ 210M/s`
+  估算, 放不下时逐档降倍率 (2→1.75→1.5→1.25), 连 ×1.25 都放不下
+  (如 4K、1080p60) 则跳过光流回落混合 — 宁可混合也不半速卡顿;
+- `false` = **手动**: 严格按 `rife_multiplier` 运行, 不降级不跳过,
+  掉帧也照跑。
+详情页光流模式下按 `I` 键在线切换 (页头徽标显示 `补帧·光流·自动/手动`,
+切换与配置持久化)。播放时 mpv 会弹 OSD 报告实际状态: 启用倍率/目标 fps、
+或回落原因, 并提示 `按 I 键切换手动`。依赖缺失时同样回落混合, 播放不受
+影响。开播黑屏 ≈2.5-6s (torch/引擎预热, vsrife 方案固有), seek 重载 ≈1s。
+重装系统 mpv 不影响本功能 (本地副本独立)。
 
 **本地 mpv 重建** (启用 vf=vapoursynth + nvdec; 头文件依赖全部无 sudo 装在
 用户目录 — 缺 ffnvcodec 会静默裁掉 nvdec 退化软解, 缺 vulkan-headers 会

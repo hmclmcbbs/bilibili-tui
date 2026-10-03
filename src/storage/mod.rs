@@ -562,6 +562,13 @@ pub struct AppConfig {
     /// (实测 1080p60/4K 全分辨率会严重卡顿)。可手填 0.25/0.5/1.0。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rife_scale: Option<f64>,
+    /// 光流运行策略 (选择权交给用户):
+    /// - true = 自动 (默认): 超实时算力时逐档降倍率, 连 ×1.25 都放不下
+    ///   (如 4K、1080p60) 则跳过光流回落混合;
+    /// - false = 手动: 严格按 rife_multiplier 运行, 不降级不跳过,
+    ///   掉帧也照跑。详情页 `I` 键切换。
+    #[serde(default = "default_rife_auto_fallback")]
+    pub rife_auto_fallback: bool,
     /// mpv 可执行路径覆盖。光流补帧需要带 vf=vapoursynth 的 mpv
     /// (应用可本地源码编译到 ~/.local, 见 README); 留空用 PATH 里的 mpv。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -605,6 +612,7 @@ impl Default for AppConfig {
             rife_multiplier: default_rife_multiplier(),
             rife_model: default_rife_model(),
             rife_scale: None,
+            rife_auto_fallback: default_rife_auto_fallback(),
             mpv_path: None,
             interpolation_tscale: default_interpolation_tscale(),
             mpv_vo: None,
@@ -713,6 +721,10 @@ fn default_sixteen() -> u64 {
 
 fn default_rife_multiplier() -> u32 {
     2
+}
+
+fn default_rife_auto_fallback() -> bool {
+    true
 }
 
 fn default_rife_model() -> String {
