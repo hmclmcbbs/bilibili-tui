@@ -223,9 +223,16 @@ fn apply_interpolation(cmd: &mut tokio::process::Command) {
         return;
     };
     // 仅 rife 模式做依赖探测 (探测含子进程, 进程内只跑一次);
-    // 通过后按配置重写 rife.vpy (倍率注入), 再统一构造参数。
+    // 通过后按配置重写 rife.vpy (倍率/IPC 注入), 再统一构造参数。
+    // IPC socket 从 cmd 已有参数里读 (--input-ipc-server 必须先于本函数)。
     let rife_ok = if config.interpolation_mode == crate::domain::playback::InterpolationMode::Rife {
-        rife_deps_ok() && ensure_rife_script(&config).is_some()
+        let ipc = cmd
+            .as_std()
+            .get_args()
+            .filter_map(|arg| arg.to_str())
+            .find_map(|arg| arg.strip_prefix("--input-ipc-server=").map(str::to_string))
+            .unwrap_or_default();
+        rife_deps_ok() && ensure_rife_script(&config, &ipc).is_some()
     } else {
         false
     };
@@ -286,7 +293,7 @@ fn rife_script_path() -> Option<std::path::PathBuf> {
 
 /// 按当前配置写 (或免重写) rife.vpy, 返回其路径。
 /// 注入: site-packages 路径 / 倍率 / 模型版本 (模型名做字符白名单)。
-fn ensure_rife_script(config: &crate::storage::AppConfig) -> Option<std::path::PathBuf> {
+fn ensure_rife_script(config: &crate::storage::AppConfig, ipc: &str) -> Option<std::path::PathBuf> {
     let path = rife_script_path()?;
     let site = rife_site_packages()?;
     let model = config.rife_model.trim();
@@ -302,11 +309,18 @@ fn ensure_rife_script(config: &crate::storage::AppConfig) -> Option<std::path::P
         }
         _ => "\"auto\"".to_string(),
     };
+    // IPC socket 只允许安全字符 (避免注入); 空串则 vpy 不弹 OSD。
+    let ipc_ok = !ipc.is_empty()
+        && ipc
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c));
+    let ipc = if ipc_ok { ipc } else { "" };
     let content = RIFE_VPY
         .replace("__SITE_PKGS__", &site.to_string_lossy())
         .replace("__MULTI__", &config.rife_multiplier.clamp(2, 8).to_string())
         .replace("__MODEL__", &format!("\"{model}\""))
-        .replace("__SCALE__", &scale);
+        .replace("__SCALE__", &scale)
+        .replace("__IPC__", &format!("\"{ipc}\""));
     let up_to_date = std::fs::read_to_string(&path)
         .map(|existing| existing == content)
         .unwrap_or(false);
@@ -1464,14 +1478,15 @@ pub async fn play_playlist(
     // 同 play_video: run_playlist 靠 end-file 逐项推进, 用户 mpv.conf 的
     // keep-open=yes 会把列表卡死在第一项结尾; idle=yes 负责项间保活。
     cmd.arg("--keep-open=no");
-    // 补帧 (可选): 多P列表会话与单视频同源配置。
-    apply_interpolation(&mut cmd);
     apply_mpv_hwdec(&mut cmd);
     cmd.arg("--ytdl=no");
     cmd.arg("--script-opts-append=double_video_fps=yes");
     let ipc_path = mpv_ipc_path("bilibili-tui-playlist", &session_id.to_string());
     remove_stale_mpv_ipc(&ipc_path);
     cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
+    // 补帧 (可选): 必须在 --input-ipc-server 之后 (rife.vpy 注入 socket
+    // 路径用于弹 OSD 通知), 与 play_video 顺序一致。
+    apply_interpolation(&mut cmd);
     apply_mpv_vo(&mut cmd);
     if loop_mode == PlayLoop::Item {
         // 单曲循环: mpv 无限重播当前文件, run_playlist 的 eof 驱动推进

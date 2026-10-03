@@ -20,6 +20,7 @@ core = vs.core
 MULT = __MULTI__    # 应用注入: 请求倍率上限 (输出 fps ≈ 输入 fps × N)
 MODEL = __MODEL__   # 应用注入: vsrife 模型版本 (4.25 / 4.22.lite 等)
 SCALE = __SCALE__   # 应用注入: 光流推理分辨率; "auto" = 1.0
+IPC = __IPC__       # 应用注入: mpv JSON IPC socket (空串 = 不通知)
 SC_THRESHOLD = 0.15  # 场景切换阈值 (帧间归一化差, 同 vsrife 默认)
 TRT_CACHE = os.path.expanduser("~/.cache/bilibili-tui/rife-engine")
 os.makedirs(TRT_CACHE, exist_ok=True)
@@ -62,8 +63,45 @@ try:  # 诊断转储 (每帧求值覆盖一次, 便于排查决策)
 except Exception:
     pass
 
+def _osd(text):
+    """经 mpv JSON IPC 弹 OSD (守护线程, 不阻塞图求值; seek 重载会再弹)。"""
+    if not IPC:
+        return
+    try:
+        import json as _json
+        import socket as _socket
+        import threading as _threading
+
+        def _send():
+            try:
+                sock = _socket.socket(_socket.AF_UNIX)
+                sock.settimeout(1.0)
+                sock.connect(IPC)
+                # mpv JSON IPC: command 必须是数组形式
+                sock.sendall(
+                    (_json.dumps({"command": ["show-text", text, 4000]})
+                     + "\n").encode()
+                )
+                # 收 mpv 应答并落盘回执 (诊断用: /tmp/rife_osd_sent.txt)
+                try:
+                    resp = sock.recv(256)
+                except Exception:
+                    resp = b""
+                sock.close()
+                with open("/tmp/rife_osd_sent.txt", "w") as fh:
+                    fh.write(text + " | resp=" + resp.decode("utf-8", "replace"))
+            except Exception as exc:
+                with open("/tmp/rife_osd_sent.txt", "w") as fh:
+                    fh.write("FAILED: " + repr(exc))
+
+        _threading.Thread(target=_send, daemon=True).start()
+    except Exception:
+        pass
+
+
 if skip_rife:
     out = video_in
+    _osd("🎞 光流补帧: 该片源超出实时算力(帧率×分辨率), 已自动回落混合播放")
 else:
     # RIFE 在 RGB 上推理。RGBH = FP16 (vsrife 精度由像素格式决定,
     # RGBS 是 FP32 慢一倍); 矩阵/范围进出一致 (bt709/limited) 往返抵消。
@@ -115,5 +153,6 @@ else:
     out = rife_out.resize.Bicubic(
         format=_out_format.id, matrix_s="709", range_s="limited"
     )
+    _osd(f"🎞 光流补帧已启用 (RIFE ×{_used:g} → {(_fps * _used):.0f}fps)")
 
 out.set_output()
