@@ -232,29 +232,6 @@ fn apply_video_enhancements(cmd: &mut tokio::process::Command) {
     for arg in anime4k_shader_args(&config.anime4k_mode) {
         cmd.arg(arg);
     }
-    // 播放开始时 OSD 回显已保存的方案 (仅非默认): 让"下次默认这个方案"
-    // 肉眼可见 — 状态本就持久化 (详情页回读 + spawn 读配置), 但用户
-    // 无从确认。mpv 每文件只弹一次, loop-file 循环实测不重复弹。
-    if let Some(msg) = playback_scheme_msg(&config.interpolation_mode, &config.anime4k_mode) {
-        cmd.arg(format!("--osd-playing-msg={msg}"));
-        cmd.arg("--osd-playing-msg-duration=2500");
-    }
-}
-
-/// 播放开始回显文案 (纯函数, 便于测试): 两方案均默认 (关) → None。
-fn playback_scheme_msg(
-    interpolation: &crate::domain::playback::InterpolationMode,
-    anime4k: &crate::domain::playback::Anime4kMode,
-) -> Option<String> {
-    use crate::domain::playback::{Anime4kMode, InterpolationMode};
-    let mut parts = Vec::new();
-    if *interpolation != InterpolationMode::Off {
-        parts.push(format!("补帧: {}", interpolation.label()));
-    }
-    if *anime4k != Anime4kMode::Off {
-        parts.push(format!("Anime4K: {} {}", anime4k.label(), anime4k.desc()));
-    }
-    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// Smooth Motion 模式的呈现节奏参数 (纯函数, 便于测试): 驱动层接管呈现
@@ -3044,28 +3021,6 @@ mod playlist_tests {
         std::fs::remove_file(base.join("Upscale/Anime4K_Upscale_CNN_x2_S.glsl")).unwrap();
         assert!(anime4k_args_in(&base, anime4k_mode_files(&M::A)).is_empty());
         std::fs::remove_dir_all(&base).ok();
-    }
-
-    #[test]
-    fn playback_scheme_msg_only_when_active() {
-        use crate::domain::playback::{Anime4kMode, InterpolationMode as M};
-        assert_eq!(
-            playback_scheme_msg(&M::Off, &Anime4kMode::Off),
-            None,
-            "全默认不打扰"
-        );
-        assert_eq!(
-            playback_scheme_msg(&M::SmoothMotion, &Anime4kMode::A).as_deref(),
-            Some("补帧: Smooth Motion · Anime4K: A 1080p动画·线稿重建")
-        );
-        assert_eq!(
-            playback_scheme_msg(&M::Blend, &Anime4kMode::Off).as_deref(),
-            Some("补帧: 混合")
-        );
-        assert_eq!(
-            playback_scheme_msg(&M::Off, &Anime4kMode::C).as_deref(),
-            Some("Anime4K: C 480p·高保真轻处理")
-        );
     }
 
     #[test]
