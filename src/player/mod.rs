@@ -202,15 +202,83 @@ fn apply_mpv_common(cmd: &mut tokio::process::Command) {
     cmd.arg("--title=${?media-title:${media-title} - bilibili-tui}${!media-title:bilibili-tui}");
 }
 
-/// 补帧: 详情页 `i` 循环 (off/blend), 从配置读取。必须在
-/// --profile=low-latency 之后调用 (mpv 后传参数生效)。
-fn apply_interpolation(cmd: &mut tokio::process::Command) {
+/// 播放增强 (详情页画质键组可调): 补帧参数 / NVIDIA Smooth Motion 驱动
+/// 插帧 / Anime4K 着色器。读同一份配置; 必须在 --profile=low-latency
+/// 之后调用 (mpv 后传参数生效)。
+fn apply_video_enhancements(cmd: &mut tokio::process::Command) {
     let Ok(config) = crate::storage::load_config() else {
         return;
     };
     for arg in interpolation_args(&config) {
         cmd.arg(arg);
     }
+    if config.interpolation_mode == crate::domain::playback::InterpolationMode::SmoothMotion {
+        // NVIDIA Smooth Motion (RTX 40+): 置此变量启用 VK_LAYER_NV_present
+        // 隐式层, 驱动 AI 在呈现层补帧 (仅 Vulkan; Wayland 下 mpv 自动选
+        // vulkan VO, 见驱动 README "NVIDIA Smooth Motion" 章)。
+        cmd.env("NVPRESENT_ENABLE_SMOOTH_MOTION", "1");
+    }
+    for arg in anime4k_shader_args(&config.anime4k_mode) {
+        cmd.arg(arg);
+    }
+}
+
+/// 各模式的着色器清单 (相对 anime4k/glsl 目录)。定义取自官方低配模板
+/// input.conf 的 CTRL+1/2/3 ("Fast", M 变体): 笔记本 4060 + 2560x1600 下
+/// 实测 Fast 套 0.975 实时, 高配 VL 套只有 0.826 (超预算)。mpv 按给定
+/// 顺序执行。
+fn anime4k_mode_files(mode: &crate::domain::playback::Anime4kMode) -> &'static [&'static str] {
+    use crate::domain::playback::Anime4kMode;
+    match mode {
+        Anime4kMode::Off => &[],
+        // A: Clamp → Restore → Upscale×2 (AutoDownscalePre 收口) — 1080p
+        Anime4kMode::A => &[
+            "Restore/Anime4K_Clamp_Highlights.glsl",
+            "Restore/Anime4K_Restore_CNN_M.glsl",
+            "Upscale/Anime4K_Upscale_CNN_x2_M.glsl",
+            "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
+            "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
+            "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
+        ],
+        // B: 同 A 但 Restore_Soft — 720p/低模糊源
+        Anime4kMode::B => &[
+            "Restore/Anime4K_Clamp_Highlights.glsl",
+            "Restore/Anime4K_Restore_CNN_Soft_M.glsl",
+            "Upscale/Anime4K_Upscale_CNN_x2_M.glsl",
+            "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
+            "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
+            "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
+        ],
+        // C: Upscale_Denoise → Upscale — 480p/无损图源
+        Anime4kMode::C => &[
+            "Restore/Anime4K_Clamp_Highlights.glsl",
+            "Upscale+Denoise/Anime4K_Upscale_Denoise_CNN_x2_M.glsl",
+            "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
+            "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
+            "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
+        ],
+    }
+}
+
+/// Anime4K → mpv 参数 (每个着色器一个 --glsl-shaders-append)。
+/// 目录缺失/缺文件时静默不启用, 保证可播 (重建方式见 README)。
+fn anime4k_shader_args(mode: &crate::domain::playback::Anime4kMode) -> Vec<String> {
+    let files = anime4k_mode_files(mode);
+    if files.is_empty() {
+        return Vec::new();
+    }
+    let Some(dir) = dirs::data_local_dir().map(|d| d.join("bilibili-tui/anime4k/glsl")) else {
+        return Vec::new();
+    };
+    let mut args = Vec::with_capacity(files.len());
+    for file in files {
+        let path = dir.join(file);
+        if !path.is_file() {
+            return Vec::new();
+        }
+        args.push(format!("--glsl-shaders-append={}", path.display()));
+    }
+    args
 }
 
 /// 构造补帧相关的 mpv 参数 (纯函数, 便于测试)。
@@ -218,6 +286,8 @@ fn apply_interpolation(cmd: &mut tokio::process::Command) {
 /// - `off`: 无参数
 /// - `blend`: `--interpolation=yes` + tscale (手改配置可选 linear /
 ///   mitchell 等, 非法值回落无伪影的 oversample)
+/// - `smooth_motion`: 无 mpv 侧参数 — 由驱动层插帧 (见
+///   apply_video_enhancements 的环境变量), 叠加 mpv 插值会双重补帧
 fn interpolation_args(config: &crate::storage::AppConfig) -> Vec<String> {
     use crate::domain::playback::InterpolationMode;
     let tscale = {
@@ -238,6 +308,7 @@ fn interpolation_args(config: &crate::storage::AppConfig) -> Vec<String> {
             "--interpolation=yes".to_string(),
             format!("--tscale={tscale}"),
         ],
+        InterpolationMode::SmoothMotion => Vec::new(),
     }
 }
 
@@ -503,7 +574,7 @@ pub async fn play_video(
     // 定格行为可用 mpv_extra_args --keep-open=yes。
     cmd.arg("--keep-open=no");
     // 补帧 (可选): 在 profile 重申之后追加, 低延迟 profile 不会覆盖。
-    apply_interpolation(&mut cmd);
+    apply_video_enhancements(&mut cmd);
     if loop_item {
         // 单曲循环交给 mpv: 文件播完自动重开, 不再产生 eof, 应用侧的
         // 自动连播链因此永远不会被触发 (用户按 q 退出除外)。
@@ -1334,7 +1405,7 @@ pub async fn play_playlist(
     remove_stale_mpv_ipc(&ipc_path);
     cmd.arg(format!("--input-ipc-server={}", ipc_path.display()));
     // 补帧 (可选): 多P列表会话与单视频同源配置。
-    apply_interpolation(&mut cmd);
+    apply_video_enhancements(&mut cmd);
     apply_mpv_vo(&mut cmd);
     if loop_mode == PlayLoop::Item {
         // 单曲循环: mpv 无限重播当前文件, run_playlist 的 eof 驱动推进
@@ -2865,6 +2936,40 @@ mod playlist_tests {
         config.interpolation_tscale = "bad value;rm -rf".to_string();
         let safe = interpolation_args(&config);
         assert!(safe.contains(&"--tscale=oversample".to_string()));
+    }
+
+    #[test]
+    fn anime4k_mode_files_are_distinct_and_ordered() {
+        use crate::domain::playback::Anime4kMode as M;
+        assert!(anime4k_mode_files(&M::Off).is_empty());
+        for mode in [M::A, M::B, M::C] {
+            let files = anime4k_mode_files(&mode);
+            // A/B 各 6 个, C 5 个 (官方 Fast 模板); Clamp 必须在首位。
+            let expected = if mode == M::C { 5 } else { 6 };
+            assert_eq!(files.len(), expected, "{mode:?}");
+            assert!(
+                files[0].ends_with("Anime4K_Clamp_Highlights.glsl"),
+                "{mode:?}"
+            );
+            // 官方约定: 同一着色器不可重复使用。
+            let mut sorted: Vec<&str> = files.to_vec();
+            sorted.sort_unstable();
+            sorted.dedup();
+            assert_eq!(sorted.len(), files.len(), "{mode:?} 有重复文件");
+        }
+        // B 用 Soft 修复, C 用去噪上采样 — 与 A 区分。
+        assert!(anime4k_mode_files(&M::B)[1].contains("Soft"));
+        assert!(anime4k_mode_files(&M::C)[1].contains("Denoise"));
+    }
+
+    #[test]
+    fn smooth_motion_args_are_empty() {
+        // Smooth Motion 不带 mpv 侧插值参数 (驱动层接管), 避免双重补帧。
+        let config = crate::storage::AppConfig {
+            interpolation_mode: crate::domain::playback::InterpolationMode::SmoothMotion,
+            ..Default::default()
+        };
+        assert!(interpolation_args(&config).is_empty());
     }
 
     #[test]

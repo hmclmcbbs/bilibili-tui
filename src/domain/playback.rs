@@ -101,22 +101,29 @@ pub enum InterpolationMode {
     /// alias: 旧配置值 "rife" (光流功能已移除) 映射为混合, 旧配置可读。
     #[serde(alias = "rife")]
     Blend,
+    /// NVIDIA Smooth Motion: 驱动级插帧。启用环境变量
+    /// `NVPRESENT_ENABLE_SMOOTH_MOTION=1` 加载 VK_LAYER_NV_present
+    /// 隐式 Vulkan 层, 由驱动 AI 在呈现层补帧 (RTX 40 系+, 仅 Vulkan;
+    /// Wayland 下 mpv 自动选 vulkan)。mpv 自身不叠加插值, 避免双重补帧。
+    SmoothMotion,
 }
 
 impl InterpolationMode {
-    /// Off → Blend → Off 循环。
+    /// Off → Blend → SmoothMotion → Off 循环。
     pub fn next(self) -> Self {
         match self {
             Self::Off => Self::Blend,
-            Self::Blend => Self::Off,
+            Self::Blend => Self::SmoothMotion,
+            Self::SmoothMotion => Self::Off,
         }
     }
 
-    /// 页头徽标用的短标签 ("关"/"混合")。
+    /// 页头徽标用的短标签 ("关"/"混合"/"Smooth Motion")。
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "关",
             Self::Blend => "混合",
+            Self::SmoothMotion => "Smooth Motion",
         }
     }
 }
@@ -395,8 +402,57 @@ impl PlaybackState {
     }
 }
 
+/// Anime4K 增强模式 (详情页 `e` 循环切换, 持久化于
+/// `AppConfig::anime4k_mode`; 着色器清单见 player::anime4k_mode_files)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Anime4kMode {
+    /// 不启用。
+    #[default]
+    Off,
+    /// Mode A (官方 CTRL+1): Restore→Upscale×2 — 优化 1080p 动画。
+    A,
+    /// Mode B (官方 CTRL+2): Restore_Soft→Upscale×2 — 优化 720p/低模糊源。
+    B,
+    /// Mode C (官方 CTRL+3): Upscale_Denoise→Upscale — 480p/无损图源。
+    C,
+}
+
+impl Anime4kMode {
+    /// Off → A → B → C → Off 循环。
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::A,
+            Self::A => Self::B,
+            Self::B => Self::C,
+            Self::C => Self::Off,
+        }
+    }
+
+    /// 状态显示用短标签 ("关"/"A"/"B"/"C")。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "关",
+            Self::A => "A",
+            Self::B => "B",
+            Self::C => "C",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn anime4k_mode_cycles() {
+        use super::Anime4kMode as M;
+        assert_eq!(M::Off.next(), M::A);
+        assert_eq!(M::A.next(), M::B);
+        assert_eq!(M::B.next(), M::C);
+        assert_eq!(M::C.next(), M::Off);
+        assert_eq!(M::A.label(), "A");
+        assert_eq!(serde_json::from_str::<M>("\"c\"").unwrap(), M::C);
+    }
+
     #[test]
     fn legacy_rife_value_deserializes_to_blend() {
         // 光流已移除: 旧配置里的 "rife" 不应让整个配置反序列化失败。

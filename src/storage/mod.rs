@@ -549,6 +549,9 @@ pub struct AppConfig {
     /// 会话生效。
     #[serde(default)]
     pub interpolation_mode: crate::domain::playback::InterpolationMode,
+    /// Anime4K 增强模式 (详情页 `e`): off / a / b / c (官方三主模式)。
+    #[serde(default)]
+    pub anime4k_mode: crate::domain::playback::Anime4kMode,
     /// 插值用的时间缩放器 (mpv --tscale)。UI 不暴露; 手改配置可选
     /// oversample (默认, 无伪影) / linear / mitchell 等。
     #[serde(default = "default_interpolation_tscale")]
@@ -585,6 +588,7 @@ impl Default for AppConfig {
             auto_play: true,
             playback_loop: Default::default(),
             interpolation_mode: Default::default(),
+            anime4k_mode: Default::default(),
             interpolation_tscale: default_interpolation_tscale(),
             mpv_vo: None,
             mpv_hwdec: None,

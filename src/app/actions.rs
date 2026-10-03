@@ -513,6 +513,10 @@ impl App {
                 self.config.interpolation_mode = mode;
                 let _ = persistence::save_config(&self.config);
             }
+            AppAction::SetAnime4kMode(mode) => {
+                self.config.anime4k_mode = mode;
+                let _ = persistence::save_config(&self.config);
+            }
             AppAction::PlayPlaylist {
                 items,
                 source,

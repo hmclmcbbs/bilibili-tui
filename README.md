@@ -317,7 +317,27 @@ cargo build --release --target x86_64-unknown-linux-musl
 | **视频详情页** |                     |                                |
 | 切换焦点       | `Tab`               | 在评论和相关推荐区域间切换     |
 | 展开收起回复   | `r`                 | 展开/收起评论回复              |
-| 补帧开关       | `i`                 | 循环 关→混合 (mpv 时间插值) →关; 状态在页头徽标, 持久化 |
+| 补帧三态       | `i`                 | 循环 关→混合 (mpv 时间插值)→Smooth Motion (NVIDIA 驱动插帧) →关; 状态在页头徽标与「播放选项」块, 持久化 |
+| 画质增强 A4K   | `e`                 | 循环 关→A→B→C (Anime4K 动画超分); 状态同上 |
+
+#### 🖼️ Anime4K 动画增强 & 🎞 NVIDIA Smooth Motion
+
+详情页「播放选项」块（画质/HDR 下方）显示 `补帧:` 与 `Anime4K:` 状态，
+快捷键与画质键 `m` 同组：
+
+- **Anime4K**（`e` 循环 关→A→B→C）：实时动画超分/修复着色器，定义取自
+  官方低配模板 input.conf（CTRL+1/2/3，"Fast"/M 变体——实测 VL 高配套在
+  4060 笔记本 + 2560x1600 只有 0.826 实时，Fast 套 0.975）。Mode A 优化
+  1080p 动画（Restore→Upscale×2）、B 优化 720p/低模糊源（Restore_Soft）、
+  C 优化 480p/无损图源（Upscale_Denoise）。
+  着色器目录缺失/缺文件时静默不启用，播放不受影响。重建：
+  `git clone --depth 1 https://github.com/bloc97/Anime4K.git ~/.local/share/bilibili-tui/anime4k`
+- **Smooth Motion**（`i` 循环到第三态）：NVIDIA 驱动级插帧。播放进程注入
+  `NVPRESENT_ENABLE_SMOOTH_MOTION=1` 启用 `VK_LAYER_NV_present` 隐式层，
+  驱动 AI 在呈现层补帧（**RTX 40 系+，需 Vulkan** — Wayland 下 mpv 自动选
+  vulkan VO）。该模式下 mpv 不叠加自身插值，避免双重补帧。排查：
+  `NVPRESENT_LOG_LEVEL=4`（stderr 日志）、`VK_LOADER_DEBUG=layer`
+  （层加载），见驱动 README "NVIDIA Smooth Motion" 章。
 
 ### 🖱️ 鼠标操作
 

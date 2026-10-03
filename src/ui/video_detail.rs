@@ -60,6 +60,8 @@ pub struct VideoDetailPage {
     /// 补帧模式 (关/混合); `i` 循环切换并经 SetInterpolationMode
     /// 持久化。初始化时从配置读取, 播放参数由 play_video 取同源配置。
     pub interpolation_mode: crate::domain::playback::InterpolationMode,
+    /// Anime4K 增强 (关/A/B/C); `e` 循环切换并经 SetAnime4kMode 持久化。
+    pub anime4k_mode: crate::domain::playback::Anime4kMode,
     /// Playback quality / HDR / Hi-Res selection for the next play action.
     pub playback: PlaybackOptions,
     /// Whether the current video has an HDR stream. None = unknown / probe failed.
@@ -136,6 +138,9 @@ impl VideoDetailPage {
             chain_play: false,
             interpolation_mode: crate::storage::load_config()
                 .map(|config| config.interpolation_mode)
+                .unwrap_or_default(),
+            anime4k_mode: crate::storage::load_config()
+                .map(|config| config.anime4k_mode)
                 .unwrap_or_default(),
             playback: PlaybackOptions::default(),
             hdr_supported: None,
@@ -742,6 +747,27 @@ impl VideoDetailPage {
             spans.push(Span::styled("[f]", Style::default().fg(theme.fg_secondary)));
             lines.push(Line::from(spans));
         }
+        // 补帧与 Anime4K 状态: 与画质/HDR 同块, 位于分辨率 (画质) 下方。
+        // 视频信息块高度固定 (Length(8) → 本块内区 4 行), 必须与 HDR/
+        // Hi-Res 合并预算: 两者并一行, 保证画质/HDR/Hi-Res/本行恒为 4 行。
+        lines.push(Line::from(vec![
+            Span::styled("补帧:", Style::default().fg(theme.fg_primary)),
+            Span::styled(
+                format!(" {} ", self.interpolation_mode.label()),
+                Style::default()
+                    .fg(theme.bilibili_pink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("[i]", Style::default().fg(theme.fg_secondary)),
+            Span::styled(" · Anime4K:", Style::default().fg(theme.fg_primary)),
+            Span::styled(
+                format!(" {} ", self.anime4k_mode.label()),
+                Style::default()
+                    .fg(theme.bilibili_pink)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("[e]", Style::default().fg(theme.fg_secondary)),
+        ]));
         if self.streams_probing {
             lines.push(Line::from(Span::styled(
                 "检测中...",
@@ -1293,6 +1319,8 @@ impl Component for VideoDetailPage {
             // 开/关状态由页头徽标 (🎞 补帧) 承担。
             playback_keys.push_str("/i");
             playback_label.push_str("/补帧");
+            playback_keys.push_str("/e");
+            playback_label.push_str("/A4K");
             items.push((playback_keys, playback_label, theme.fg_accent));
             items.push(("x".into(), self.download_quality_label(), theme.fg_accent));
             items.push(("Space".into(), "多选".into(), theme.fg_accent));
@@ -1522,11 +1550,16 @@ impl Component for VideoDetailPage {
             self.playback.prefer_hires = !self.playback.prefer_hires;
             return Some(AppAction::None);
         }
-        // 补帧: 循环 关→混合→关 并持久化。
+        // 补帧: 循环 关→混合→Smooth Motion→关 并持久化。
         // 下次播放 (play_video/play_playlist) 从配置读取并传给 mpv。
         if key == KeyCode::Char('i') {
             self.interpolation_mode = self.interpolation_mode.next();
             return Some(AppAction::SetInterpolationMode(self.interpolation_mode));
+        }
+        // Anime4K: 关→A→B→C→关 并持久化 (与画质键 m 同组)。
+        if key == KeyCode::Char('e') {
+            self.anime4k_mode = self.anime4k_mode.next();
+            return Some(AppAction::SetAnime4kMode(self.anime4k_mode));
         }
         // 三连：点赞 / 投币 / 收藏
         if key == KeyCode::Char('a') {
@@ -1844,8 +1877,8 @@ mod detail_tests {
         let mut page = VideoDetailPage::new("BV1xx411c7mD".into(), 0);
         let keys = crate::storage::Keybindings::default();
         let start = page.interpolation_mode;
-        // 按两次 i 回到起点 (关→混合→关)。
-        for expected in [start.next(), start] {
+        // 按三次 i 回到起点 (关→混合→Smooth Motion→关)。
+        for expected in [start.next(), start.next().next(), start] {
             // AppAction 只派生了 Debug, 用模式匹配断言变体与载荷。
             match page.handle_input(KeyCode::Char('i'), &keys) {
                 Some(AppAction::SetInterpolationMode(m)) => assert_eq!(m, expected),
@@ -1854,6 +1887,27 @@ mod detail_tests {
             assert_eq!(page.interpolation_mode, expected);
         }
         assert_eq!(Mode::Off.next(), Mode::Blend);
-        assert_eq!(Mode::Blend.next(), Mode::Off);
+        assert_eq!(Mode::Blend.next(), Mode::SmoothMotion);
+        assert_eq!(Mode::SmoothMotion.next(), Mode::Off);
+    }
+
+    #[test]
+    fn e_key_cycles_anime4k_mode() {
+        let mut page = VideoDetailPage::new("BV1xx411c7mD".into(), 0);
+        let keys = crate::storage::Keybindings::default();
+        let start = page.anime4k_mode;
+        // 关→A→B→C→关 四次回环, 每步触发持久化动作。
+        for expected in [
+            start.next(),
+            start.next().next(),
+            start.next().next().next(),
+            start,
+        ] {
+            match page.handle_input(KeyCode::Char('e'), &keys) {
+                Some(AppAction::SetAnime4kMode(m)) => assert_eq!(m, expected),
+                other => panic!("unexpected action: {other:?}"),
+            }
+            assert_eq!(page.anime4k_mode, expected);
+        }
     }
 }
