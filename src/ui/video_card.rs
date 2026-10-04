@@ -448,6 +448,33 @@ pub struct VideoCardGrid {
     covers_dirty: bool,
 }
 
+/// 网格行分割: 所有卡片行严格等高 (Length 固定), 尾部 Min(0) 垫吸收
+/// 余量。不能用 Min(card_height): ratatui 会把余量摊进部分行 — 实测
+/// H=51→[9,8,9,8,9,8]、H=47→[9,10,9,10,9], 正是用户报的"首页与搜索
+/// 第 2/4/6 张封面大小不同"; 行点击/滚动按等高换算也会随之错位。
+pub fn grid_row_areas(area: Rect, card_height: u16, rows: usize) -> Vec<Rect> {
+    let mut constraints = vec![Constraint::Length(card_height); rows];
+    constraints.push(Constraint::Min(0));
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
+    chunks[..rows].to_vec()
+}
+
+/// 网格列分割: 所列等宽 (floor), 余量走右侧 Min(0) 垫。Ratio(1,n) 会
+/// 给部分列 +1px (宽101/3→[34,33,34]), 多列页封面宽度不一, 同理修掉。
+pub fn grid_col_areas(area: Rect, columns: usize) -> Vec<Rect> {
+    let width = area.width / columns.max(1) as u16;
+    let mut constraints = vec![Constraint::Length(width); columns];
+    constraints.push(Constraint::Min(0));
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints(constraints)
+        .split(area);
+    chunks[..columns].to_vec()
+}
+
 impl VideoCardGrid {
     pub fn new() -> Self {
         let picker = crate::infrastructure::picker::shared();
@@ -672,14 +699,7 @@ impl VideoCardGrid {
             self.covers_dirty = true;
         }
 
-        let row_constraints: Vec<Constraint> = (0..visible_rows)
-            .map(|_| Constraint::Min(self.card_height))
-            .collect();
-
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(row_constraints)
-            .split(area);
+        let rows = grid_row_areas(area, self.card_height, visible_rows);
 
         let mut card_areas: Vec<(usize, Rect)> = Vec::new();
 
@@ -691,14 +711,7 @@ impl VideoCardGrid {
                 break;
             }
 
-            let col_constraints: Vec<Constraint> = (0..self.columns)
-                .map(|_| Constraint::Ratio(1, self.columns as u32))
-                .collect();
-
-            let cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints(col_constraints)
-                .split(*row_area);
+            let cols = grid_col_areas(*row_area, self.columns);
 
             for (col_idx, col_area) in cols.iter().enumerate() {
                 let video_idx = start_idx + col_idx;
@@ -754,6 +767,86 @@ async fn download_image(url: &str) -> Option<DynamicImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grid_rows_are_uniform_across_heights() {
+        // 回归: "首页与搜索第 2/4/6 封面大小不同" — Min 行分割余量模式
+        // H=51→[9,8,9,8,9,8]、H=47→[9,10,9,10,9] 与用户所见完全一致。
+        for h in 30..=64u16 {
+            for card_h in [7u16, 8, 16] {
+                let n = ((h.saturating_sub(1)) / card_h).max(1) as usize;
+                let rows = grid_row_areas(Rect::new(0, 0, 200, h), card_h, n);
+                assert_eq!(rows.len(), n, "h={h}");
+                for row in &rows {
+                    assert_eq!(row.height, card_h, "h={h} card={card_h} 行不等高: {rows:?}");
+                }
+                for w in rows.windows(2) {
+                    assert_eq!(w[1].y, w[0].y + w[0].height, "h={h} 行不连续");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grid_cols_are_uniform_across_widths() {
+        for w in 40..=200u16 {
+            for columns in [1usize, 3, 4] {
+                let areas = grid_col_areas(Rect::new(0, 0, w, 20), columns);
+                assert_eq!(areas.len(), columns, "w={w}");
+                for area in &areas {
+                    assert_eq!(
+                        area.width,
+                        w / columns as u16,
+                        "w={w} columns={columns} 列不等宽: {areas:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn grid_render_card_boxes_uniform() {
+        // 真实渲染路径 (TestBackend): 卡片顶行必须等距 — 旧 Min 分割在
+        // h=51 下会得 [9,8,9,8,9,8] (顶行 0/9/17/26/34/42)。
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut grid = VideoCardGrid::new();
+        grid.card_height = 8; // 与首页一致
+        // 3 列 × 6 行 = 18 张 (h=51 下旧 Min 分割顶行为 [0,9,17,26,34,42])
+        for i in 0..18 {
+            grid.add_card(VideoCard::new(
+                None,
+                None,
+                format!("视频{i}"),
+                "UP主".into(),
+                "1.2万".into(),
+                "10:00".into(),
+                None,
+            ));
+        }
+        let theme = Theme::default();
+        let mut terminal = Terminal::new(TestBackend::new(100, 51)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                grid.render(frame, area, &theme);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut top_rows = Vec::new();
+        let mut top_counts = Vec::new();
+        for y in 0..buf.area.height {
+            let n = (0..buf.area.width)
+                .filter(|&x| buf[(x, y)].symbol() == "╭")
+                .count();
+            if n > 0 {
+                top_rows.push(y);
+                top_counts.push(n);
+            }
+        }
+        assert_eq!(top_rows, vec![0, 8, 16, 24, 32, 40], "卡片顶行必须等距");
+        assert_eq!(top_counts, vec![3, 3, 3, 3, 3, 3], "列宽/列数不符");
+    }
 
     #[test]
     fn page_navigation_moves_by_one_viewport() {

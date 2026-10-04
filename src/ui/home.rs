@@ -932,14 +932,7 @@ impl HomePage {
             self.covers_dirty = true;
         }
 
-        let row_constraints: Vec<Constraint> = (0..visible_rows)
-            .map(|_| Constraint::Min(self.card_height))
-            .collect();
-
-        let rows = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(row_constraints)
-            .split(area);
+        let rows = crate::ui::video_card::grid_row_areas(area, self.card_height, visible_rows);
 
         // Collect all card areas first
         let mut card_areas: Vec<(usize, Rect)> = Vec::new();
@@ -952,14 +945,7 @@ impl HomePage {
                 break;
             }
 
-            let col_constraints: Vec<Constraint> = (0..self.columns)
-                .map(|_| Constraint::Ratio(1, self.columns as u32))
-                .collect();
-
-            let cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints(col_constraints)
-                .split(*row_area);
+            let cols = crate::ui::video_card::grid_col_areas(*row_area, self.columns);
 
             for (col_idx, col_area) in cols.iter().enumerate() {
                 let video_idx = start_idx + col_idx;
