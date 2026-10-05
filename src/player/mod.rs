@@ -225,7 +225,7 @@ fn apply_video_enhancements(cmd: &mut tokio::process::Command) {
         // 实测 (1080p24) 较 display-resample: GPU 41%→31%,
         // vo-delayed 11→0, 实时比 0.999→1.003。仅本模式生效,
         // 其余模式的 display-resample (弹幕平滑) 保持不动。
-        for arg in smooth_motion_pacing_args(&config.interpolation_mode) {
+        for arg in smooth_motion_args(&config.interpolation_mode) {
             cmd.arg(arg);
         }
     }
@@ -234,32 +234,51 @@ fn apply_video_enhancements(cmd: &mut tokio::process::Command) {
     }
 }
 
-/// Smooth Motion 模式的呈现节奏参数 (纯函数, 便于测试): 驱动层接管呈现
-/// 后 mpv 不再按 vsync 重排 — 后传参数覆盖基础 args 里的 display-resample。
-fn smooth_motion_pacing_args(
+/// Smooth Motion 模式的追加参数 (纯函数, 便于测试):
+/// - `--video-sync=audio`: 驱动层接管呈现后 mpv 不再按 vsync 重排 —
+///   后传参数覆盖基础 args 里的 display-resample。对帧生成本身也是
+///   最优输入: 只在新帧时提交 present, 驱动在真实帧间插值; vsync 节奏
+///   会插入同帧重复 present, 插值退化为无效功 (mpv#17140 同配)。
+///   实测收益: GPU 41%→31%、vo-delayed 11→0、实时比 0.999→1.003。
+/// - `--gpu-api=vulkan`: `NVPRESENT_ENABLE_SMOOTH_MOTION` 的隐式层
+///   仅支持 Vulkan (驱动 README 明示)。auto 在 Wayland 下本就选
+///   waylandvk, 但显式锁定防回退会话落到 opengl 时层静默不加载、
+///   Smooth Motion 变哑。生成帧生效实证 (本机录屏): 开 ≈71 唯一帧/s
+///   vs 关 ≈36 (2×), mpv 进程 Wayland commit 率同为 2×。
+fn smooth_motion_args(
     mode: &crate::domain::playback::InterpolationMode,
 ) -> &'static [&'static str] {
     match mode {
-        crate::domain::playback::InterpolationMode::SmoothMotion => &["--video-sync=audio"],
+        crate::domain::playback::InterpolationMode::SmoothMotion => {
+            &["--video-sync=audio", "--gpu-api=vulkan"]
+        }
         _ => &[],
     }
 }
 
-/// 各模式的着色器清单 (相对 anime4k/glsl 目录), 官方低配模板 Fast
-/// (CTRL+1/2/3) 结构: stage3 Upscale 用 M、final 用 S — 每文件只出现
-/// 一次 (官方: "use each shader file once"), 不需要改名副本。
-/// 变体实测定档 (4060 笔记本, 无 shader 基线 0.99-0.996, drops=0):
-/// 高配 VL 套 0.826 弃; 官方 Fast 0.965-0.979 (采用, 修复"没效果"
-/// —先前为压性能降 S 后修复力度过弱); 全 S 套 0.972-0.982, 与 Fast
-/// 差在噪声内 (±0.015), 故取官方画质。mpv 按给定顺序执行。
+/// 各模式的着色器清单 (相对 anime4k/glsl 目录), 官方 Fast (CTRL+1/2/3)
+/// 结构 + **修复/降噪阶段升级 VL**: stage3 Upscale 用 M、final 用 S —
+/// 每文件只出现一次 (官方: "use each shader file once")。
+/// 变体实测定档 (4060 笔记本,1080p 全屏15s, 无 shader 基线 ratio
+/// ≈1.000/GPU 29%, drops=0; 质量 = 锐利参考重建 PSNR/SSIM):
+/// - 全 VL HQ 套: ratio 0.997 但 vo-delayed 206 (present 拥塞), 弃;
+///   质量仅比 VL 升级档 +0.14dB。
+/// - **VL 升级档 (当前)**: ratio 0.999-1.000、drops 0、GPU 40-43%、
+///   vo-delayed 15-44 (近 Fast 的 12-30); 质量 q924 PSNR 26.84/SSIM
+///   .824 (Fast 26.64/.802), 视觉文字/网格更干净 — 采用。
+/// - 官方 Fast (M): 质量 26.64/.802, 被 VL 升级档替代。
+/// - 全 S 套: 修复力度弱 ("没效果"), 弃; GAN 上采样: 质量与
+///   vo-delayed (178) 双差, 弃。
+/// 注意 final S 在 ≤4× 输出比下不执行 (AutoDownscale 已把中间结果带到
+/// 输出尺寸, mpv 跳过); mpv 按给定顺序执行。
 fn anime4k_mode_files(mode: &crate::domain::playback::Anime4kMode) -> &'static [&'static str] {
     use crate::domain::playback::Anime4kMode;
     match mode {
         Anime4kMode::Off => &[],
-        // A: Clamp → Restore → Upscale×2 (AutoDownscalePre 收口) — 1080p
+        // A: Clamp → Restore_VL → Upscale×2 (AutoDownscalePre 收口) — 1080p
         Anime4kMode::A => &[
             "Restore/Anime4K_Clamp_Highlights.glsl",
-            "Restore/Anime4K_Restore_CNN_M.glsl",
+            "Restore/Anime4K_Restore_CNN_VL.glsl",
             "Upscale/Anime4K_Upscale_CNN_x2_M.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
@@ -268,7 +287,7 @@ fn anime4k_mode_files(mode: &crate::domain::playback::Anime4kMode) -> &'static [
         // B: 同 A 但 Restore_Soft — 720p/低模糊源
         Anime4kMode::B => &[
             "Restore/Anime4K_Clamp_Highlights.glsl",
-            "Restore/Anime4K_Restore_CNN_Soft_M.glsl",
+            "Restore/Anime4K_Restore_CNN_Soft_VL.glsl",
             "Upscale/Anime4K_Upscale_CNN_x2_M.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
@@ -277,7 +296,7 @@ fn anime4k_mode_files(mode: &crate::domain::playback::Anime4kMode) -> &'static [
         // C: Upscale_Denoise → Upscale — 480p/无损图源
         Anime4kMode::C => &[
             "Restore/Anime4K_Clamp_Highlights.glsl",
-            "Upscale+Denoise/Anime4K_Upscale_Denoise_CNN_x2_M.glsl",
+            "Upscale+Denoise/Anime4K_Upscale_Denoise_CNN_x2_VL.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
             "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
@@ -2997,13 +3016,19 @@ mod playlist_tests {
         // B 用 Soft 修复, C 用去噪上采样 — 与 A 区分。
         assert!(anime4k_mode_files(&M::B)[1].contains("Soft"));
         assert!(anime4k_mode_files(&M::C)[1].contains("Denoise"));
-        // 官方 Fast 档位守卫: 修复/上采样阶段必须 M (曾整体降 S 导致
-        // 修复力度过弱、用户报"没效果"; 实测 M/S 性能差在噪声内)。
-        assert!(anime4k_mode_files(&M::A)[1].ends_with("Restore_CNN_M.glsl"));
+        // VL 升级档守卫 (本轮实测定档): 修复/降噪阶段必须 VL — 官方
+        // Fast 的 M 档修复力度偏弱 (历史 "没效果"), 而全 VL HQ 套
+        // vo-delayed 206 (present 拥塞) 且质量仅 +0.14dB。VL 升级档
+        // 质量 q924 PSNR 26.84/SSIM .824 (Fast 26.64/.802), 1080p 全屏
+        // ratio 0.999-1.000 / drops 0 / GPU 40-43% / vo-delayed 15-44。
+        // 上采样收尾保持 M/S: final 在 ≤4× 输出比下不执行 (Auto-
+        // Downscale 已把中间结果带到输出尺寸, mpv 跳过 final)。
+        assert!(anime4k_mode_files(&M::A)[1].ends_with("Restore_CNN_VL.glsl"));
         assert!(anime4k_mode_files(&M::A)[2].ends_with("Upscale_CNN_x2_M.glsl"));
         assert!(anime4k_mode_files(&M::A)[5].ends_with("Upscale_CNN_x2_S.glsl"));
+        assert!(anime4k_mode_files(&M::B)[1].ends_with("Restore_CNN_Soft_VL.glsl"));
         assert!(anime4k_mode_files(&M::B)[2].ends_with("Upscale_CNN_x2_M.glsl"));
-        assert!(anime4k_mode_files(&M::C)[1].ends_with("Upscale_Denoise_CNN_x2_M.glsl"));
+        assert!(anime4k_mode_files(&M::C)[1].ends_with("Upscale_Denoise_CNN_x2_VL.glsl"));
     }
 
     #[test]
@@ -3024,14 +3049,14 @@ mod playlist_tests {
     }
 
     #[test]
-    fn smooth_motion_pacing_overrides_video_sync() {
+    fn smooth_motion_overrides_video_sync_and_locks_vulkan() {
         use crate::domain::playback::InterpolationMode as M;
         assert_eq!(
-            smooth_motion_pacing_args(&M::SmoothMotion),
-            &["--video-sync=audio"]
+            smooth_motion_args(&M::SmoothMotion),
+            &["--video-sync=audio", "--gpu-api=vulkan"]
         );
-        assert!(smooth_motion_pacing_args(&M::Off).is_empty());
-        assert!(smooth_motion_pacing_args(&M::Blend).is_empty());
+        assert!(smooth_motion_args(&M::Off).is_empty());
+        assert!(smooth_motion_args(&M::Blend).is_empty());
     }
 
     #[test]

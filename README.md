@@ -335,14 +335,18 @@ cargo build --release --target x86_64-unknown-linux-musl
   | B | 720p 动画 | `720p动画·去振铃抗锯齿` — 中度修复，适合轻度模糊与下采样伪影 |
   | C | 480p/无损图 | `480p·高保真轻处理` — 最高 PSNR，只降噪不重修线条 |
 
-  着色器变体按实测定档（4060 笔记本，无 shader 基线 0.99-0.996，
-  drops 全程 0）：
+  着色器变体按实测定档（4060 笔记本，1080p 全屏 15s，无 shader 基线
+  ratio ≈1.000 / GPU 29%，drops 全程 0；质量 = 对锐利参考的重建
+  PSNR/SSIM，另辅以文字/网格区域肉眼对比）：
 
-  | 变体 | 实测实时比 | 结论 |
-  |------|-----------|------|
-  | 高配 VL 套 | 0.826 | 超预算，弃 |
-  | **官方 Fast (M)（当前）** | 0.965-0.979 | **采用**：修复力度（线稿重建）为官方档 |
-  | 全 S 套（曾用） | 0.972-0.982 | 与 Fast 差在噪声内（±0.015），修复力度偏弱（"没效果"），弃 |
+  | 变体 | 实测（实时比 / GPU / vo-delayed） | 质量 PSNR/SSIM | 结论 |
+  |------|----------------------------------|----------------|------|
+  | **VL 升级档（当前）** | 0.999-1.000 / 40-43% / 15-44 | **26.84/.824** | **采用**：修复阶段用 VL，质量逼近全 VL 套、成本近 Fast |
+  | 全 VL HQ 套 | 0.997 / 50% / **206** | 26.98/.832 | present 拥塞（vo-delayed 10×），质量仅 +0.14dB，弃 |
+  | 官方 Fast (M)（曾用） | 0.999 / 34% / 12-30 | 26.64/.802 | 修复力度偏弱，被 VL 升级档替代 |
+  | 全 S 套（曾用） | 0.972-0.982 | — | 修复力度弱（"没效果"），弃 |
+  | GAN 上采样 | 0.998 / 48% / 178 | 26.40/.793 | 质量与 present 双差，弃 |
+  | 无 shader（spline36） | 1.000 / 29% / 13 | 27.58/.837 | 参考行：MSE 指标偏爱保守缩放，线稿感知清晰度以肉眼为准 |
 
   缺任一着色器文件时应用整体不启用（mpv 直接吃缺失文件实测退化到
   ~0.55 实时，存在性检查已拦）。**增强覆盖全部播放路径**：单视频、
@@ -351,12 +355,18 @@ cargo build --release --target x86_64-unknown-linux-musl
   `git clone --depth 1 https://github.com/bloc97/Anime4K.git ~/.local/share/bilibili-tui/anime4k`
 - **Smooth Motion**（`i` 循环到第三态）：NVIDIA 驱动级插帧。播放进程注入
   `NVPRESENT_ENABLE_SMOOTH_MOTION=1` 启用 `VK_LAYER_NV_present` 隐式层，
-  驱动 AI 在呈现层补帧（**RTX 40 系+，需 Vulkan** — Wayland 下 mpv 自动选
-  vulkan VO）。该模式下 mpv 不叠加自身插值，避免双重补帧；且呈现节奏让位
-  驱动层：**追加 `--video-sync=audio` 覆盖基础参数里的 display-resample**
-  （仅本模式；其他模式的 display-resample 不动，弹幕平滑不受影响）。
+  驱动 AI 在呈现层补帧（**RTX 40 系+，需 Vulkan** — 除环境变量外还
+  **显式追加 `--gpu-api=vulkan`** 锁定层依赖，防回退会话落到 opengl 时
+  隐式层静默不加载）。该模式下 mpv 不叠加自身插值，避免双重补帧；且呈现
+  节奏让位驱动层：**追加 `--video-sync=audio` 覆盖基础参数里的
+  display-resample**（仅本模式；其他模式的 display-resample 不动，弹幕
+  平滑不受影响）——对帧生成也是最优输入：只在新帧时提交 present，驱动在
+  真实帧间插值，vsync 节奏的同帧重复 present 会让插值退化。
   实测收益（1080p24）：GPU 41%→31%、vo-delayed 11→0、实时比
-  0.999→1.003；与 A 模式同时开 0.999 / GPU 29%。
+  0.999→1.003；与 A 模式（VL 升级档）同时开 1.003 / GPU 28% /
+  vo-delayed 0（audio 节奏连 display-resample 的开销也一并省去）。
+  **生成帧生效实证**（本机录屏 5s 唯一帧计数）：开 ≈71 帧/s vs 关
+  ≈36 帧/s（2×），mpv 进程 Wayland commit 率同为 2×。
   排查：`NVPRESENT_LOG_LEVEL=4`（stderr 日志）、`VK_LOADER_DEBUG=layer`
   （层加载），见驱动 README "NVIDIA Smooth Motion" 章。
 - **启动黑屏治理**：`--force-window=no`（原 `immediate`）——网络打开、
