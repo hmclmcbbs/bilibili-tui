@@ -34,7 +34,10 @@ pub struct UpPage {
     pub video_order: SpaceVideoOrder,
     pub play_order: PlayOrder,
     /// 结束模式 (停止/列表循环/单曲循环), 打开页面时从配置初始化,
-    /// `l` 键循环切换并写回配置 (AppAction::SetPlayLoop)。
+    /// `L` 键循环切换并写回配置 (AppAction::SetPlayLoop)。
+    /// (曾绑定小写 `l`, 撞上全局 nav_right=l — 顶部 match 先拦截, 网格
+    /// matches_right 成死代码, 用户按 l 光标不动报"无反应"; 归还 l/Right
+    /// 导航, 循环改 L = Loop 助记。)
     pub play_loop: PlayLoop,
     pub videos: VideoCardGrid,
     pub video_page: i32,
@@ -617,7 +620,7 @@ impl Component for UpPage {
                     ),
                     ("o".into(), "最新/热门".into(), theme.info),
                     ("s".into(), "顺序/倒序/随机".into(), theme.info),
-                    ("l".into(), "循环模式".into(), theme.info),
+                    ("L".into(), "循环模式".into(), theme.info),
                     (keys.play.clone(), "连播".into(), theme.success),
                     (keys.confirm.clone(), "打开".into(), theme.success),
                     (keys.back.clone(), "返回".into(), theme.info),
@@ -699,7 +702,7 @@ impl Component for UpPage {
                 };
                 return Some(AppAction::None);
             }
-            KeyCode::Char('l') => {
+            KeyCode::Char('L') => {
                 self.play_loop = self.play_loop.next();
                 return Some(AppAction::SetPlayLoop(self.play_loop));
             }
@@ -911,12 +914,34 @@ mod tests {
         let mut page = UpPage::new(1);
         let keys = Keybindings::default();
         assert_eq!(page.play_loop, PlayLoop::Stop);
-        page.handle_input(KeyCode::Char('l'), &keys);
+        page.handle_input(KeyCode::Char('L'), &keys);
         assert_eq!(page.play_loop, PlayLoop::List);
-        page.handle_input(KeyCode::Char('l'), &keys);
+        page.handle_input(KeyCode::Char('L'), &keys);
         assert_eq!(page.play_loop, PlayLoop::Item);
-        page.handle_input(KeyCode::Char('l'), &keys);
+        page.handle_input(KeyCode::Char('L'), &keys);
         assert_eq!(page.play_loop, PlayLoop::Stop);
+    }
+
+    #[test]
+    fn lowercase_l_is_grid_navigation_not_loop_toggle() {
+        // 回归: nav_right 绑 l — 曾被循环模式拦截, 网格右移死代码,
+        // 用户按 l 光标不动 ("无反应")。l 应落到 matches_right 通路。
+        let mut page = UpPage::new(1);
+        let keys = Keybindings::default();
+        let loop_before = page.play_loop;
+        let action = page.handle_input(KeyCode::Char('l'), &keys).unwrap();
+        assert!(
+            matches!(action, AppAction::None),
+            "l 应走导航通路 (空网格无目标), 而非 {action:?}"
+        );
+        assert_eq!(page.play_loop, loop_before, "l 不得切换循环模式");
+        // L = Loop 助记, 循环切换保留。
+        let action = page.handle_input(KeyCode::Char('L'), &keys).unwrap();
+        assert!(
+            matches!(action, AppAction::SetPlayLoop(_)),
+            "L 应切换循环, 而非 {action:?}"
+        );
+        assert_ne!(page.play_loop, loop_before);
     }
 
     #[test]
