@@ -257,20 +257,19 @@ fn smooth_motion_args(
 }
 
 /// 各模式的着色器清单 (相对 anime4k/glsl 目录), 官方 Fast (CTRL+1/2/3)
-/// 结构 + **修复/降噪阶段升级 VL**: stage3 Upscale 用 M、final 用 S —
-/// 每文件只出现一次 (官方: "use each shader file once")。
-/// 变体实测定档 (4060 笔记本,1080p 全屏15s, 无 shader 基线 ratio
-/// ≈1.000/GPU 29%, drops=0; 质量 = 锐利参考重建 PSNR/SSIM):
-/// - 全 VL HQ 套: ratio 0.997 但 vo-delayed 206 (present 拥塞), 弃;
-///   质量仅比 VL 升级档 +0.14dB。
-/// - **VL 升级档 (当前)**: ratio 0.999-1.000、drops 0、GPU 40-43%、
-///   vo-delayed 15-44 (近 Fast 的 12-30); 质量 q924 PSNR 26.84/SSIM
-///   .824 (Fast 26.64/.802), 视觉文字/网格更干净 — 采用。
-/// - 官方 Fast (M): 质量 26.64/.802, 被 VL 升级档替代。
-/// - 全 S 套: 修复力度弱 ("没效果"), 弃; GAN 上采样: 质量与
-///   vo-delayed (178) 双差, 弃。
-/// 注意 final S 在 ≤4× 输出比下不执行 (AutoDownscale 已把中间结果带到
-/// 输出尺寸, mpv 跳过); mpv 按给定顺序执行。
+/// 结构 + **修复/降噪阶段升级 UL** (第3轮实测,4060/1080p 全屏):
+/// - **UL vs VL 成本持平** (同日交替基准 ×2: drops 105-113、GPU
+///   29-33%、vo-delayed 107-113, 差异全在噪声内; 首启编译差
+///   ~150ms, 进 ~/.cache/mpv 管线缓存后归零)。
+/// - 质量 (锐利参考重建, 同日同窗对比) 全档优于 VL: A +0.17dB、
+///   B +0.02dB、C +0.23dB/+0.012 SSIM (q924) — 同消耗换更高质量,
+///   三档全部升 UL。上一轮 VL 升级档的证据链 (替代官方 Fast、
+///   全 VL HQ 套 vo-delayed 206 弃) 继承有效。
+/// - 历史弃档: 全 S 套 (修复力度弱 "没效果")、GAN 上采样 (质量与
+///   vo-delayed 双差)、缺文件清单 (退化 ~0.55 实时, 存在性守卫拦)。
+/// final S 仅在输出比 ∈(2.02,2.4)∪(>4) 时执行 (两档 Auto 未收口,
+/// 需 final 补足; 常见比 ≤2 下 Auto 直接把中间结果带到输出尺寸,
+/// mpv 跳过 final); mpv 按给定顺序执行。
 fn anime4k_mode_files(mode: &crate::domain::playback::Anime4kMode) -> &'static [&'static str] {
     use crate::domain::playback::Anime4kMode;
     match mode {
@@ -278,7 +277,7 @@ fn anime4k_mode_files(mode: &crate::domain::playback::Anime4kMode) -> &'static [
         // A: Clamp → Restore_VL → Upscale×2 (AutoDownscalePre 收口) — 1080p
         Anime4kMode::A => &[
             "Restore/Anime4K_Clamp_Highlights.glsl",
-            "Restore/Anime4K_Restore_CNN_VL.glsl",
+            "Restore/Anime4K_Restore_CNN_UL.glsl",
             "Upscale/Anime4K_Upscale_CNN_x2_M.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
@@ -287,7 +286,7 @@ fn anime4k_mode_files(mode: &crate::domain::playback::Anime4kMode) -> &'static [
         // B: 同 A 但 Restore_Soft — 720p/低模糊源
         Anime4kMode::B => &[
             "Restore/Anime4K_Clamp_Highlights.glsl",
-            "Restore/Anime4K_Restore_CNN_Soft_VL.glsl",
+            "Restore/Anime4K_Restore_CNN_Soft_UL.glsl",
             "Upscale/Anime4K_Upscale_CNN_x2_M.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
@@ -296,7 +295,7 @@ fn anime4k_mode_files(mode: &crate::domain::playback::Anime4kMode) -> &'static [
         // C: Upscale_Denoise → Upscale — 480p/无损图源
         Anime4kMode::C => &[
             "Restore/Anime4K_Clamp_Highlights.glsl",
-            "Upscale+Denoise/Anime4K_Upscale_Denoise_CNN_x2_VL.glsl",
+            "Upscale+Denoise/Anime4K_Upscale_Denoise_CNN_x2_UL.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x2.glsl",
             "Upscale/Anime4K_AutoDownscalePre_x4.glsl",
             "Upscale/Anime4K_Upscale_CNN_x2_S.glsl",
@@ -3016,19 +3015,17 @@ mod playlist_tests {
         // B 用 Soft 修复, C 用去噪上采样 — 与 A 区分。
         assert!(anime4k_mode_files(&M::B)[1].contains("Soft"));
         assert!(anime4k_mode_files(&M::C)[1].contains("Denoise"));
-        // VL 升级档守卫 (本轮实测定档): 修复/降噪阶段必须 VL — 官方
-        // Fast 的 M 档修复力度偏弱 (历史 "没效果"), 而全 VL HQ 套
-        // vo-delayed 206 (present 拥塞) 且质量仅 +0.14dB。VL 升级档
-        // 质量 q924 PSNR 26.84/SSIM .824 (Fast 26.64/.802), 1080p 全屏
-        // ratio 0.999-1.000 / drops 0 / GPU 40-43% / vo-delayed 15-44。
-        // 上采样收尾保持 M/S: final 在 ≤4× 输出比下不执行 (Auto-
-        // Downscale 已把中间结果带到输出尺寸, mpv 跳过 final)。
-        assert!(anime4k_mode_files(&M::A)[1].ends_with("Restore_CNN_VL.glsl"));
+        // UL 升级档守卫 (第3轮实测): 修复/降噪阶段必须 UL — 同日
+        // 交替基准 UL 与 VL 成本全持平 (drops 105-113 / GPU 29-33% /
+        // vo-delayed 107-113), 质量 A +0.17dB、B +0.02dB、C +0.23dB
+        // (q924 锐利参考重建)。上采样收尾保持 M/S: final 仅在输出比
+        // ∈(2.02,2.4)∪(>4) 执行 (Auto 未收口), 常见比下 mpv 跳过。
+        assert!(anime4k_mode_files(&M::A)[1].ends_with("Restore_CNN_UL.glsl"));
         assert!(anime4k_mode_files(&M::A)[2].ends_with("Upscale_CNN_x2_M.glsl"));
         assert!(anime4k_mode_files(&M::A)[5].ends_with("Upscale_CNN_x2_S.glsl"));
-        assert!(anime4k_mode_files(&M::B)[1].ends_with("Restore_CNN_Soft_VL.glsl"));
+        assert!(anime4k_mode_files(&M::B)[1].ends_with("Restore_CNN_Soft_UL.glsl"));
         assert!(anime4k_mode_files(&M::B)[2].ends_with("Upscale_CNN_x2_M.glsl"));
-        assert!(anime4k_mode_files(&M::C)[1].ends_with("Upscale_Denoise_CNN_x2_VL.glsl"));
+        assert!(anime4k_mode_files(&M::C)[1].ends_with("Upscale_Denoise_CNN_x2_UL.glsl"));
     }
 
     #[test]
