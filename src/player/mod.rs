@@ -235,6 +235,10 @@ fn apply_video_enhancements(cmd: &mut tokio::process::Command) {
 }
 
 /// Smooth Motion 模式的追加参数 (纯函数, 便于测试):
+/// 实测真值 (Wayland commit 计数): NVPRESENT 按 NVIDIA 官方设计只做
+/// "两帧之间插一帧" (2×) — 24fps 源输出 ≈48Hz, **到不了刷新率** (无
+/// 目标帧率开关, 官方 README nvpresent 章); 与 display-resample 组合
+/// 实测坏档 (有效 82Hz、12s 掉 70 帧) 禁止搭配。要满 165Hz 用 blend。
 /// - `--video-sync=audio`: 驱动层接管呈现后 mpv 不再按 vsync 重排 —
 ///   后传参数覆盖基础 args 里的 display-resample。对帧生成本身也是
 ///   最优输入: 只在新帧时提交 present, 驱动在真实帧间插值; vsync 节奏
@@ -335,7 +339,12 @@ fn anime4k_args_in(dir: &std::path::Path, files: &[&str]) -> Vec<String> {
 ///
 /// - `off`: 无参数
 /// - `blend`: `--interpolation=yes` + tscale (手改配置可选 linear /
-///   mitchell 等, 非法值回落无伪影的 oversample)
+///   mitchell 等)。默认/非法值回落 **mitchell** — 实测依据 (mpv 手册
+///   tscale 按"平滑↑模糊↑"排序: oversample 最锐最不平滑 ≈ 只走节奏
+///   不做内容补帧, 默认它等于混合模式白开); mitchell 居中, 24fps→165Hz
+///   每对源帧间平滑过渡。同场基准: mitchell 插值与关闭模式同价
+///   (GPU 30% vs 29%、CPU 24% vs 23%), 内容更新率满 165Hz (Wayland
+///   commit 实测)。
 /// - `smooth_motion`: 无 mpv 侧参数 — 由驱动层插帧 (见
 ///   apply_video_enhancements 的环境变量), 叠加 mpv 插值会双重补帧
 fn interpolation_args(config: &crate::storage::AppConfig) -> Vec<String> {
@@ -347,7 +356,10 @@ fn interpolation_args(config: &crate::storage::AppConfig) -> Vec<String> {
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         {
-            "oversample".to_string()
+            // 空 (未配置) 与非法值都回落 mitchell: oversample 是
+            // 手册口径下"最锐/最不平滑"的档, 拿它当默认会让混合模式
+            // 只有呈现节奏而没有内容补帧 (形同关闭)。
+            "mitchell".to_string()
         } else {
             t.to_string()
         }
@@ -2987,10 +2999,16 @@ mod playlist_tests {
         assert!(blend.iter().any(|arg| arg.starts_with("--tscale=")));
         assert!(!blend.iter().any(|arg| arg.starts_with("--vf=")));
 
-        // 非法 tscale (含空格/分号) 回落 oversample
+        // 空 (默认未配置) → mitchell: 真补帧滤镜 (mpv 手册: oversample
+        // 最锐最不平滑 ≈ 不做内容补帧, 曾为默认导致混合模式形同关闭)。
+        config.interpolation_tscale = String::new();
+        let dflt = interpolation_args(&config);
+        assert!(dflt.contains(&"--tscale=mitchell".to_string()));
+
+        // 非法 tscale (含空格/分号) 同样回落 mitchell (mpv 合法值)
         config.interpolation_tscale = "bad value;rm -rf".to_string();
         let safe = interpolation_args(&config);
-        assert!(safe.contains(&"--tscale=oversample".to_string()));
+        assert!(safe.contains(&"--tscale=mitchell".to_string()));
     }
 
     #[test]

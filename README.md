@@ -323,7 +323,16 @@ cargo build --release --target x86_64-unknown-linux-musl
 #### 🖼️ Anime4K 动画增强 & 🎞 NVIDIA Smooth Motion
 
 详情页「播放选项」块（画质/HDR 下方）显示 `补帧:` 与 `Anime4K:` 状态，
-快捷键与画质键 `m` 同组：
+快捷键与画质键 `m` 同组。**三模式实测真值**（同场 1080p24 全屏、nvdec、
+Wayland commit 计数 + IPC 属性）：
+
+  | 模式 | 内容更新率 | GPU | CPU | 备注 |
+  |------|-----------|-----|-----|------|
+  | 关（display-resample） | 165 提交/秒，内容仍 24Hz 步进 | 29% | 23% | 呈现循环 = 弹幕平滑的代价（audio 节奏基线仅 20%/9%） |
+  | 混合（mpv 时间插值） | **165Hz 真补帧** | 30% | 24% | 插值本身 ≈ 免费（+1pp GPU、+1pp CPU，drops 0 / mist ≤3） |
+  | Smooth Motion（NVPRESENT） | **≈48Hz**（2× 设计） | 15-21% | 26% | GPU 最省；**到不了刷新率**（见下） |
+  | SM + display-resample | 坏档：有效 82Hz、12s 掉 70 帧 | — | — | 驱动层与 vsync 节奏冲突，禁止组合 |
+
 
 - **Anime4K**（`e` 循环 关→A→B→C）：实时动画超分/修复着色器，三模式结构
   取自官方模板 CTRL+1/2/3；**每个模式的说明随按键即时显示**在「播放选项」
@@ -349,11 +358,26 @@ cargo build --release --target x86_64-unknown-linux-musl
   | GAN 上采样 | 0.998 / 48% / 178 | 26.40/.793 | 质量与 present 双差，弃 |
   | 无 shader（spline36） | 1.000 / 29% / 13 | 27.58/.837 | 参考行：MSE 指标偏爱保守缩放，线稿感知清晰度以肉眼为准 |
 
+  **消耗结构（同场拆分实测）**：成本几乎全在修复阶段 Restore_UL 卷积
+  （含 Clamp 全链 45/46pp GPU），上采样+Auto 收尾合计 ≈+1pp、Clamp
+  ≈2pp；逐帧真实成本 = audio 节奏下 +9pp GPU，display-resample 下放大到
+  +16~17pp（部分 pass 随 165Hz 重渲染放大，外部无法消除）。CPU：audio
+  9%、display-resample 23% — 后者的 +14pp 是 165Hz 呈现循环（弹幕平滑
+  所必需）。已否决的降耗路径（有据）：前置降采样 hook（0.64× 窗口画质
+  −3.0dB，官方"先修复后缩小"顺序是对的）、vo=gpu（同场无优势）、阶段3
+  降 S（−0.13dB 且不省）、Restore 降档（UL=VL 成本、质量 +0.17dB）。
   缺任一着色器文件时应用整体不启用（mpv 直接吃缺失文件实测退化到
   ~0.55 实时，存在性检查已拦）。**增强覆盖全部播放路径**：单视频、
   多 P 播放列表、番剧、本地文件（番剧/本地曾漏挂，导致"没效果"）。
   着色器目录缺失/缺文件时静默不启用，播放不受影响。重建：
   `git clone --depth 1 https://github.com/bloc97/Anime4K.git ~/.local/share/bilibili-tui/anime4k`
+- **混合**（`i` 循环到第二态）：mpv 时间插值补到刷新率 —— 基础参数
+  `display-resample` 定住 vsync 节奏，追加 `--interpolation=yes` + tscale。
+  **tscale 默认 mitchell**（本轮改，原默认 oversample）：mpv 手册按
+  "平滑↑模糊↑"排序，oversample 最锐最不平滑 ≈ 只有呈现节奏、不做内容
+  补帧，默认它等于混合模式白开；mitchell 居中。手改 `interpolation_tscale`
+  可选 linear/mitchell 等。实测：Wayland commit 满 165/s（真补帧）、
+  GPU 30% / CPU 24%（对关闭 29%/23% ≈ 免费）。
 - **Smooth Motion**（`i` 循环到第三态）：NVIDIA 驱动级插帧。播放进程注入
   `NVPRESENT_ENABLE_SMOOTH_MOTION=1` 启用 `VK_LAYER_NV_present` 隐式层，
   驱动 AI 在呈现层补帧（**RTX 40 系+，需 Vulkan** — 除环境变量外还
@@ -368,7 +392,11 @@ cargo build --release --target x86_64-unknown-linux-musl
   vo-delayed 0（audio 节奏连 display-resample 的开销也一并省去）。
   **生成帧生效实证**（mpv 进程 Wayland commit 计数，8s）：全屏
   开338/关176、**平铺窗口开340/关177，均稳定 2×** — 窗口形态不影响
-  生成（平铺亦生效，无需全屏）。
+  生成（平铺亦生效，无需全屏）。**能力边界（实测+官方文档）**：NVIDIA
+  官方定义就是"两帧之间推断一帧"（2×，README nvpresent 章），**没有
+  目标帧率开关** — 24fps 源稳定输出 ≈48Hz（commit 49/s），**到不了显示
+  器刷新率**；要满 165Hz 用混合模式。SM 与 display-resample 组合实测
+  坏档（有效 82Hz、12s 掉 70 帧），audio 覆盖不可去掉。
   排查：`NVPRESENT_LOG_LEVEL=4`（stderr 日志）、`VK_LOADER_DEBUG=layer`
   （层加载），见驱动 README "NVIDIA Smooth Motion" 章。
 - **启动黑屏治理**：`--force-window=no`（原 `immediate`）——网络打开、
