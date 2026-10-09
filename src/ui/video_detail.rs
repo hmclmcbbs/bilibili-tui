@@ -766,10 +766,22 @@ impl VideoDetailPage {
         ];
         // 模式说明内联展示 (Off 无说明); 行宽受块宽 ~60 列约束。
         if self.anime4k_mode != crate::domain::playback::Anime4kMode::Off {
-            a4k_spans.push(Span::styled(
-                format!("{} ", self.anime4k_mode.desc()),
-                Style::default().fg(theme.fg_secondary),
-            ));
+            // 4K/8K 画质 (qn 120/127) 在 ≤4K 屏必然是下缩 (2560 屏 4K →
+            // 0.667×): 修复卷积在源分辨率白跑, 实测 +41pp GPU 且质量
+            // −4.7dB — mpv 侧 guard_downscale 的 WHEN 守卫会自动跳过,
+            // 这里提示别再手动开。HDR(125)/杜比(126) 分辨率不定不判断;
+            // 跟随画质 (0/未知) 无数据不提示 (mpv 守卫仍生效)。
+            if matches!(self.playback.quality, 120 | 127) {
+                a4k_spans.push(Span::styled(
+                    "⚠4K源不建议开启 ".to_string(),
+                    Style::default().fg(theme.warning),
+                ));
+            } else {
+                a4k_spans.push(Span::styled(
+                    format!("{} ", self.anime4k_mode.desc()),
+                    Style::default().fg(theme.fg_secondary),
+                ));
+            }
         }
         a4k_spans.push(Span::styled("[e]", Style::default().fg(theme.fg_secondary)));
         lines.push(Line::from(a4k_spans));
@@ -1932,6 +1944,69 @@ mod detail_tests {
         let interp_row = interp_row.expect("补帧 状态行未渲染");
         let a4k_row = a4k_row.expect("Anime4K 状态行未渲染");
         assert_ne!(interp_row, a4k_row, "补帧与 Anime4K 必须分属不同行");
+    }
+
+    #[test]
+    fn anime4k_row_warns_not_recommended_on_4k_quality() {
+        // 4K/8K 画质 (qn 120/127) = 下缩场景: 状态行显示"不建议开启"
+        // (mpv 侧 WHEN 守卫已自动跳过修复); 普通画质仍显示档位说明。
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let theme = Theme::default();
+        let render_row = |quality: i64| -> String {
+            let mut page = VideoDetailPage::new("BV1xx411c7mD".into(), 0);
+            page.anime4k_mode = crate::domain::playback::Anime4kMode::A;
+            page.playback.quality = quality;
+            let mut terminal = Terminal::new(TestBackend::new(70, 12)).unwrap();
+            terminal
+                .draw(|frame| {
+                    let area = frame.area();
+                    page.render_playback_options(frame, area, &theme);
+                })
+                .unwrap();
+            let buf = terminal.backend().buffer();
+            (0..buf.area.height)
+                .map(|y| {
+                    (0..buf.area.width)
+                        .map(|x| buf[(x, y)].symbol())
+                        .collect::<String>()
+                        .replace(' ', "")
+                })
+                .find(|row| row.contains("Anime4K:"))
+                .expect("Anime4K 状态行未渲染")
+        };
+        for qn in [120, 127] {
+            let row = render_row(qn);
+            assert!(
+                row.contains("不建议开启"),
+                "qn={qn} 应提示不建议开启: {row}"
+            );
+        }
+        let normal = render_row(80);
+        assert!(!normal.contains("不建议开启"), "1080P 不提示: {normal}");
+        assert!(
+            normal.contains("线稿重建"),
+            "1080P 仍显示档位说明: {normal}"
+        );
+        // Off 模式不提示 (没开就无所谓建议)。
+        let mut off = VideoDetailPage::new("BV1xx411c7mD".into(), 0);
+        off.anime4k_mode = crate::domain::playback::Anime4kMode::Off;
+        off.playback.quality = 120;
+        let mut terminal = Terminal::new(TestBackend::new(70, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                off.render_playback_options(frame, area, &theme);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let any_warn = (0..buf.area.height).any(|y| {
+            (0..buf.area.width)
+                .map(|x| buf[(x, y)].symbol())
+                .collect::<String>()
+                .contains("不建议开启")
+        });
+        assert!(!any_warn, "Off 模式不显示建议提示");
     }
 
     #[test]

@@ -336,9 +336,71 @@ fn anime4k_args_in(dir: &std::path::Path, files: &[&str]) -> Vec<String> {
         if !path.is_file() {
             return Vec::new();
         }
+        // 下缩守卫: Restore 类生成带 WHEN 的 .guarded 副本 (见 guard_downscale)。
+        let path = guard_downscale(&path);
         args.push(format!("--glsl-shaders-append={}", path.display()));
     }
     args
+}
+
+/// 下缩守卫: 视频源比输出大 (4K→2560 屏 0.667×、1080p→小窗 0.5×) 时,
+/// 修复卷积在源分辨率白跑 — 上采样/收口 pass 的官方 WHEN 全不触发, 唯一
+/// 在跑的 Restore 却烧掉整条链成本 (第5轮实测: 4K24 SM+a4k GPU 72% vs
+/// 关 31%, **+41pp**; 且质量 −4.7dB — 修复后再下缩不如 mpv 直接高质量
+/// 下缩, 0.64× 窗口测试同向)。给无 WHEN 的 Restore 类文件每个 hook 块
+/// 补官方同款 WHEN (**0.999 阈值**: 输出/源 > 0.999 才执行 — 1:1 与上缩
+/// 照常修复, 下缩整段跳过, mpv 免费拿原始帧走 spline36/lanczos 下缩)。
+///
+/// 实现要点:
+/// - 生成 `<name>.guarded.glsl` 副本, **官方资产文件不动** (git 更新无冲突);
+/// - 只碰 `Anime4K_Restore_CNN_*` (Clamp 含 HOOK PREKERNEL 特殊块, 部分
+///   跳过会错乱且实测成本≈0; Upscale/Auto/final 官方自带 WHEN 已自行跳过);
+/// - 官方文件已含 0.999 (未来版本自带) → 直接用原文件, 幂等;
+/// - 读/写失败回退原文件: 守卫失效但播放不受影响 (资产只读场景)。
+fn guard_downscale(path: &std::path::Path) -> std::path::PathBuf {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+        return path.to_path_buf();
+    };
+    if !name.starts_with("Anime4K_Restore_CNN_") {
+        return path.to_path_buf();
+    }
+    let Ok(src) = std::fs::read_to_string(path) else {
+        return path.to_path_buf();
+    };
+    if src.contains("0.999") {
+        return path.to_path_buf();
+    }
+    let guarded = insert_guard_when(&src);
+    if guarded == src {
+        return path.to_path_buf();
+    }
+    let out = path.with_extension("guarded.glsl");
+    match std::fs::write(&out, guarded) {
+        Ok(()) => out,
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+/// 每个 `//!HEIGHT` 行后插一条 WHEN (Restore 是多 hook 块结构, 官方 L 档
+/// 9 个块都必须跳过 — 只跳一半会读到未生成的中间纹理)。`//!WHEN` 置于
+/// HEIGHT 后与官方 Upscale/Denoise 的块格式一致。
+fn insert_guard_when(src: &str) -> String {
+    const WHEN: &str = "//!WHEN OUTPUT.w MAIN.w / 0.999 > OUTPUT.h MAIN.h / 0.999 > *";
+    let mut out = String::with_capacity(src.len() + 512);
+    for line in src.split_inclusive('\n') {
+        out.push_str(line);
+        if line
+            .trim_end_matches(['\r', '\n'])
+            .starts_with("//!HEIGHT ")
+        {
+            if !line.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(WHEN);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// 构造补帧相关的 mpv 参数 (纯函数, 便于测试)。
@@ -3072,6 +3134,63 @@ mod playlist_tests {
         // 缺任一文件 → 整体不启用 (返回空), 不给 mpv 半份清单。
         std::fs::remove_file(base.join("Upscale/Anime4K_Upscale_CNN_x2_S.glsl")).unwrap();
         assert!(anime4k_args_in(&base, anime4k_mode_files(&M::A)).is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn guard_downscale_patches_every_restore_block() {
+        // 下缩守卫单测: Restore 多 hook 块每块都补 WHEN (只跳一半会读到
+        // 未生成的中间纹理); Clamp/已守卫/缺失文件不碰; 官方资产不动。
+        let base = std::env::temp_dir().join(format!("a4k_guard_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let restore = base.join("Anime4K_Restore_CNN_L.glsl");
+        // 模拟官方结构: 首块 MAIN 尺寸, 后续块中间 conv 纹理尺寸, 共 3 块。
+        std::fs::write(
+            &restore,
+            concat!(
+                "//!DESC x-Conv\n//!HOOK MAIN\n//!BIND MAIN\n//!WIDTH MAIN.w\n//!HEIGHT MAIN.h\nvoid main(){}\n",
+                "//!DESC y-Conv\n//!HOOK MAIN\n//!BIND conv2d_tf\n//!WIDTH conv2d_tf.w\n//!HEIGHT conv2d_tf.h\nvoid main(){}\n",
+                "//!DESC z\n//!HOOK MAIN\n//!WIDTH conv2d_1_tf.w\n//!HEIGHT conv2d_1_tf.h\nvoid main(){}\n",
+            ),
+        )
+        .unwrap();
+
+        let out = guard_downscale(&restore);
+        assert!(
+            out.to_string_lossy()
+                .ends_with("Anime4K_Restore_CNN_L.guarded.glsl"),
+            "生成 .guarded 副本: {out:?}"
+        );
+        let guarded = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(
+            guarded.matches("//!WHEN OUTPUT.w MAIN.w / 0.999 >").count(),
+            3,
+            "每个 hook 块都补 WHEN"
+        );
+        // 每条 WHEN 紧跟其块的 HEIGHT 行。
+        let mut prev_height = false;
+        for line in guarded.lines() {
+            if line.starts_with("//!WHEN ") {
+                assert!(prev_height, "WHEN 必须紧跟 HEIGHT 行: {line}");
+            }
+            prev_height = line.starts_with("//!HEIGHT ");
+        }
+        // 官方原文件不动 (git 资产更新无冲突)。
+        assert!(!std::fs::read_to_string(&restore).unwrap().contains("0.999"));
+
+        // 幂等: 同一官方文件重复 guard 产出相同内容; 已守卫文件直接复用。
+        assert_eq!(
+            std::fs::read_to_string(guard_downscale(&restore)).unwrap(),
+            guarded
+        );
+        assert_eq!(guard_downscale(&out), out, "已含 0.999 → 直接复用");
+
+        // Clamp (含 PREKERNEL 块) 与缺失文件不碰。
+        let clamp = base.join("Anime4K_Clamp_Highlights.glsl");
+        std::fs::write(&clamp, "//!HEIGHT MAIN.h\n").unwrap();
+        assert_eq!(guard_downscale(&clamp), clamp, "Clamp 不生成守卫");
+        let missing = base.join("Anime4K_Restore_CNN_NA.glsl");
+        assert_eq!(guard_downscale(&missing), missing, "缺失文件回退原路径");
         std::fs::remove_dir_all(&base).ok();
     }
 
