@@ -468,7 +468,7 @@ impl SettingsPage {
             1 => match self.super_res.algorithm {
                 A::Anime4k => self.super_res.anime4k_level = self.super_res.anime4k_level.next(),
                 A::Nnedi3 => self.super_res.nnedi3_nns = self.super_res.nnedi3_nns.next(),
-                A::RavuR2 | A::RavuR4 | A::RavuLite => {
+                A::RavuR2 | A::RavuR4 => {
                     self.super_res.ravu_variant = self.super_res.ravu_variant.next()
                 }
                 A::Fsrcnnx => {
@@ -728,9 +728,9 @@ impl SettingsPage {
                 rows.push(format!("神经元：{}", sr.nnedi3_nns.label()));
                 rows.push(format!("窗口：{}", sr.nnedi3_window.label()));
             }
-            A::RavuR2 | A::RavuR4 | A::RavuLite => {
-                rows.push(format!("变体：{}", sr.ravu_variant.label()))
-            }
+            A::RavuR2 | A::RavuR4 => rows.push(format!("变体：{}", sr.ravu_variant.label())),
+            // RavuLite 无变体参数 (bjin 只有 plain/-ar, 固定 -ar)。
+            A::RavuLite => {}
             A::Fsrcnnx => rows.push(format!("滤镜数：{}", sr.fsrcnnx_filters.label())),
             A::Fsr | A::Cas | A::AdaptiveSharpen | A::Nis | A::LumaSharpen => {
                 rows.push(format!("锐化强度：{}", sr.sharpen_strength))
@@ -802,7 +802,14 @@ impl SettingsPage {
                 "自适应锐化 (非超分), 1:1 或配合内建缩放, 极省",
             ),
             ("A4K-Ultra", "FSR+Anime4K 线细化混合, 兼顾纹理与线条"),
-            ("通用", "源大于输出时全部自动跳过 (下缩走 mpv 高质量缩放)"),
+            (
+                "门控",
+                "NNEDI3/RAVU/FSRCNNX 已放宽为任意上缩即启用 (原需 ≥1.41×), 下缩仍自动跳过",
+            ),
+            (
+                "过载",
+                "NNEDI3 nns≥128 在 <1.5× 上缩时 4K 中间帧过载卡死, 1.33× 全屏请用 nns≤64",
+            ),
         ]
         .iter()
         .map(|(k, v)| Line::from(format!("  {k}: {v}")))

@@ -349,10 +349,10 @@ fn super_res_files(config: &crate::storage::SuperResConfig) -> Option<Vec<String
             "ravu-r4/ravu-r4{}.hook",
             ravu_variant_suffix(config.ravu_variant)
         )],
-        A::RavuLite => vec![format!(
-            "ravu-lite/ravu-lite-r4{}.hook",
-            ravu_variant_suffix(config.ravu_variant)
-        )],
+        // ravu-lite 族只有 plain/-ar 变体 (bjin 官方推荐 -ar 反振铃),
+        // 没有 -yuv/-rgb — 按变体拼文件名会指向不存在的路径导致静默
+        // 不启用 (用户报告"超分没生效"的根因之一), 故固定 -ar 文件。
+        A::RavuLite => vec!["ravu-lite/ravu-lite-ar-r4.hook".to_string()],
         A::Fsrcnnx => {
             let filters = match config.fsrcnnx_filters {
                 crate::domain::playback::FsrcnnxFilters::F16 => 16,
@@ -416,11 +416,55 @@ fn super_res_args_in(dir: &std::path::Path, files: &[String], sharpen_strength: 
         if !path.is_file() {
             return Vec::new();
         }
+        let path = relax_prescaler_when(&path);
         let path = patch_sharpen_strength(&path, sharpen_strength);
         let path = guard_shader_downscale(&path);
         args.push(format!("--glsl-shaders-append={}", path.display()));
     }
     args
+}
+
+/// 门控放宽: bjin NNEDI3/RAVU 官方 WHEN 要求 ≥1.414× 放大
+/// (`HOOKED/OUTPUT < 0.707106` 双轴), 而用户主场景 1080p→2560×1600
+/// 全屏只有 1.33× (宽度轴 源/出 = 0.75 不过) → RAVU 整体禁用、NNEDI3
+/// 仅高度轴微弱生效 — 实测 diff 均值 0.03 ≈ 没开 (用户报告"超分没
+/// 生效"的主因)。生成 `.relaxed.glsl` 副本把 `//!WHEN` 行阈值放宽到
+/// `0.999` (任何上缩都跑, 下缩仍整段跳过 — 与 Anime4K 守卫同语义)。
+/// 2× 预缩后由 mpv 高质量下缩 (1.33× 场景 2×→0.667× 下采, 实测无
+/// 几何变形 — NNEDI3 单轴时插值行保持内容比例, 全轴时是超采样)。
+/// 仅碰 NNEDI3/RAVU 族; 含 0.999 的文件 (已放宽/官方自带) 幂等跳过。
+fn relax_prescaler_when(path: &std::path::Path) -> std::path::PathBuf {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+        return path.to_path_buf();
+    };
+    if !(name.starts_with("nnedi3-") || name.starts_with("ravu")) {
+        return path.to_path_buf();
+    }
+    let Ok(src) = std::fs::read_to_string(path) else {
+        return path.to_path_buf();
+    };
+    if src.contains("0.999") {
+        return path.to_path_buf();
+    }
+    // 只改 //!WHEN 行 (权重/LUT 数据里也可能出现 0.707106 字面量)。
+    let relaxed: String = src
+        .split_inclusive('\n')
+        .map(|line| {
+            if line.trim_start().starts_with("//!WHEN ") {
+                line.replace("0.707106", "0.999")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    if relaxed == src {
+        return path.to_path_buf();
+    }
+    let out = path.with_extension("relaxed.glsl");
+    match std::fs::write(&out, relaxed) {
+        Ok(()) => out,
+        Err(_) => path.to_path_buf(),
+    }
 }
 
 /// 锐化强度补丁: CAS/FSR/NIS/锐化类文件内的强度常量按 1-100 线性映射,
@@ -3522,12 +3566,9 @@ mod playlist_tests {
             super_res_files(&c).unwrap(),
             vec!["nnedi3/nnedi3-nns16-win8x4.hook".to_string()]
         );
-        // RAVU 变体后缀。
-        for (alg, dir) in [
-            (A::RavuR2, "ravu-r2"),
-            (A::RavuR4, "ravu-r4"),
-            (A::RavuLite, "ravu-lite"),
-        ] {
+        // RAVU-r2/r4 变体后缀随配置; lite 族固定 -ar 文件 (bjin 无
+        // -yuv/-rgb, 按变体拼名会指向不存在的路径 → 静默不启用)。
+        for (alg, dir) in [(A::RavuR2, "ravu-r2"), (A::RavuR4, "ravu-r4")] {
             c = cfg();
             c.algorithm = alg;
             c.ravu_variant = RavuVariant::Yuv;
@@ -3538,6 +3579,16 @@ mod playlist_tests {
             assert!(
                 !super_res_files(&c).unwrap()[0].contains("-yuv"),
                 "plain 无后缀"
+            );
+        }
+        c = cfg();
+        c.algorithm = A::RavuLite;
+        for v in [RavuVariant::Yuv, RavuVariant::Rgb, RavuVariant::Plain] {
+            c.ravu_variant = v;
+            assert_eq!(
+                super_res_files(&c).unwrap(),
+                vec!["ravu-lite/ravu-lite-ar-r4.hook".to_string()],
+                "variant {v:?}"
             );
         }
         // FSRCNNX 双档。
@@ -3647,6 +3698,51 @@ mod playlist_tests {
         assert!(!fsr_block.contains("0.999"), "FSR 段不动: {fsr_block}");
         // 幂等。
         assert_eq!(insert_guard_unguarded_blocks(&guarded), guarded);
+    }
+
+    #[test]
+    fn relax_prescaler_when_widens_gate_only_on_when_lines() {
+        let base = std::env::temp_dir().join(format!("sr_relax_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        // NNEDI3: 双轴 WHEN → 放宽为 0.999; 非 WHEN 行的权重字面量不动。
+        let nn = base.join("nnedi3-nns64-win8x4.hook");
+        std::fs::write(
+            &nn,
+            "//!HOOK LUMA\n//!WHEN HOOKED.h OUTPUT.h / 0.707106 <\nconst float w = 0.707106;\n",
+        )
+        .unwrap();
+        let out = relax_prescaler_when(&nn);
+        assert_ne!(out, nn, "NNEDI3 生成放宽副本");
+        let relaxed = std::fs::read_to_string(&out).unwrap();
+        assert!(relaxed.contains("//!WHEN HOOKED.h OUTPUT.h / 0.999 <"));
+        assert!(
+            relaxed.contains("const float w = 0.707106;"),
+            "非 WHEN 行的权重字面量不动: {relaxed}"
+        );
+        assert_eq!(relax_prescaler_when(&out), out, "幂等");
+        // RAVU 双轴条件都放宽。
+        let rv = base.join("ravu-r2-yuv.hook");
+        std::fs::write(
+            &rv,
+            "//!HOOK NATIVE\n//!WHEN HOOKED.w OUTPUT.w / 0.707106 < HOOKED.h OUTPUT.h / 0.707106 < *\n",
+        )
+        .unwrap();
+        let rvo = relax_prescaler_when(&rv);
+        assert_ne!(rvo, rv);
+        assert_eq!(
+            std::fs::read_to_string(&rvo)
+                .unwrap()
+                .matches("0.999")
+                .count(),
+            2
+        );
+        // 非 prescaler 与缺失文件不碰。
+        let fsr = base.join("FSR.glsl");
+        std::fs::write(&fsr, "//!HOOK LUMA\n//!WHEN OUTPUT.w LUMA.w / 1.0 >\n").unwrap();
+        assert_eq!(relax_prescaler_when(&fsr), fsr);
+        let missing = base.join("nnedi3-NA.hook");
+        assert_eq!(relax_prescaler_when(&missing), missing);
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
