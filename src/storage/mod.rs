@@ -39,6 +39,60 @@ fn write_private_file(path: &std::path::Path, content: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// 超分辨率总配置: 算法选择 + 各算法可调档位。所有字段独立默认 —
+/// 未出现在配置文件里的键各自回落 (旧配置/手改漏键都不至于整块失效)。
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SuperResConfig {
+    /// 当前算法 (详情页 `e` 循环; Off=内建缩放)。
+    #[serde(default)]
+    pub algorithm: crate::domain::playback::SuperResAlgorithm,
+    /// Anime4K 档位 (A/B/C, 官方三主模式)。
+    #[serde(default)]
+    pub anime4k_level: crate::domain::playback::Anime4kLevel,
+    /// NNEDI3 神经元数量 (16-256)。
+    #[serde(default)]
+    pub nnedi3_nns: crate::domain::playback::Nnedi3Nns,
+    /// NNEDI3 邻域窗口 (8x4/8x6)。
+    #[serde(default)]
+    pub nnedi3_window: crate::domain::playback::Nnedi3Window,
+    /// FSRCNNX 滤镜数 (16=默认/8=轻量)。
+    #[serde(default)]
+    pub fsrcnnx_filters: crate::domain::playback::FsrcnnxFilters,
+    /// RAVU 色彩变体 (yuv/rgb/plain)。
+    #[serde(default)]
+    pub ravu_variant: crate::domain::playback::RavuVariant,
+    /// CAS/AdaptiveSharpen/LumaSharpen 的锐化强度 0-100 (50=默认;
+    /// 生成补丁着色器副本时按百分比缩放锐化系数, 见
+    /// player::super_res_sharpen_arg)。FSR 的 RCAS 也用此值。
+    #[serde(default = "default_sharpen_strength")]
+    pub sharpen_strength: u8,
+}
+
+fn default_sharpen_strength() -> u8 {
+    50
+}
+
+impl Default for SuperResConfig {
+    fn default() -> Self {
+        Self {
+            algorithm: Default::default(),
+            anime4k_level: Default::default(),
+            nnedi3_nns: Default::default(),
+            nnedi3_window: Default::default(),
+            fsrcnnx_filters: Default::default(),
+            ravu_variant: Default::default(),
+            sharpen_strength: default_sharpen_strength(),
+        }
+    }
+}
+
+impl SuperResConfig {
+    /// 加载后钳制越界值 (手改配置可写 0-255 任意数)。
+    pub fn clamp(&mut self) {
+        self.sharpen_strength = self.sharpen_strength.clamp(1, 100);
+    }
+}
+
 /// User credentials from Bilibili login
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Credentials {
@@ -552,6 +606,11 @@ pub struct AppConfig {
     /// Anime4K 增强模式 (详情页 `e`): off / a / b / c (官方三主模式)。
     #[serde(default)]
     pub anime4k_mode: crate::domain::playback::Anime4kMode,
+    /// 超分辨率选择 (详情页 `e`) + 每算法可调参数 (设置页"🎚 超分"栏目)。
+    /// 旧 `anime4k_mode` 在加载时迁移进来 (见 load_config), 之后仅作
+    /// 兼容保留, 不再读取。
+    #[serde(default)]
+    pub super_res: SuperResConfig,
     /// 插值用的时间缩放器 (mpv --tscale)。UI 不暴露; 手改配置可选
     /// oversample (默认, 无伪影) / linear / mitchell 等。
     #[serde(default = "default_interpolation_tscale")]
@@ -589,6 +648,7 @@ impl Default for AppConfig {
             playback_loop: Default::default(),
             interpolation_mode: Default::default(),
             anime4k_mode: Default::default(),
+            super_res: SuperResConfig::default(),
             interpolation_tscale: default_interpolation_tscale(),
             mpv_vo: None,
             mpv_hwdec: None,
@@ -774,10 +834,26 @@ pub fn load_config() -> Result<AppConfig> {
             config.keybindings.up_prev = "[".to_string();
             config.keybindings.up_next = "]".to_string();
         }
+        migrate_legacy_fields(&mut config);
         Ok(config)
     } else {
         Ok(AppConfig::default())
     }
+}
+
+/// 旧字段迁移 + 参数钳制 (纯函数, 便于测试): `anime4k_mode` (a/b/c) 在
+/// `super_res` 缺失时记为 Anime4K 算法 + 对应档位 (等价于旧 A/B/C 链)。
+pub(crate) fn migrate_legacy_fields(config: &mut AppConfig) {
+    use crate::domain::playback::{Anime4kLevel, Anime4kMode, SuperResAlgorithm as A};
+    if config.super_res.algorithm == A::Off && config.anime4k_mode != Anime4kMode::Off {
+        config.super_res.algorithm = A::Anime4k;
+        config.super_res.anime4k_level = match config.anime4k_mode {
+            Anime4kMode::B => Anime4kLevel::B,
+            Anime4kMode::C => Anime4kLevel::C,
+            _ => Anime4kLevel::A,
+        };
+    }
+    config.super_res.clamp();
 }
 
 /// Export cookies in Netscape format for yt-dlp
@@ -895,6 +971,44 @@ mod config_tests {
         assert_eq!(config.video_quality, VideoQuality::Best);
         assert_eq!(config.mpv_extra_args, None);
         assert_eq!(AppConfig::default().mpv_extra_args, None);
+    }
+
+    #[test]
+    fn legacy_anime4k_mode_migrates_to_super_res() {
+        use crate::domain::playback::{Anime4kLevel, Anime4kMode, SuperResAlgorithm as A};
+        // 旧配置 anime4k_mode=b, 无 super_res → 迁移为 Anime4K+B 档。
+        let value = serde_json::json!({
+            "theme": "silkcircuit-neon",
+            "keybindings": Keybindings::default(),
+            "anime4k_mode": "b",
+        });
+        let mut config: AppConfig = serde_json::from_value(value).expect("legacy config");
+        migrate_legacy_fields(&mut config);
+        assert_eq!(config.super_res.algorithm, A::Anime4k);
+        assert_eq!(config.super_res.anime4k_level, Anime4kLevel::B);
+        // c → C 档。
+        let mut config = AppConfig {
+            anime4k_mode: Anime4kMode::C,
+            ..AppConfig::default()
+        };
+        migrate_legacy_fields(&mut config);
+        assert_eq!(config.super_res.anime4k_level, Anime4kLevel::C);
+        // 新配置已有 super_res 算法 → 不被旧字段覆盖。
+        let mut config = AppConfig {
+            anime4k_mode: Anime4kMode::A,
+            super_res: SuperResConfig {
+                algorithm: A::Cas,
+                ..SuperResConfig::default()
+            },
+            ..AppConfig::default()
+        };
+        migrate_legacy_fields(&mut config);
+        assert_eq!(config.super_res.algorithm, A::Cas);
+        // 锐化强度越界钳制。
+        let mut config = AppConfig::default();
+        config.super_res.sharpen_strength = 0;
+        migrate_legacy_fields(&mut config);
+        assert_eq!(config.super_res.sharpen_strength, 1);
     }
 
     #[test]

@@ -229,7 +229,9 @@ fn apply_video_enhancements(cmd: &mut tokio::process::Command) {
             cmd.arg(arg);
         }
     }
-    for arg in anime4k_shader_args(&config.anime4k_mode) {
+    // 超分总入口 (Anime4K 三档也在其中, 由 super_res.algorithm 仲裁 —
+    // 旧 anime4k_mode 仅作配置迁移源, 不再直接加载, 避免双份链)。
+    for arg in super_res_shader_args(&config.super_res) {
         cmd.arg(arg);
     }
 }
@@ -324,6 +326,304 @@ fn anime4k_shader_args(mode: &crate::domain::playback::Anime4kMode) -> Vec<Strin
         return Vec::new();
     };
     anime4k_args_in(&dir, files)
+}
+
+/// 超分选择 → 相对文件清单 (`~/.local/share/bilibili-tui/superres/` 下)。
+/// Anime4K 走独立的 anime4k 目录 (三档链), 返回 None 表示需特殊处理。
+fn super_res_files(config: &crate::storage::SuperResConfig) -> Option<Vec<String>> {
+    use crate::domain::playback::SuperResAlgorithm as A;
+    let nns = config.nnedi3_nns.as_u32();
+    let win = match config.nnedi3_window {
+        crate::domain::playback::Nnedi3Window::Win8x4 => 4,
+        crate::domain::playback::Nnedi3Window::Win8x6 => 6,
+    };
+    let files = match config.algorithm {
+        A::Off => return None,
+        A::Anime4k => return None, // 独立目录, 见 anime4k_shader_args_by_level
+        A::Nnedi3 => vec![format!("nnedi3/nnedi3-nns{nns}-win8x{win}.hook")],
+        A::RavuR2 => vec![format!(
+            "ravu-r2/ravu-r2{}.hook",
+            ravu_variant_suffix(config.ravu_variant)
+        )],
+        A::RavuR4 => vec![format!(
+            "ravu-r4/ravu-r4{}.hook",
+            ravu_variant_suffix(config.ravu_variant)
+        )],
+        A::RavuLite => vec![format!(
+            "ravu-lite/ravu-lite-r4{}.hook",
+            ravu_variant_suffix(config.ravu_variant)
+        )],
+        A::Fsrcnnx => {
+            let filters = match config.fsrcnnx_filters {
+                crate::domain::playback::FsrcnnxFilters::F16 => 16,
+                crate::domain::playback::FsrcnnxFilters::F8 => 8,
+            };
+            vec![format!("fsrcnnx/FSRCNNX_x2_{filters}-0-4-1.glsl")]
+        }
+        A::Fsr => vec!["fsr/FSR.glsl".to_string()],
+        A::Cas => vec!["cas/CAS-scaled.glsl".to_string()],
+        A::AdaptiveSharpen => vec!["adaptive-sharpen/adaptive-sharpen.glsl".to_string()],
+        A::Nis => vec!["nis/NVScaler.glsl".to_string()],
+        A::LumaSharpen => vec!["lumasharpen/LumaSharpenHook.glsl".to_string()],
+        A::Anime4kUltra => vec!["anime4k-ultra/Anime4K-Ultra.glsl".to_string()],
+    };
+    Some(files)
+}
+
+fn ravu_variant_suffix(v: crate::domain::playback::RavuVariant) -> &'static str {
+    match v {
+        crate::domain::playback::RavuVariant::Yuv => "-yuv",
+        crate::domain::playback::RavuVariant::Rgb => "-rgb",
+        crate::domain::playback::RavuVariant::Plain => "",
+    }
+}
+
+/// 超分着色器参数总入口: Anime4K 走旧目录守卫链, 其余算法走 superres
+/// 目录 (带锐化强度补丁与下缩守卫)。任一文件缺失 → 整体不启用 (保证
+/// 可播, 与 anime4k_args_in 同策略)。
+fn super_res_shader_args(config: &crate::storage::SuperResConfig) -> Vec<String> {
+    use crate::domain::playback::SuperResAlgorithm as A;
+    match config.algorithm {
+        A::Off => Vec::new(),
+        A::Anime4k => {
+            let mode = match config.anime4k_level {
+                crate::domain::playback::Anime4kLevel::B => crate::domain::playback::Anime4kMode::B,
+                crate::domain::playback::Anime4kLevel::C => crate::domain::playback::Anime4kMode::C,
+                crate::domain::playback::Anime4kLevel::A => crate::domain::playback::Anime4kMode::A,
+            };
+            anime4k_shader_args(&mode)
+        }
+        _ => {
+            let Some(files) = super_res_files(config) else {
+                return Vec::new();
+            };
+            let Some(dir) = dirs::data_local_dir().map(|d| d.join("bilibili-tui/superres")) else {
+                return Vec::new();
+            };
+            super_res_args_in(&dir, &files, config.sharpen_strength)
+        }
+    }
+}
+
+/// [`super_res_shader_args`] 的核心 (目录参数化, 便于测试): 逐文件校验
+/// + 锐化强度补丁 (CAS/FSR/锐化类生成 `.s{strength}` 副本) + 下缩守卫
+/// (锐化类在源大于输出时跳过 — 锐化后下缩会放大噪声再被高质量下缩
+/// 抹掉, 白烧 GPU)。
+fn super_res_args_in(dir: &std::path::Path, files: &[String], sharpen_strength: u8) -> Vec<String> {
+    let mut args = Vec::with_capacity(files.len());
+    for file in files {
+        let path = dir.join(file);
+        if !path.is_file() {
+            return Vec::new();
+        }
+        let path = patch_sharpen_strength(&path, sharpen_strength);
+        let path = guard_shader_downscale(&path);
+        args.push(format!("--glsl-shaders-append={}", path.display()));
+    }
+    args
+}
+
+/// 锐化强度补丁: CAS/FSR/NIS/锐化类文件内的强度常量按 1-100 线性映射,
+/// 写入 `.s<strength>.glsl` 副本 (原文件不动, 同 guard_downscale 策略)。
+/// 50 (默认) 时不打补丁 (官方默认值); 无匹配常量的文件静默跳过。
+fn patch_sharpen_strength(path: &std::path::Path, strength: u8) -> std::path::PathBuf {
+    if strength == 50 {
+        return path.to_path_buf();
+    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+        return path.to_path_buf();
+    };
+    // 只对锐化强度方向明确 (值越大越锐) 的文件生效: NVScaler/NVSharpen
+    // (SHARPNESS 0-1)、LumaSharpenHook (sharp_strength 0.1-3)、
+    // adaptive-sharpen (curve_height >0)。FSR 的 SHARPNESS 语义反向
+    // (0=最锐, N=stops 衰减)、CAS 的 SHARPENING 默认 0 映射不透明 —
+    // 两者的系数保持官方值, 不打补丁 (默认 50 时全文件都不打)。
+    let patchable = matches!(
+        name.as_str(),
+        "NVScaler.glsl" | "NVSharpen.glsl" | "LumaSharpenHook.glsl" | "adaptive-sharpen.glsl"
+    );
+    if !patchable {
+        return path.to_path_buf();
+    }
+    let Ok(src) = std::fs::read_to_string(path) else {
+        return path.to_path_buf();
+    };
+    let factor = strength as f32 / 50.0; // 50=1.0 官方默认
+    let patched = patch_strength_in_shader(&src, factor);
+    if patched == src {
+        return path.to_path_buf();
+    }
+    let out = path.with_extension(format!("s{strength}.glsl"));
+    match std::fs::write(&out, patched) {
+        Ok(()) => out,
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+/// 锐化常量定位与缩放: 各 shader 的强度参数命名不同, 逐模式匹配
+/// (CAS: `sharpness` 行; FSR: `sharpness` RCAS 参数; LumaSharpen:
+/// `sharpen_val`; NIS: `sharpen`; AdaptiveSharpen: 内部曲线不动 —
+/// 其强度由公式决定, 补丁会破坏自适应性, 跳过)。
+fn patch_strength_in_shader(src: &str, factor: f32) -> String {
+    let patterns = ["SHARPNESS", "sharp_strength", "curve_height"];
+    let mut out = String::with_capacity(src.len());
+    for line in src.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let is_decl = trimmed.starts_with("const ")
+            || trimmed.starts_with("#define")
+            || (patterns.iter().any(|p| trimmed.contains(p)) && trimmed.contains('='));
+        if is_decl && patterns.iter().any(|p| trimmed.contains(p)) {
+            if let Some(patched) = scale_strength_line(line, factor) {
+                out.push_str(&patched);
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+/// 把一行里的浮点/整型强度数值按 factor 缩放 (clamp 0..1 或 0..100 语义)。
+fn scale_strength_line(line: &str, factor: f32) -> Option<String> {
+    use std::fmt::Write as _;
+    // 找行内最后一个数值 token (避免命中 `// sharpness: doc` 注释外的
+    // 变量名)。注释行直接跳过。
+    let code = line.split("//").next()?;
+    let idx = code.rfind(|c: char| c.is_ascii_digit())?;
+    // 数值起点: 从 idx 向前吞可接受字符。
+    let bytes = code.as_bytes();
+    let mut start = idx;
+    while start > 0 {
+        let prev = bytes[start - 1] as char;
+        if prev.is_ascii_digit() || prev == '.' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    let token = code.get(start..=idx)?;
+    let value: f32 = token.parse().ok()?;
+    if value <= 0.0 || value > 100.0 {
+        return None;
+    }
+    let scaled = (value * factor).clamp(0.01, if value <= 1.0 { 1.0 } else { 100.0 });
+    // 保留至少一位小数: "1" → "1.0" (声明为 float 时避免整型字面量)。
+    let mut num = format!("{scaled:.4}");
+    while num.ends_with('0') && !num.ends_with(".0") {
+        num.pop();
+    }
+    let mut newline = String::with_capacity(line.len() + 8);
+    write!(
+        &mut newline,
+        "{}{}{}",
+        &code[..start],
+        num,
+        &code[idx + 1..]
+    )
+    .ok()?;
+    // 保留原行尾 (注释与换行)。
+    newline.push_str(&line[code.len()..]);
+    Some(newline)
+}
+
+/// 通用下缩守卫: 无 WHEN 条件的锐化类 hook 在源大于输出时跳过
+/// (复用 Anime4K 的 0.999 阈值策略)。已有 WHEN 的文件不动。
+fn guard_shader_downscale(path: &std::path::Path) -> std::path::PathBuf {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else {
+        return path.to_path_buf();
+    };
+    // 实测勘察 (12 算法 79 文件) 后的守卫白名单:
+    // - nnedi3/ravu/fsrcnnx/fsr/cas/nis 自带上缩门控 WHEN
+    //   (0.707106 / 1.0 / 1.3 阈值), 下缩自动禁用, 不碰;
+    // - adaptive-sharpen (HOOK SCALED) 跑在输出分辨率, 是合法后锐化,
+    //   成本固定一趟, 不碰;
+    // - LumaSharpenHook (HOOK LUMA 无 WHEN) 在源分辨率锐化, 下缩时
+    //   白跑且放大噪声 → 补守卫;
+    // - Anime4K-Ultra: FSR 段自带 WHEN, Thin/CNN 段 9 块无条件 →
+    //   逐块补 (只碰无 WHEN 的块, 依赖链全跳全跑)。
+    let needs_guard = matches!(name.as_str(), "LumaSharpenHook.glsl" | "Anime4K-Ultra.glsl");
+    if !needs_guard {
+        return path.to_path_buf();
+    }
+    let Ok(src) = std::fs::read_to_string(path) else {
+        return path.to_path_buf();
+    };
+    if src.contains("0.999") {
+        return path.to_path_buf();
+    }
+    let guarded = if name == "Anime4K-Ultra.glsl" {
+        insert_guard_unguarded_blocks(&src)
+    } else {
+        insert_guard_after_hook(&src)
+    };
+    if guarded == src {
+        return path.to_path_buf();
+    }
+    let out = path.with_extension("guarded.glsl");
+    match std::fs::write(&out, guarded) {
+        Ok(()) => out,
+        Err(_) => path.to_path_buf(),
+    }
+}
+
+/// 每个 `//!HOOK` 行后插下缩跳过条件 (锐化类单块结构; 多块文件不适用,
+/// 见 guard_shader_downscale 的白名单)。
+fn insert_guard_after_hook(src: &str) -> String {
+    const WHEN: &str = "//!WHEN OUTPUT.w MAIN.w / 0.999 > OUTPUT.h MAIN.h / 0.999 > *";
+    let mut out = String::with_capacity(src.len() + 128);
+    for line in src.split_inclusive('\n') {
+        out.push_str(line);
+        if line.trim_end_matches(['\r', '\n']).starts_with("//!HOOK ") {
+            if !line.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(WHEN);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// 只给**没有 WHEN 的块**补下缩守卫 (Anime4K-Ultra: FSR 段已有 WHEN
+/// 不能在同一块重复插 — 语义未定义; Thin/CNN 段无条件必须补, 否则下缩
+/// 时 9 块在源分辨率白跑, 同 Anime4K Restore 的 +41pp 教训)。块 =
+/// `//!HOOK` 行到下一个 `//!HOOK` 行之间。
+fn insert_guard_unguarded_blocks(src: &str) -> String {
+    const WHEN: &str = "//!WHEN OUTPUT.w MAIN.w / 0.999 > OUTPUT.h MAIN.h / 0.999 > *";
+    let lines: Vec<&str> = src.split_inclusive('\n').collect();
+    let mut out = String::with_capacity(src.len() + 512);
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        if !line.trim_end_matches(['\r', '\n']).starts_with("//!HOOK ") {
+            out.push_str(line);
+            i += 1;
+            continue;
+        }
+        // 收集整块 (到下一个 HOOK 或文件尾)。
+        let mut j = i + 1;
+        while j < lines.len()
+            && !lines[j]
+                .trim_end_matches(['\r', '\n'])
+                .starts_with("//!HOOK ")
+        {
+            j += 1;
+        }
+        let block: String = lines[i..j].concat();
+        out.push_str(line);
+        if !line.ends_with('\n') {
+            out.push('\n');
+        }
+        if !block.contains("//!WHEN ") {
+            out.push_str(WHEN);
+            out.push('\n');
+        }
+        for extra in &lines[i + 1..j] {
+            out.push_str(extra);
+        }
+        i = j;
+    }
+    out
 }
 
 /// [`anime4k_shader_args`] 的核心 (目录参数化, 便于测试): 逐文件校验;
@@ -3192,6 +3492,181 @@ mod playlist_tests {
         let missing = base.join("Anime4K_Restore_CNN_NA.glsl");
         assert_eq!(guard_downscale(&missing), missing, "缺失文件回退原路径");
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn super_res_files_cover_all_algorithms_with_params() {
+        use crate::domain::playback::{
+            Anime4kLevel, FsrcnnxFilters, Nnedi3Nns, Nnedi3Window, RavuVariant,
+            SuperResAlgorithm as A,
+        };
+        let cfg = crate::storage::SuperResConfig::default;
+        // Off/Anime4k → None (特殊处理路径)。
+        assert_eq!(super_res_files(&cfg()), None);
+        let mut c = cfg();
+        c.algorithm = A::Anime4k;
+        c.anime4k_level = Anime4kLevel::B;
+        assert_eq!(super_res_files(&c), None, "Anime4K 走独立目录");
+        // NNEDI3 参数组合 → 精确文件名。
+        c = cfg();
+        c.algorithm = A::Nnedi3;
+        c.nnedi3_nns = Nnedi3Nns::N128;
+        c.nnedi3_window = Nnedi3Window::Win8x6;
+        assert_eq!(
+            super_res_files(&c).unwrap(),
+            vec!["nnedi3/nnedi3-nns128-win8x6.hook".to_string()]
+        );
+        c.nnedi3_nns = Nnedi3Nns::N16;
+        c.nnedi3_window = Nnedi3Window::Win8x4;
+        assert_eq!(
+            super_res_files(&c).unwrap(),
+            vec!["nnedi3/nnedi3-nns16-win8x4.hook".to_string()]
+        );
+        // RAVU 变体后缀。
+        for (alg, dir) in [
+            (A::RavuR2, "ravu-r2"),
+            (A::RavuR4, "ravu-r4"),
+            (A::RavuLite, "ravu-lite"),
+        ] {
+            c = cfg();
+            c.algorithm = alg;
+            c.ravu_variant = RavuVariant::Yuv;
+            let files = super_res_files(&c).unwrap();
+            assert!(files[0].starts_with(dir), "{alg:?} → {}", files[0]);
+            assert!(files[0].ends_with("-yuv.hook"), "yuv 后缀: {}", files[0]);
+            c.ravu_variant = RavuVariant::Plain;
+            assert!(
+                !super_res_files(&c).unwrap()[0].contains("-yuv"),
+                "plain 无后缀"
+            );
+        }
+        // FSRCNNX 双档。
+        c = cfg();
+        c.algorithm = A::Fsrcnnx;
+        c.fsrcnnx_filters = FsrcnnxFilters::F8;
+        assert_eq!(
+            super_res_files(&c).unwrap(),
+            vec!["fsrcnnx/FSRCNNX_x2_8-0-4-1.glsl".to_string()]
+        );
+        c.fsrcnnx_filters = FsrcnnxFilters::F16;
+        assert_eq!(
+            super_res_files(&c).unwrap(),
+            vec!["fsrcnnx/FSRCNNX_x2_16-0-4-1.glsl".to_string()]
+        );
+        // 固定文件算法。
+        for (alg, file) in [
+            (A::Fsr, "fsr/FSR.glsl"),
+            (A::Cas, "cas/CAS-scaled.glsl"),
+            (A::AdaptiveSharpen, "adaptive-sharpen/adaptive-sharpen.glsl"),
+            (A::Nis, "nis/NVScaler.glsl"),
+            (A::LumaSharpen, "lumasharpen/LumaSharpenHook.glsl"),
+            (A::Anime4kUltra, "anime4k-ultra/Anime4K-Ultra.glsl"),
+        ] {
+            c = cfg();
+            c.algorithm = alg;
+            assert_eq!(super_res_files(&c).unwrap(), vec![file.to_string()]);
+        }
+    }
+
+    #[test]
+    fn super_res_args_in_requires_all_files_and_patches_strength() {
+        let base = std::env::temp_dir().join(format!("sr_args_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        // 缺文件 → 整体空 (不启用)。
+        assert!(super_res_args_in(&base, &["a/b.hook".to_string()], 50).is_empty());
+        // 完整目录: NVScaler 带 SHARPNESS 常量 → 生成补丁副本。
+        std::fs::create_dir_all(base.join("nis")).unwrap();
+        std::fs::write(
+            base.join("nis/NVScaler.glsl"),
+            "//!HOOK LUMA\n#define SHARPNESS 0.25\nvoid main() {}\n",
+        )
+        .unwrap();
+        let args = super_res_args_in(&base, &["nis/NVScaler.glsl".to_string()], 100);
+        assert_eq!(args.len(), 1);
+        assert!(args[0].contains(".s100.glsl"), "强度补丁副本: {}", args[0]);
+        let patched = std::fs::read_to_string(base.join("nis/NVScaler.s100.glsl")).unwrap();
+        assert!(patched.contains("0.5"), "0.25×(100/50)=0.5: {patched}");
+        // 原文件不动。
+        assert!(
+            std::fs::read_to_string(base.join("nis/NVScaler.glsl"))
+                .unwrap()
+                .contains("0.25")
+        );
+        // strength=50 (默认) 不打补丁, 直接用原文件。
+        let args50 = super_res_args_in(&base, &["nis/NVScaler.glsl".to_string()], 50);
+        assert!(!args50[0].contains(".s"), "{}", args50[0]);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn guard_shader_downscale_protects_sharpeners_only() {
+        let base = std::env::temp_dir().join(format!("sr_guard_{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        // LumaSharpen (无 WHEN 单块): 补 HOOK 后 WHEN。
+        let ls = base.join("LumaSharpenHook.glsl");
+        std::fs::write(&ls, "//!HOOK LUMA\n//!BIND HOOKED\nvoid main() {}\n").unwrap();
+        let out = guard_shader_downscale(&ls);
+        assert_ne!(out, ls);
+        let guarded = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(
+            guarded.matches("//!WHEN OUTPUT.w MAIN.w / 0.999 >").count(),
+            1
+        );
+        let hook_idx = guarded.find("//!HOOK LUMA").unwrap();
+        let when_idx = guarded.find("//!WHEN").unwrap();
+        assert!(hook_idx < when_idx, "WHEN 紧跟 HOOK 行");
+        // 已含 0.999 → 复用; 超分 CNN (nnedi3 等) 不碰; 缺失不碰。
+        assert_eq!(guard_shader_downscale(&out), out);
+        let nn = base.join("nnedi3-nns64-win8x4.hook");
+        std::fs::write(&nn, "//!HOOK MAIN\n//!COMPUTE 8 8\n").unwrap();
+        assert_eq!(guard_shader_downscale(&nn), nn, "CNN 类不加守卫");
+        let missing = base.join("NA.glsl");
+        assert_eq!(guard_shader_downscale(&missing), missing);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn a4k_ultra_guard_patches_unguarded_blocks_only() {
+        // A4K-Ultra 混合结构: FSR 段带 WHEN 不碰, Thin/CNN 段补守卫。
+        let src = concat!(
+            "//!HOOK LUMA\n",
+            "//!WHEN OUTPUT.w MAIN.w / 1.2 >\n",
+            "void fsr() {}\n",
+            "//!HOOK MAIN\n",
+            "//!BIND HOOKED\n",
+            "void thin() {}\n",
+            "//!HOOK MAIN\n",
+            "//!SAVE conv\n",
+            "void cnn() {}\n",
+        );
+        let guarded = insert_guard_unguarded_blocks(src);
+        // 2 个无 WHEN 块各补一条 WHEN (每条含两次 "0.999 >"), 有 WHEN 的不动。
+        assert_eq!(guarded.matches("//!WHEN").count(), 3); // 1 原有 + 2 新补
+        assert_eq!(guarded.matches("0.999 >").count(), 4);
+        let fsr_block = guarded.split("//!HOOK MAIN").next().unwrap();
+        assert!(!fsr_block.contains("0.999"), "FSR 段不动: {fsr_block}");
+        // 幂等。
+        assert_eq!(insert_guard_unguarded_blocks(&guarded), guarded);
+    }
+
+    #[test]
+    fn scale_strength_line_handles_types_and_comments() {
+        // 浮点声明。
+        let out = scale_strength_line("const float sharpness = 0.5;\n", 2.0).unwrap();
+        assert!(out.contains("1.0"), "{out}");
+        // clamp 上界 1.0 语义 (锐化系数)。
+        let out = scale_strength_line("const float sharpness = 0.9;\n", 2.0).unwrap();
+        assert!(out.contains("1.0"), "{out}");
+        // 整型 (0-100 语义)。
+        let out = scale_strength_line("#define SHARPNESS 50\n", 0.4).unwrap();
+        assert!(out.contains("20"), "{out}");
+        // 注释行不动。
+        assert!(scale_strength_line("// sharpness = 0.5\n", 2.0).is_none());
+        // 无数值行不动。
+        assert!(scale_strength_line("uniform float sharpness;\n", 2.0).is_none());
+        // 保留行尾注释。
+        let out = scale_strength_line("float sharpness = 0.5; // tuned\n", 2.0).unwrap();
+        assert!(out.contains("// tuned"), "{out}");
     }
 
     #[test]

@@ -142,6 +142,8 @@ pub enum AppAction {
     SetInterpolationMode(InterpolationMode),
     /// 详情页 `e`: 循环切换 Anime4K 增强 (关/A/B/C) 并写入配置。
     SetAnime4kMode(Anime4kMode),
+    /// 详情页 `e` / 设置页超分栏目: 保存超分配置 (算法+档位)。
+    SaveSuperRes(Box<crate::storage::SuperResConfig>),
     /// Navigate to next sidebar item
     NavNext,
     /// Navigate to previous sidebar item

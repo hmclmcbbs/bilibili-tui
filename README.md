@@ -313,17 +313,17 @@ cargo build --release --target x86_64-unknown-linux-musl
 | 切换动态标签   | `1` / `2` / `3`     | 快速跳转到全部/视频/图文标签   |
 | 切换 UP 主     | `[` / `]`           | 在常看 UP 主列表中左右切换     |
 | **设置页**     |                     |                                |
-| 切换分类       | `[` / `]`           | 在主题/快捷键/账户分类间切换   |
+| 切换分类       | `[` / `]`           | 在主题/弹幕/播放/超分/快捷键/账户间切换 |
 | **视频详情页** |                     |                                |
 | 切换焦点       | `Tab`               | 在评论和相关推荐区域间切换     |
 | 展开收起回复   | `r`                 | 展开/收起评论回复              |
 | 补帧三态       | `i`                 | 循环 关→混合 (mpv 时间插值)→Smooth Motion (NVIDIA 驱动插帧) →关; 状态在「播放选项」块 (页头不放提示), 持久化 |
-| 画质增强 A4K   | `e`                 | 循环 关→A→B→C (Anime4K 动画超分); 状态与模式说明同在「播放选项」块 |
+| 超分选择       | `e`                 | 循环 关→12 种超分算法 (Anime4K/NNEDI3/RAVU/FSRCNNX/FSR/CAS/…); 状态与说明在「播放选项」块, 细调在设置页「🔍 超分」栏目 |
 
-#### 🖼️ Anime4K 动画增强 & 🎞 NVIDIA Smooth Motion
+#### 🖼️ 超分辨率（12 算法） & 🎞 NVIDIA Smooth Motion
 
-详情页「播放选项」块（画质/HDR 下方）显示 `补帧:` 与 `Anime4K:` 状态，
-快捷键与画质键 `m` 同组。**三模式实测真值**（同场 1080p24 全屏、nvdec、
+详情页「播放选项」块（画质/HDR 下方）显示 `补帧:` 与 `超分:` 状态，
+快捷键与画质键 `m` 同组。**补帧三态实测真值**（同场 1080p24 全屏、nvdec、
 Wayland commit 计数 + IPC 属性）：
 
   | 模式 | 内容更新率 | GPU | CPU | 备注 |
@@ -334,9 +334,50 @@ Wayland commit 计数 + IPC 属性）：
   | SM + display-resample | 坏档：有效 82Hz、12s 掉 70 帧 | — | — | 驱动层与 vsync 节奏冲突，禁止组合 |
 
 
-- **Anime4K**（`e` 循环 关→A→B→C）：实时动画超分/修复着色器，三模式结构
-  取自官方模板 CTRL+1/2/3；**每个模式的说明随按键即时显示**在「播放选项」
-  块的 `Anime4K:` 行内（Off 不显示说明）：
+- **超分选择**（`e` 循环 关→12 算法→关）：Anime4K 原三档选项升级为
+  **12 种超分/画质算法**（第7轮，用户选定"11 新增 + Anime4K"）。全部为
+  mpv 原生 GLSL hook（`//!HOOK` 格式，gpu-next/Vulkan 直接加载，79 个
+  文件 46MB，来源：bjin/mpv-prescalers、igv FSRCNNX、iwalton3 FSR、
+  agyild CAS/NIS、boned101 LumaSharpen/AdaptiveSharpen、
+  Th-Underscore Anime4K-Ultra）。资产在
+  `~/.local/share/bilibili-tui/superres/<算法>/`，缺文件整体静默降级
+  （可播性优先）：
+
+  | 算法 | 定位 | GPU（1080p→1600p 全屏, off=21%） |
+  |------|------|--------------------------------|
+  | 关（内建 spline36/lanczos） | 基线 | 21% |
+  | CAS / NIS / FSR | 通用实时 SR+锐化（AMD/NVIDIA） | 22-23%（+1-2pp） |
+  | RAVU-lite / RAVU-r4 / RAVU-r2 | 动画向学习型 CNN（bjin） | 21-25%（+0-4pp） |
+  | NNEDI3 (nns16-256) | 神经元插值，低清重建最强 | 25%（+4pp） |
+  | Anime4K（L 档链） | 动画线稿重建 CNN | 28%（+7pp） |
+  | Anime4K-Ultra | FSR+线细化混合 | 24%（+3pp） |
+  | FSRCNNX (8/16) | igv 手调 x2 CNN | 30-37%（+9-16pp） |
+  | AdaptiveSharpen / LumaSharpen | 自适应锐化（非超分） | 21-25% |
+
+  **参数细调**（设置页「🔍 超分」栏目，随算法动态显示）：Anime4K 档位
+  A/B/C、NNEDI3 神经元数（16-256）与窗口（8x4/8x6）、FSRCNNX 滤镜数
+  （16/8）、RAVU 色彩变体（YUV/RGB/亮度）、锐化族强度（1-100，50=官方
+  默认，按百分比缩放写 `.s<N>.glsl` 补丁副本，原文件不动）。bjin README
+  推荐全屏视频用 `-rgb` 变体（合并 chroma 上缩），已设为默认。
+  旧 `anime4k_mode` 配置加载时自动迁移（a/b/c → Anime4K 对应档位），
+  双向同步保持旧版本二进制兼容。
+
+  **下缩/自适应门控（"像之前一样优化"）**：12 算法 79 文件勘察后分三类
+  — ① nnedi3/ravu/fsrcnnx/fsr/cas/nis **自带上缩门控 WHEN**
+  （`HOOKED/OUTPUT < 0.7071` 即 ≥1.414×、`OUTPUT/LUMA > 1.0/1.3`），下缩
+  自动禁用零成本；② LumaSharpen（HOOK LUMA 无 WHEN）与 Anime4K-Ultra
+  的 9 个无条件 Thin/CNN 块由 `guard_shader_downscale` 补官方同款
+  `0.999` WHEN（`.guarded.glsl` 副本）；③ adaptive-sharpen（HOOK SCALED，
+  输出分辨率后锐化）保留。实测 4K24 下缩场景全部算法 GPU ≈ off 基线
+  （守卫生效）。**NNEDI3/RAVU 单轴行为实测无变形**：1.33× 全屏时高度轴
+  （1080/1600=0.675<0.707）触发 2× 后 mpv 轻微下采，宽度轴不触发 — 行/
+  列投影位移=0、r≥0.979，是 bjin 的完美 2× 预缩器设计（≥1.414× 时双轴
+  全开）。1.5× 上缩质量口径（720p→1080p vs 参考）：多数算法 PSNR 同值
+  （SR 生成新高频而非复原像素，MSE 弱区分），Anime4K-Ultra −0.8dB、
+  AdaptiveSharpen −5.6dB（锐化过冲），其余与内建缩放持平。
+
+  - **Anime4K 三档**（原关→A→B→C，现为算法内档位参数）：
+    三模式结构取自官方模板 CTRL+1/2/3，**档位说明随选择即时显示**：
 
   | 模式 | 定位 | 行内说明 |
   |------|------|----------|

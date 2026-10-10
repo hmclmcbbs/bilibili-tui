@@ -12,6 +12,360 @@ pub struct PlaybackOptions {
     pub prefer_hires: bool,
 }
 
+/// Anime4K 档位 (设置页超分栏目调; A=官方 CTRL+1 …)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Anime4kLevel {
+    /// 1080p 动画: Restore_L → Upscale×2 (线稿重建)。
+    #[default]
+    A,
+    /// 720p 动画: Restore_Soft_L → Upscale×2 (去振铃/抗锯齿)。
+    B,
+    /// 480p/无损图源: Upscale_Denoise_L (高保真轻处理)。
+    C,
+}
+
+impl Anime4kLevel {
+    pub fn next(self) -> Self {
+        match self {
+            Self::A => Self::B,
+            Self::B => Self::C,
+            Self::C => Self::A,
+        }
+    }
+
+    /// 状态行补充标签 ("A·1080p动画" 等)。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::A => "A·1080p动画",
+            Self::B => "B·720p动画",
+            Self::C => "C·480p高保真",
+        }
+    }
+}
+
+/// NNEDI3 神经元数量档 (越大越强越贵, 官方 hook 覆盖 16-256)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Nnedi3Nns {
+    N16,
+    N32,
+    #[default]
+    N64,
+    N128,
+    N256,
+}
+
+impl Nnedi3Nns {
+    pub fn next(self) -> Self {
+        use Nnedi3Nns::*;
+        match self {
+            N16 => N32,
+            N32 => N64,
+            N64 => N128,
+            N128 => N256,
+            N256 => N16,
+        }
+    }
+
+    pub fn as_u32(self) -> u32 {
+        use Nnedi3Nns::*;
+        match self {
+            N16 => 16,
+            N32 => 32,
+            N64 => 64,
+            N128 => 128,
+            N256 => 256,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        use Nnedi3Nns::*;
+        match self {
+            N16 => "16 (最快)",
+            N32 => "32",
+            N64 => "64 (默认)",
+            N128 => "128",
+            N256 => "256 (最贵)",
+        }
+    }
+}
+
+/// NNEDI3 邻域窗口 (8x4 水平窗 / 8x6 全窗; 全窗质量更好略贵)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Nnedi3Window {
+    #[default]
+    Win8x4,
+    Win8x6,
+}
+
+impl Nnedi3Window {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Win8x4 => Self::Win8x6,
+            Self::Win8x6 => Self::Win8x4,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Win8x4 => "8x4 (轻)",
+            Self::Win8x6 => "8x6 (重)",
+        }
+    }
+}
+
+/// FSRCNNX 滤镜数 (8=轻量档, 16=官方默认重档)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FsrcnnxFilters {
+    #[default]
+    F16,
+    F8,
+}
+
+impl FsrcnnxFilters {
+    pub fn next(self) -> Self {
+        match self {
+            Self::F16 => Self::F8,
+            Self::F8 => Self::F16,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::F16 => "16 (默认)",
+            Self::F8 => "8 (轻量)",
+        }
+    }
+}
+
+/// RAVU 变体色彩模式 (yuv=YUV 平面直算, rgb=RGB 域, plain=亮度)。
+/// 默认 yuv: bjin 官方 README 推荐视频播放用 yuv 变体 (色度同步超分,
+/// 比 plain 亮度-only 锐利, 比 rgb 少一次域转换)。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RavuVariant {
+    #[default]
+    Yuv,
+    Rgb,
+    Plain,
+}
+
+impl RavuVariant {
+    pub fn next(self) -> Self {
+        use RavuVariant::*;
+        match self {
+            Yuv => Rgb,
+            Rgb => Plain,
+            Plain => Yuv,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Yuv => "YUV (默认)",
+            Self::Rgb => "RGB",
+            Self::Plain => "亮度",
+        }
+    }
+}
+
+/// 超分辨率算法 (详情页 `e` 循环切换, 持久化于
+/// `AppConfig::super_res.algorithm`; 着色器清单见 player::super_res_files)。
+///
+/// 12 种算法全部为 mpv 原生 GLSL hook (//!HOOK 格式, gpu-next/Vulkan 直接
+/// 加载): 动画向 CNN (Anime4K/FSRCNNX/NNEDI3/RAVU)、通用实时 SR
+/// (FSR/NIS)、自适应锐化 (CAS/AdaptiveSharpen/LumaSharpen) 与混合管线
+/// (Anime4K-Ultra)。关闭 (Off) 时零参数, 由 mpv 内建 scaler 处理。
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SuperResAlgorithm {
+    /// 不启用 (mpv 内建 spline36/lanczos 缩放)。
+    #[default]
+    Off,
+    /// Anime4K 官方 CNN (档位 A/B/C, 设置页调; 动画线稿修复)。
+    Anime4k,
+    /// NNEDI3 神经元插值 (nns 16-256, 窗口 8x4/8x6; 动漫/低清最强重
+    /// 建, 也最贵)。
+    Nnedi3,
+    /// RAVU-r2 轻量学习型超分 (动画向, 中等成本)。
+    RavuR2,
+    /// RAVU-r4 新一代 (同族质量/成本比最优)。
+    RavuR4,
+    /// RAVU-lite 最轻量档 (低消耗场景/低端 GPU)。
+    RavuLite,
+    /// FSRCNNX (igv 手调 x2 CNN, 细节重建, 8/16 滤镜可调)。
+    Fsrcnnx,
+    /// AMD FidelityFX Super Resolution 1.0 (EASU+RCAS, 通用内容)。
+    Fsr,
+    /// AMD CAS 对比度自适应锐化 (1:1/上缩锐化, 极低成本)。
+    Cas,
+    /// AdaptiveSharpen (动态裁剪锐化, 保边缘不振铃)。
+    AdaptiveSharpen,
+    /// NVIDIA Image Scaling (NIS, 通用锐化+上缩)。
+    Nis,
+    /// LumaSharpen (经典亮度锐化, 最廉价)。
+    LumaSharpen,
+    /// Anime4K-Ultra (FSR v1.0.2 + 改良 Anime4K 线细化混合管线)。
+    Anime4kUltra,
+}
+
+impl SuperResAlgorithm {
+    /// Off → 12 算法 → Off 循环。
+    pub fn next(self) -> Self {
+        use SuperResAlgorithm::*;
+        match self {
+            Off => Anime4k,
+            Anime4k => Nnedi3,
+            Nnedi3 => RavuR2,
+            RavuR2 => RavuR4,
+            RavuR4 => RavuLite,
+            RavuLite => Fsrcnnx,
+            Fsrcnnx => Fsr,
+            Fsr => Cas,
+            Cas => AdaptiveSharpen,
+            AdaptiveSharpen => Nis,
+            Nis => LumaSharpen,
+            LumaSharpen => Anime4kUltra,
+            Anime4kUltra => Off,
+        }
+    }
+
+    /// 反向循环 (设置页 ← 键)。
+    pub fn prev(self) -> Self {
+        use SuperResAlgorithm::*;
+        match self {
+            Off => Anime4kUltra,
+            Anime4k => Off,
+            Nnedi3 => Anime4k,
+            RavuR2 => Nnedi3,
+            RavuR4 => RavuR2,
+            RavuLite => RavuR4,
+            Fsrcnnx => RavuLite,
+            Fsr => Fsrcnnx,
+            Cas => Fsr,
+            AdaptiveSharpen => Cas,
+            Nis => AdaptiveSharpen,
+            LumaSharpen => Nis,
+            Anime4kUltra => LumaSharpen,
+        }
+    }
+
+    /// 状态显示用短标签。
+    pub fn label(self) -> &'static str {
+        use SuperResAlgorithm::*;
+        match self {
+            Off => "关",
+            Anime4k => "Anime4K",
+            Nnedi3 => "NNEDI3",
+            RavuR2 => "RAVU-r2",
+            RavuR4 => "RAVU-r4",
+            RavuLite => "RAVU-lite",
+            Fsrcnnx => "FSRCNNX",
+            Fsr => "FSR",
+            Cas => "CAS",
+            AdaptiveSharpen => "ASharpen",
+            Nis => "NIS",
+            LumaSharpen => "LumaS",
+            Anime4kUltra => "A4K-Ultra",
+        }
+    }
+
+    /// 每算法一句说明 (详情页状态行内联展示)。
+    pub fn desc(self) -> &'static str {
+        use SuperResAlgorithm::*;
+        match self {
+            Off => "",
+            Anime4k => "动画·线稿重建CNN",
+            Nnedi3 => "动漫·最强重建(贵)",
+            RavuR2 => "动画·轻量CNN",
+            RavuR4 => "动画·新一代CNN",
+            RavuLite => "动画·极轻量CNN",
+            Fsrcnnx => "通用·细节重建CNN",
+            Fsr => "通用·AMD实时SR",
+            Cas => "通用·自适应锐化",
+            AdaptiveSharpen => "保边·动态锐化",
+            Nis => "通用·NVIDIA锐化",
+            LumaSharpen => "轻量·亮度锐化",
+            Anime4kUltra => "混合·FSR+线细化",
+        }
+    }
+
+    /// 是否需要着色器文件 (Off 恒 false; 其余 true — 缺文件时播放静默
+    /// 降级, 见 player::super_res_shader_args)。
+    pub fn needs_shaders(self) -> bool {
+        self != Self::Off
+    }
+}
+
+#[cfg(test)]
+mod super_res_tests {
+    use super::SuperResAlgorithm as S;
+
+    #[test]
+    fn super_res_algorithm_cycles_through_all_thirteen_states() {
+        let mut cur = S::Off;
+        let mut seen = vec![cur];
+        for _ in 0..12 {
+            cur = cur.next();
+            seen.push(cur);
+        }
+        assert_eq!(cur.next(), S::Off, "12 算法后必须回到 Off");
+        let unique: std::collections::HashSet<_> = seen.iter().collect();
+        assert_eq!(unique.len(), seen.len(), "循环中出现重复状态");
+        assert_eq!(seen.len(), 13);
+        // prev 与 next 互逆。
+        for s in seen {
+            assert_eq!(s.next().prev(), s);
+            assert_eq!(s.prev().next(), s);
+        }
+    }
+
+    #[test]
+    fn super_res_labels_and_descs_are_distinct() {
+        let all = [
+            S::Off,
+            S::Anime4k,
+            S::Nnedi3,
+            S::RavuR2,
+            S::RavuR4,
+            S::RavuLite,
+            S::Fsrcnnx,
+            S::Fsr,
+            S::Cas,
+            S::AdaptiveSharpen,
+            S::Nis,
+            S::LumaSharpen,
+            S::Anime4kUltra,
+        ];
+        let labels: std::collections::HashSet<_> = all.iter().map(|s| s.label()).collect();
+        assert_eq!(labels.len(), all.len());
+        let descs: std::collections::HashSet<_> = all
+            .iter()
+            .filter(|s| **s != S::Off)
+            .map(|s| s.desc())
+            .collect();
+        assert_eq!(descs.len(), all.len() - 1);
+        assert_eq!(S::Off.desc(), "");
+        assert!(!S::Off.needs_shaders());
+        assert!(S::Anime4k.needs_shaders());
+    }
+
+    #[test]
+    fn super_res_algorithm_serde_uses_snake_case() {
+        assert_eq!(
+            serde_json::from_str::<S>("\"anime4k_ultra\"").unwrap(),
+            S::Anime4kUltra
+        );
+        assert_eq!(serde_json::from_str::<S>("\"off\"").unwrap(), S::Off);
+        assert_eq!(serde_json::to_string(&S::RavuR2).unwrap(), "\"ravu_r2\"");
+    }
+}
+
 impl Default for PlaybackOptions {
     fn default() -> Self {
         Self {

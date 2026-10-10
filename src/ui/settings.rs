@@ -11,6 +11,7 @@ pub enum SettingsSection {
     Theme,
     Danmaku,
     Playback,
+    SuperRes,
     Keybindings,
     Account,
 }
@@ -21,6 +22,7 @@ impl SettingsSection {
             SettingsSection::Theme,
             SettingsSection::Danmaku,
             SettingsSection::Playback,
+            SettingsSection::SuperRes,
             SettingsSection::Keybindings,
             SettingsSection::Account,
         ]
@@ -31,6 +33,7 @@ impl SettingsSection {
             SettingsSection::Theme => "🎨 主题",
             SettingsSection::Danmaku => "💬 弹幕",
             SettingsSection::Playback => "▶  播放",
+            SettingsSection::SuperRes => "🔍 超分",
             SettingsSection::Keybindings => "⌨️ 快捷键",
             SettingsSection::Account => "👤 账户",
         }
@@ -50,6 +53,8 @@ pub struct SettingsPage {
     pub danmaku: DanmakuConfig,
     pub auto_play: bool,
     pub video_quality: VideoQuality,
+    pub super_res: crate::storage::SuperResConfig,
+    pub selected_superres_index: usize,
     section_index: usize,
     pub editing_keybind: bool,
     editing_danmaku: bool,
@@ -64,6 +69,7 @@ impl SettingsPage {
         danmaku: DanmakuConfig,
         auto_play: bool,
         video_quality: VideoQuality,
+        super_res: crate::storage::SuperResConfig,
     ) -> Self {
         let theme_choices = Theme::available_theme_choices();
         let theme_index = theme_choices
@@ -84,6 +90,8 @@ impl SettingsPage {
             danmaku,
             auto_play,
             video_quality,
+            super_res,
+            selected_superres_index: 0,
             section_index: 0,
             editing_keybind: false,
             editing_danmaku: false,
@@ -139,6 +147,7 @@ impl Default for SettingsPage {
             DanmakuConfig::default(),
             true,
             VideoQuality::Best,
+            crate::storage::SuperResConfig::default(),
         )
     }
 }
@@ -193,6 +202,9 @@ impl Component for SettingsPage {
             SettingsSection::Danmaku => self.draw_danmaku_section(frame, content_chunks[1], theme),
             SettingsSection::Playback => {
                 self.draw_playback_section(frame, content_chunks[1], theme)
+            }
+            SettingsSection::SuperRes => {
+                self.draw_superres_section(frame, content_chunks[1], theme)
             }
             SettingsSection::Keybindings => {
                 self.draw_keybindings_section(frame, content_chunks[1], theme)
@@ -327,6 +339,11 @@ impl Component for SettingsPage {
         {
             return Some(self.adjust_playback(if keys.matches_right(key) { 1 } else { -1 }));
         }
+        if (keys.matches_left(key) || keys.matches_right(key))
+            && self.current_section == SettingsSection::SuperRes
+        {
+            return Some(self.adjust_superres(if keys.matches_right(key) { 1 } else { -1 }));
+        }
         if keys.matches_left(key) || keys.matches_right(key) {
             self.change_section(if keys.matches_right(key) { 1 } else { -1 });
             return Some(AppAction::None);
@@ -348,6 +365,9 @@ impl Component for SettingsPage {
                 }
                 SettingsSection::Playback => {
                     self.selected_playback_index = self.selected_playback_index.saturating_sub(1);
+                }
+                SettingsSection::SuperRes => {
+                    self.selected_superres_index = self.selected_superres_index.saturating_sub(1);
                 }
                 SettingsSection::Account => {}
             }
@@ -373,6 +393,10 @@ impl Component for SettingsPage {
                 }
                 SettingsSection::Playback => {
                     self.selected_playback_index = (self.selected_playback_index + 1).min(1);
+                }
+                SettingsSection::SuperRes => {
+                    let max = self.superres_rows().len().saturating_sub(1);
+                    self.selected_superres_index = (self.selected_superres_index + 1).min(max);
                 }
                 SettingsSection::Account => {}
             }
@@ -404,6 +428,9 @@ impl Component for SettingsPage {
                 SettingsSection::Playback => {
                     return Some(self.adjust_playback(1));
                 }
+                SettingsSection::SuperRes => {
+                    return Some(self.adjust_superres(1));
+                }
                 SettingsSection::Keybindings => {
                     // Enter keybind editing mode
                     self.editing_keybind = true;
@@ -424,6 +451,43 @@ impl SettingsPage {
     fn adjust_playback(&mut self, _direction: i32) -> AppAction {
         self.auto_play = !self.auto_play;
         AppAction::SaveAutoPlay(self.auto_play)
+    }
+
+    /// 超分栏目 ←/→: 按当前选中行调整对应参数, 立即持久化。
+    fn adjust_superres(&mut self, direction: i32) -> AppAction {
+        use crate::domain::playback::SuperResAlgorithm as A;
+        if direction <= 0 {
+            // 左键只在算法行循环回退, 档位行不支持回退 (可右键绕回)。
+            if self.selected_superres_index == 0 {
+                self.super_res.algorithm = self.super_res.algorithm.prev();
+            }
+            return AppAction::SaveSuperRes(Box::new(self.super_res.clone()));
+        }
+        match self.selected_superres_index {
+            0 => self.super_res.algorithm = self.super_res.algorithm.next(),
+            1 => match self.super_res.algorithm {
+                A::Anime4k => self.super_res.anime4k_level = self.super_res.anime4k_level.next(),
+                A::Nnedi3 => self.super_res.nnedi3_nns = self.super_res.nnedi3_nns.next(),
+                A::RavuR2 | A::RavuR4 | A::RavuLite => {
+                    self.super_res.ravu_variant = self.super_res.ravu_variant.next()
+                }
+                A::Fsrcnnx => {
+                    self.super_res.fsrcnnx_filters = self.super_res.fsrcnnx_filters.next()
+                }
+                A::Fsr | A::Cas | A::AdaptiveSharpen | A::Nis | A::LumaSharpen => {
+                    self.super_res.sharpen_strength += 10;
+                    if self.super_res.sharpen_strength > 100 {
+                        self.super_res.sharpen_strength = 10;
+                    }
+                }
+                _ => {}
+            },
+            2 if self.super_res.algorithm == A::Nnedi3 => {
+                self.super_res.nnedi3_window = self.super_res.nnedi3_window.next()
+            }
+            _ => {}
+        }
+        AppAction::SaveSuperRes(Box::new(self.super_res.clone()))
     }
 
     fn change_section(&mut self, direction: i32) {
@@ -649,6 +713,103 @@ impl SettingsPage {
             Paragraph::new("  按 ←/→ 或 Enter 更改并立即保存")
                 .style(Style::default().fg(theme.fg_secondary)),
             chunks[1],
+        );
+    }
+
+    /// 超分栏目行集: 当前算法 + 该算法的可调档位 (行数随算法变化)。
+    fn superres_rows(&self) -> Vec<String> {
+        use crate::domain::playback::SuperResAlgorithm as A;
+        let sr = &self.super_res;
+        let mut rows = vec![format!("算法：{}", sr.algorithm.label())];
+        match sr.algorithm {
+            A::Off => {}
+            A::Anime4k => rows.push(format!("档位：{}", sr.anime4k_level.label())),
+            A::Nnedi3 => {
+                rows.push(format!("神经元：{}", sr.nnedi3_nns.label()));
+                rows.push(format!("窗口：{}", sr.nnedi3_window.label()));
+            }
+            A::RavuR2 | A::RavuR4 | A::RavuLite => {
+                rows.push(format!("变体：{}", sr.ravu_variant.label()))
+            }
+            A::Fsrcnnx => rows.push(format!("滤镜数：{}", sr.fsrcnnx_filters.label())),
+            A::Fsr | A::Cas | A::AdaptiveSharpen | A::Nis | A::LumaSharpen => {
+                rows.push(format!("锐化强度：{}", sr.sharpen_strength))
+            }
+            A::Anime4kUltra => {}
+        }
+        rows
+    }
+
+    fn draw_superres_section(&self, frame: &mut Frame, area: Rect, theme: &Theme) {
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(theme.border_subtle))
+            .title(Span::styled(
+                " 🔍 超分设置 ",
+                Style::default()
+                    .fg(theme.bilibili_pink)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let rows = self.superres_rows();
+        let chunks = Layout::vertical([
+            Constraint::Length(rows.len() as u16),
+            Constraint::Length(2),
+            Constraint::Min(0),
+        ])
+        .split(inner);
+
+        let items = rows.iter().enumerate().map(|(index, row)| {
+            let selected = index == self.selected_superres_index;
+            ListItem::new(format!("{}{}", if selected { "▶ " } else { "  " }, row)).style(
+                if selected {
+                    Style::default()
+                        .fg(theme.fg_primary)
+                        .bg(theme.selection_bg)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme.fg_secondary)
+                },
+            )
+        });
+        frame.render_widget(List::new(items), chunks[0]);
+
+        let desc = self.super_res.algorithm.desc();
+        let mut help = vec![Line::from("  ←/→ 调整 · 详情页 [e] 同步切换算法")];
+        if !desc.is_empty() {
+            help.push(Line::from(Span::styled(
+                format!("  {} — {}", self.super_res.algorithm.label(), desc),
+                Style::default().fg(theme.fg_secondary),
+            )));
+        }
+        frame.render_widget(
+            Paragraph::new(help).style(Style::default().fg(theme.fg_secondary)),
+            chunks[1],
+        );
+
+        // 各算法一句话说明 (空间不足时自然裁剪)。
+        let notes: Vec<Line> = [
+            ("Anime4K", "动画线稿重建; 档位A=1080p/B=720p/C=480p"),
+            ("NNEDI3", "神经元插值, 低清/动漫重建最强也最贵; nns越大越强"),
+            ("RAVU", "轻量学习型超分, 动画向; r4 新一代, lite 最省"),
+            ("FSRCNNX", "igv 手调 x2 CNN, 细节重建均衡; 16 滤镜默认"),
+            ("FSR/NIS", "AMD/NVIDIA 通用实时超分, 各带自适应锐化, 成本低"),
+            (
+                "CAS/ASharp/LumaS",
+                "自适应锐化 (非超分), 1:1 或配合内建缩放, 极省",
+            ),
+            ("A4K-Ultra", "FSR+Anime4K 线细化混合, 兼顾纹理与线条"),
+            ("通用", "源大于输出时全部自动跳过 (下缩走 mpv 高质量缩放)"),
+        ]
+        .iter()
+        .map(|(k, v)| Line::from(format!("  {k}: {v}")))
+        .collect();
+        frame.render_widget(
+            Paragraph::new(notes).style(Style::default().fg(theme.fg_secondary)),
+            chunks[2],
         );
     }
 
@@ -908,5 +1069,86 @@ mod tests {
 
         let action = page.handle_input(KeyCode::Enter, &keys);
         assert!(matches!(action, Some(AppAction::SaveAutoPlay(false))));
+    }
+
+    #[test]
+    fn superres_section_is_in_section_list() {
+        assert!(SettingsSection::all().contains(&SettingsSection::SuperRes));
+        assert_eq!(SettingsSection::SuperRes.label(), "🔍 超分");
+    }
+
+    #[test]
+    fn superres_algorithm_row_cycles_and_persists() {
+        use crate::domain::playback::SuperResAlgorithm as A;
+        let keys = Keybindings::default();
+        let mut page = SettingsPage {
+            current_section: SettingsSection::SuperRes,
+            selected_superres_index: 0,
+            ..SettingsPage::default()
+        };
+        assert_eq!(page.super_res.algorithm, A::Off);
+        // → 算法行右键: Off → Anime4k。
+        match page.handle_input(KeyCode::Right, &keys) {
+            Some(AppAction::SaveSuperRes(sr)) => assert_eq!(sr.algorithm, A::Anime4k),
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert_eq!(page.super_res.algorithm, A::Anime4k);
+        // 左键反向回 Off。
+        match page.handle_input(KeyCode::Left, &keys) {
+            Some(AppAction::SaveSuperRes(sr)) => assert_eq!(sr.algorithm, A::Off),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn superres_param_rows_depend_on_algorithm() {
+        use crate::domain::playback::{
+            Anime4kLevel, Nnedi3Nns, Nnedi3Window, SuperResAlgorithm as A,
+        };
+        let mut page = SettingsPage {
+            current_section: SettingsSection::SuperRes,
+            ..SettingsPage::default()
+        };
+        // Off: 只有算法行。
+        assert_eq!(page.superres_rows().len(), 1);
+        // NNEDI3: 三行 (算法/神经元/窗口)。
+        page.super_res.algorithm = A::Nnedi3;
+        assert_eq!(page.superres_rows().len(), 3);
+        // 第2行右键调窗口, 第1行调神经元。
+        page.selected_superres_index = 2;
+        let keys = Keybindings::default();
+        match page.handle_input(KeyCode::Right, &keys) {
+            Some(AppAction::SaveSuperRes(sr)) => {
+                assert_eq!(sr.nnedi3_window, Nnedi3Window::Win8x6)
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        page.selected_superres_index = 1;
+        match page.handle_input(KeyCode::Right, &keys) {
+            Some(AppAction::SaveSuperRes(sr)) => assert_eq!(sr.nnedi3_nns, Nnedi3Nns::N128),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // Anime4K: 两行 (算法/档位), 档位可循环。
+        page.super_res.algorithm = A::Anime4k;
+        assert_eq!(page.superres_rows().len(), 2);
+        page.selected_superres_index = 1;
+        match page.handle_input(KeyCode::Right, &keys) {
+            Some(AppAction::SaveSuperRes(sr)) => {
+                assert_eq!(sr.anime4k_level, Anime4kLevel::B)
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        // 锐化强度: CAS 行循环 10..100 步进10。
+        page.super_res.algorithm = A::Cas;
+        page.selected_superres_index = 1;
+        match page.handle_input(KeyCode::Right, &keys) {
+            Some(AppAction::SaveSuperRes(sr)) => assert_eq!(sr.sharpen_strength, 60),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // ↓ 键不越界。
+        for _ in 0..5 {
+            page.handle_input(KeyCode::Down, &keys);
+        }
+        assert!(page.selected_superres_index <= 1);
     }
 }

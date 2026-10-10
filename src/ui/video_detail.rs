@@ -61,7 +61,8 @@ pub struct VideoDetailPage {
     /// 持久化。初始化时从配置读取, 播放参数由 play_video 取同源配置。
     pub interpolation_mode: crate::domain::playback::InterpolationMode,
     /// Anime4K 增强 (关/A/B/C); `e` 循环切换并经 SetAnime4kMode 持久化。
-    pub anime4k_mode: crate::domain::playback::Anime4kMode,
+    /// 超分选择 (12 算法+关); `e` 循环切换并经 SaveSuperRes 持久化。
+    pub super_res: crate::storage::SuperResConfig,
     /// Playback quality / HDR / Hi-Res selection for the next play action.
     pub playback: PlaybackOptions,
     /// Whether the current video has an HDR stream. None = unknown / probe failed.
@@ -139,8 +140,11 @@ impl VideoDetailPage {
             interpolation_mode: crate::storage::load_config()
                 .map(|config| config.interpolation_mode)
                 .unwrap_or_default(),
-            anime4k_mode: crate::storage::load_config()
-                .map(|config| config.anime4k_mode)
+            super_res: crate::storage::load_config()
+                .map(|mut config| {
+                    crate::storage::migrate_legacy_fields(&mut config);
+                    config.super_res
+                })
                 .unwrap_or_default(),
             playback: PlaybackOptions::default(),
             hdr_supported: None,
@@ -756,16 +760,16 @@ impl VideoDetailPage {
             Span::styled("[i]", Style::default().fg(theme.fg_secondary)),
         ]));
         let mut a4k_spans = vec![
-            Span::styled("Anime4K:", Style::default().fg(theme.fg_primary)),
+            Span::styled("超分:", Style::default().fg(theme.fg_primary)),
             Span::styled(
-                format!(" {} ", self.anime4k_mode.label()),
+                format!(" {} ", self.super_res.algorithm.label()),
                 Style::default()
                     .fg(theme.bilibili_pink)
                     .add_modifier(Modifier::BOLD),
             ),
         ];
         // 模式说明内联展示 (Off 无说明); 行宽受块宽 ~60 列约束。
-        if self.anime4k_mode != crate::domain::playback::Anime4kMode::Off {
+        if self.super_res.algorithm.needs_shaders() {
             // 4K/8K 画质 (qn 120/127) 在 ≤4K 屏必然是下缩 (2560 屏 4K →
             // 0.667×): 修复卷积在源分辨率白跑, 实测 +41pp GPU 且质量
             // −4.7dB — mpv 侧 guard_downscale 的 WHEN 守卫会自动跳过,
@@ -778,7 +782,7 @@ impl VideoDetailPage {
                 ));
             } else {
                 a4k_spans.push(Span::styled(
-                    format!("{} ", self.anime4k_mode.desc()),
+                    format!("{} ", self.super_res.algorithm.desc()),
                     Style::default().fg(theme.fg_secondary),
                 ));
             }
@@ -1573,10 +1577,10 @@ impl Component for VideoDetailPage {
             self.interpolation_mode = self.interpolation_mode.next();
             return Some(AppAction::SetInterpolationMode(self.interpolation_mode));
         }
-        // Anime4K: 关→A→B→C→关 并持久化 (与画质键 m 同组)。
+        // 超分: 关→12 算法→关 循环并持久化 (与画质键 m 同组)。
         if key == KeyCode::Char('e') {
-            self.anime4k_mode = self.anime4k_mode.next();
-            return Some(AppAction::SetAnime4kMode(self.anime4k_mode));
+            self.super_res.algorithm = self.super_res.algorithm.next();
+            return Some(AppAction::SaveSuperRes(Box::new(self.super_res.clone())));
         }
         // 三连：点赞 / 投币 / 收藏
         if key == KeyCode::Char('a') {
@@ -1916,7 +1920,7 @@ mod detail_tests {
         use ratatui::backend::TestBackend;
         let mut page = VideoDetailPage::new("BV1xx411c7mD".into(), 0);
         page.interpolation_mode = crate::domain::playback::InterpolationMode::SmoothMotion;
-        page.anime4k_mode = crate::domain::playback::Anime4kMode::A;
+        page.super_res.algorithm = crate::domain::playback::SuperResAlgorithm::Anime4k;
         let theme = Theme::default();
         let mut terminal = Terminal::new(TestBackend::new(70, 12)).unwrap();
         terminal
@@ -1937,12 +1941,12 @@ mod detail_tests {
             if row.contains("补帧:") {
                 interp_row = Some(y);
             }
-            if row.contains("Anime4K:") {
+            if row.contains("超分:") {
                 a4k_row = Some(y);
             }
         }
         let interp_row = interp_row.expect("补帧 状态行未渲染");
-        let a4k_row = a4k_row.expect("Anime4K 状态行未渲染");
+        let a4k_row = a4k_row.expect("超分 状态行未渲染");
         assert_ne!(interp_row, a4k_row, "补帧与 Anime4K 必须分属不同行");
     }
 
@@ -1955,7 +1959,7 @@ mod detail_tests {
         let theme = Theme::default();
         let render_row = |quality: i64| -> String {
             let mut page = VideoDetailPage::new("BV1xx411c7mD".into(), 0);
-            page.anime4k_mode = crate::domain::playback::Anime4kMode::A;
+            page.super_res.algorithm = crate::domain::playback::SuperResAlgorithm::Anime4k;
             page.playback.quality = quality;
             let mut terminal = Terminal::new(TestBackend::new(70, 12)).unwrap();
             terminal
@@ -1972,8 +1976,8 @@ mod detail_tests {
                         .collect::<String>()
                         .replace(' ', "")
                 })
-                .find(|row| row.contains("Anime4K:"))
-                .expect("Anime4K 状态行未渲染")
+                .find(|row| row.contains("超分:"))
+                .expect("超分 状态行未渲染")
         };
         for qn in [120, 127] {
             let row = render_row(qn);
@@ -1990,7 +1994,7 @@ mod detail_tests {
         );
         // Off 模式不提示 (没开就无所谓建议)。
         let mut off = VideoDetailPage::new("BV1xx411c7mD".into(), 0);
-        off.anime4k_mode = crate::domain::playback::Anime4kMode::Off;
+        off.super_res.algorithm = crate::domain::playback::SuperResAlgorithm::Off;
         off.playback.quality = 120;
         let mut terminal = Terminal::new(TestBackend::new(70, 12)).unwrap();
         terminal
@@ -2016,7 +2020,7 @@ mod detail_tests {
         use ratatui::backend::TestBackend;
         let mut page = VideoDetailPage::new("BV1xx411c7mD".into(), 0);
         page.interpolation_mode = crate::domain::playback::InterpolationMode::SmoothMotion;
-        page.anime4k_mode = crate::domain::playback::Anime4kMode::A;
+        page.super_res.algorithm = crate::domain::playback::SuperResAlgorithm::Anime4k;
         let theme = Theme::default();
         let mut terminal = Terminal::new(TestBackend::new(70, 12)).unwrap();
         terminal
@@ -2040,22 +2044,25 @@ mod detail_tests {
     }
 
     #[test]
-    fn e_key_cycles_anime4k_mode() {
+    fn e_key_cycles_super_res_algorithm() {
         let mut page = VideoDetailPage::new("BV1xx411c7mD".into(), 0);
         let keys = crate::storage::Keybindings::default();
-        let start = page.anime4k_mode;
-        // 关→A→B→C→关 四次回环, 每步触发持久化动作。
-        for expected in [
-            start.next(),
-            start.next().next(),
-            start.next().next().next(),
-            start,
-        ] {
+        // 不依赖磁盘配置 (真实 config 可能有任何值)。
+        page.super_res = crate::storage::SuperResConfig::default();
+        let start = page.super_res.algorithm;
+        assert_eq!(start, crate::domain::playback::SuperResAlgorithm::Off);
+        // 关→12 算法→关 十三次回环, 每步触发持久化动作。
+        let mut cur = start;
+        for _ in 0..13 {
+            cur = cur.next();
             match page.handle_input(KeyCode::Char('e'), &keys) {
-                Some(AppAction::SetAnime4kMode(m)) => assert_eq!(m, expected),
+                Some(AppAction::SaveSuperRes(sr)) => {
+                    assert_eq!(sr.algorithm, cur)
+                }
                 other => panic!("unexpected action: {other:?}"),
             }
-            assert_eq!(page.anime4k_mode, expected);
+            assert_eq!(page.super_res.algorithm, cur);
         }
+        assert_eq!(page.super_res.algorithm, start, "13 次后必须回到关");
     }
 }

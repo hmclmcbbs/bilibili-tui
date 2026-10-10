@@ -517,6 +517,27 @@ impl App {
                 self.config.anime4k_mode = mode;
                 let _ = persistence::save_config(&self.config);
             }
+            AppAction::SaveSuperRes(super_res) => {
+                self.config.super_res = *super_res;
+                // 旧字段双向同步: 非 Anime4K 算法时记 Off, 让旧版本二进制
+                // 读到的配置也是正确语义。
+                self.config.anime4k_mode = if self.config.super_res.algorithm
+                    == crate::domain::playback::SuperResAlgorithm::Anime4k
+                {
+                    match self.config.super_res.anime4k_level {
+                        crate::domain::playback::Anime4kLevel::B => {
+                            crate::domain::playback::Anime4kMode::B
+                        }
+                        crate::domain::playback::Anime4kLevel::C => {
+                            crate::domain::playback::Anime4kMode::C
+                        }
+                        _ => crate::domain::playback::Anime4kMode::A,
+                    }
+                } else {
+                    crate::domain::playback::Anime4kMode::Off
+                };
+                let _ = persistence::save_config(&self.config);
+            }
             AppAction::PlayPlaylist {
                 items,
                 source,
@@ -1309,6 +1330,7 @@ impl App {
                     self.config.danmaku.clone(),
                     self.config.auto_play,
                     self.config.video_quality,
+                    self.config.super_res.clone(),
                 );
                 self.current_page = Page::Settings(Box::new(page));
             }
@@ -2361,6 +2383,7 @@ impl App {
                         self.config.danmaku.clone(),
                         self.config.auto_play,
                         self.config.video_quality,
+                        self.config.super_res.clone(),
                     )));
                 }
             }
@@ -2388,6 +2411,7 @@ impl App {
                         self.config.danmaku.clone(),
                         self.config.auto_play,
                         self.config.video_quality,
+                        self.config.super_res.clone(),
                     );
                     self.current_page = Page::Settings(Box::new(page));
                 }
