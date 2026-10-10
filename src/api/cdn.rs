@@ -603,6 +603,22 @@ fn pick_video<'a>(
             options.prefer_hdr || quality_requests_hdr_family || stream.id < HDR_STREAM_MIN_ID
         })
         .collect();
+    if options.prefer_hdr {
+        // HDR 开启时 HDR 家族流优先于普通画质上限: B 站 playurl 在任何
+        // qn 下都会下发 HDR 流 (实测 qn=80 仍返回 id=125), 旧逻辑让
+        // quality cap (id <= quality) 把 125 掐掉再"静默回退 SDR" —
+        // 状态行 HDR:开、实际播的却是 SDR 流 (用户报告的"开启 hdr 后
+        // mpv 没有显示 hdr 内容")。开 HDR 的意图就是拿最高动态范围
+        // 画质, 普通画质上限只约束非 HDR 候选。
+        if let Some(hdr_best) = candidates
+            .iter()
+            .filter(|stream| stream.id >= HDR_STREAM_MIN_ID)
+            .max_by_key(|stream| (stream.id, stream.bandwidth))
+        {
+            return Some(hdr_best);
+        }
+        // 无 HDR 流可用 → 落回普通流按画质上限选择。
+    }
     if options.quality > 0 {
         candidates.retain(|stream| stream.id <= options.quality);
     }
@@ -878,6 +894,48 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(pick_video(&streams, hdr).unwrap().id, 125);
+    }
+
+    #[test]
+    fn pick_video_hdr_beats_quality_cap() {
+        // 回归: HDR 开启 + 显式画质 (quality>0) 时 quality cap 曾把 id=125
+        // 掐掉并静默回退 SDR — 实测 B 站 playurl 在 qn=80 也下发 HDR 流,
+        // 开 HDR 的意图就是拿 HDR, 普通画质上限只约束非 HDR 候选。
+        use crate::domain::playback::PlaybackOptions;
+        let mk = |id: i64, bandwidth: i64| DashStream {
+            id,
+            bandwidth,
+            codecid: 12,
+            base_url: Some(format!("https://a/{id}")),
+            base_url_camel: None,
+            backup_url: None,
+            backup_url_camel: None,
+        };
+        let streams = vec![mk(125, 9_000_000), mk(120, 10_000_000), mk(80, 5_000_000)];
+        // 1080P 上限 + HDR 开 → 仍选 HDR 流。
+        let hdr_1080p = PlaybackOptions {
+            quality: 80,
+            prefer_hdr: true,
+            ..Default::default()
+        };
+        assert_eq!(pick_video(&streams, hdr_1080p).unwrap().id, 125);
+        // 低画质显式选择 + HDR 开 → HDR 优先 (开 HDR 即取最高动态范围)。
+        let hdr_720p = PlaybackOptions {
+            quality: 64,
+            prefer_hdr: true,
+            ..Default::default()
+        };
+        assert_eq!(pick_video(&streams, hdr_720p).unwrap().id, 125);
+        // HDR 关 + 画质上限 → 上限照常生效。
+        let sdr = PlaybackOptions {
+            quality: 80,
+            prefer_hdr: false,
+            ..Default::default()
+        };
+        assert_eq!(pick_video(&streams, sdr).unwrap().id, 80);
+        // HDR 开但视频无 HDR 流 → 按画质上限落回普通流。
+        let no_hdr = vec![mk(120, 10_000_000), mk(80, 5_000_000)];
+        assert_eq!(pick_video(&no_hdr, hdr_1080p).unwrap().id, 80);
     }
 
     #[test]

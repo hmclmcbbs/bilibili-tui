@@ -385,6 +385,21 @@ Wayland commit 计数 + IPC 属性）：
   建议开启"**（mpv 侧守卫已自动跳过，别再手动开）；HDR(125)/杜比(126)
   分辨率不定不判断，跟随画质无数据不提示（守卫仍生效）。
 
+  **HDR（第6轮，"开启 hdr 后 mpv 没有显示 hdr 内容"的两层根因）**：
+  ① 选流 bug（已修 `pick_video`）：实测 B 站 playurl 在任何 qn 下都下发
+  HDR 流（qn=80 仍返回 id=125, 3840×2160 PQ），但旧逻辑让 quality cap
+  (id ≤ quality) 把 125 掐掉再"静默回退 SDR" — 状态行 HDR:开、实际播
+  SDR。现在 HDR 开启时 HDR 家族流优先于普通画质上限（普通上限只约束非
+  HDR 候选；无 HDR 流才按上限落回）。
+  ② 显示链路（环境限制，无法在应用层修）：niri (v26.04) 未实现
+  `wp_color_manager_v1`（mpv 实测日志 "Compositor doesn't support"），
+  mpv 无法 HDR 直通输出，只能 tone-map 到 SDR — 修完 ① 后 mpv 拿到真
+  HDR(PQ/BT.2020) 流并 tone-map 呈现（这是合成器支持 HDR 前的上限）。
+  tone-map 成本实测仅 +1pp GPU（23→24%，auto=spline + hdr-compute-peak
+  auto 为 libplacebo 工程化默认，无需覆盖）。**Anime4K × HDR**：B 站
+  HDR 流全是 4K，在 2560 屏上恒为下缩 → 已有下缩守卫自动跳过整条链
+  （真流实测 off vs L链像素差 0.1% = 守卫生效），CNN 不会在 PQ 域运行。
+
   **60fps 决策（用户选定保留修复）**：1080p60 全屏 + Anime4K 实测
   GPU 70%（关 42%），成本 ×2.5 但用户要保留修复效果。附带澄清：
   SM 模式下 `frame-drop-count≈450` 是 NVPRESENT 接管呈现后的计数失真
