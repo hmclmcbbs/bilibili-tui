@@ -57,7 +57,8 @@ pub struct VideoDetailPage {
     pub auto_play_pending: bool,
     /// 自动连播链打开的页面: 无视 auto_play=false 强制续播 (消费即清)。
     pub chain_play: bool,
-    /// 补帧模式 (关/混合); `i` 循环切换并经 SetInterpolationMode
+    /// 补帧方法 (关/混合/5 时间核/Smooth Motion 共 8 态); `i` 循环切换
+    /// 并经 SetInterpolationMode
     /// 持久化。初始化时从配置读取, 播放参数由 play_video 取同源配置。
     pub interpolation_mode: crate::domain::playback::InterpolationMode,
     /// Anime4K 增强 (关/A/B/C); `e` 循环切换并经 SetAnime4kMode 持久化。
@@ -1571,7 +1572,7 @@ impl Component for VideoDetailPage {
             self.playback.prefer_hires = !self.playback.prefer_hires;
             return Some(AppAction::None);
         }
-        // 补帧: 循环 关→混合→Smooth Motion→关 并持久化。
+        // 补帧: 8 态循环 关→混合→5 时间核→Smooth Motion→关 并持久化。
         // 下次播放 (play_video/play_playlist) 从配置读取并传给 mpv。
         if key == KeyCode::Char('i') {
             self.interpolation_mode = self.interpolation_mode.next();
@@ -1897,19 +1898,73 @@ mod detail_tests {
         use crate::domain::playback::InterpolationMode as Mode;
         let mut page = VideoDetailPage::new("BV1xx411c7mD".into(), 0);
         let keys = crate::storage::Keybindings::default();
-        let start = page.interpolation_mode;
-        // 按三次 i 回到起点 (关→混合→Smooth Motion→关)。
-        for expected in [start.next(), start.next().next(), start] {
+        // 自封闭: 不依赖磁盘配置的起始态 (磁盘可能停在任意态)。
+        page.interpolation_mode = Mode::Off;
+        // 8 态一圈: 关→混合→sinc→lanczos→gaussian→catmullrom→oversample
+        // →Smooth Motion→关。
+        let mut expected = Mode::Off;
+        for step in 1..=8 {
+            expected = expected.next();
             // AppAction 只派生了 Debug, 用模式匹配断言变体与载荷。
             match page.handle_input(KeyCode::Char('i'), &keys) {
-                Some(AppAction::SetInterpolationMode(m)) => assert_eq!(m, expected),
-                other => panic!("unexpected action: {other:?}"),
+                Some(AppAction::SetInterpolationMode(m)) => assert_eq!(m, expected, "step {step}"),
+                other => panic!("unexpected action at step {step}: {other:?}"),
             }
-            assert_eq!(page.interpolation_mode, expected);
+            assert_eq!(page.interpolation_mode, expected, "step {step}");
         }
+        assert_eq!(page.interpolation_mode, Mode::Off, "8 步回到起点");
+        // 关键序与 prev 互逆 (设置页 ← 回退)。
         assert_eq!(Mode::Off.next(), Mode::Blend);
-        assert_eq!(Mode::Blend.next(), Mode::SmoothMotion);
+        assert_eq!(Mode::Blend.next(), Mode::Sinc);
+        assert_eq!(Mode::Oversample.next(), Mode::SmoothMotion);
         assert_eq!(Mode::SmoothMotion.next(), Mode::Off);
+        let mut roundtrip = Mode::Off;
+        for _ in 0..8 {
+            roundtrip = roundtrip.next().prev();
+        }
+        assert_eq!(roundtrip, Mode::Off, "next/prev 互逆");
+        // 5 种新方法的固定核齐全。
+        for (m, k) in [
+            (Mode::Sinc, "sinc"),
+            (Mode::Lanczos, "lanczos"),
+            (Mode::Gaussian, "gaussian"),
+            (Mode::CatmullRom, "catmull_rom"),
+            (Mode::Oversample, "oversample"),
+        ] {
+            assert_eq!(m.tscale(), Some(k));
+        }
+        assert_eq!(Mode::Blend.tscale(), None);
+        assert_eq!(Mode::Off.tscale(), None);
+        // 标签互异且覆盖 8 态 (状态行可分辨)。
+        let labels: std::collections::HashSet<_> = [
+            Mode::Off,
+            Mode::Blend,
+            Mode::Sinc,
+            Mode::Lanczos,
+            Mode::Gaussian,
+            Mode::CatmullRom,
+            Mode::Oversample,
+            Mode::SmoothMotion,
+        ]
+        .iter()
+        .map(|m| m.label())
+        .collect();
+        assert_eq!(labels.len(), 8, "8 态标签互异");
+        // 旧配置值 (snake_case) 全部可反序列化。
+        for v in [
+            "off",
+            "blend",
+            "sinc",
+            "lanczos",
+            "gaussian",
+            "catmull_rom",
+            "oversample",
+            "smooth_motion",
+        ] {
+            let parsed: Mode =
+                serde_json::from_str(&format!("\"{v}\"")).unwrap_or_else(|e| panic!("{v}: {e}"));
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), format!("\"{v}\""));
+        }
     }
 
     #[test]

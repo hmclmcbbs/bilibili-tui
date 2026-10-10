@@ -611,8 +611,10 @@ pub struct AppConfig {
     /// 兼容保留, 不再读取。
     #[serde(default)]
     pub super_res: SuperResConfig,
-    /// 插值用的时间缩放器 (mpv --tscale)。UI 不暴露; 手改配置可选
-    /// oversample (默认, 无伪影) / linear / mitchell 等。
+    /// 插值用的时间缩放器 (mpv --tscale), 仅混合模式 (Blend) 读取 —
+    /// 5 种固定核方法由枚举决定。UI 不暴露; 手改配置可选白名单内的
+    /// mitchell (默认) / linear / sinc 等 29 词 (表外词 mpv 拒绝启动,
+    /// player 侧白名单回落 mitchell)。
     #[serde(default = "default_interpolation_tscale")]
     pub interpolation_tscale: String,
     /// mpv video output override. Empty/unset means mpv's default (external
@@ -755,9 +757,12 @@ fn default_sixteen() -> u64 {
 }
 
 fn default_interpolation_tscale() -> String {
-    // oversample = mpv 社区推荐的无伪影默认 (时间加权平均, 不产生
-    // linear 那种快速运动拖影); 追求更"平滑"观感可改 "linear"/"mitchell"。
-    "oversample".to_string()
+    // mitchell (第8轮修正): 此前默认 oversample 与文档/回落逻辑矛盾 —
+    // player 侧只在空串时回落 mitchell, serde 却总是填 "oversample",
+    // 于是 README 宣称的"默认 mitchell"从不生效, 混合模式拿到 oversample
+    // (= 只走呈现节奏不做内容补帧, 形同关闭)。oversample 现为 5 种固定
+    // 核之一 (Oversample 变体), 想要它直接切到该方法即可。
+    "mitchell".to_string()
 }
 
 fn default_one() -> f64 {
@@ -959,6 +964,32 @@ pub fn clear_search_history() {
 #[cfg(test)]
 mod config_tests {
     use super::*;
+
+    #[test]
+    fn interpolation_tscale_default_is_mitchell() {
+        // serde 默认必须与 player 回落值一致: 否则 README 宣称的
+        // "默认 mitchell" 从不生效 (oversample 让混合模式形同关闭)。
+        // 缺省字段的反序列化路径 = serde(default) 走 default_interpolation_tscale。
+        let minimal = serde_json::json!({
+            "theme": "x",
+            "keybindings": serde_json::to_value(Keybindings::default()).unwrap(),
+        });
+        let cfg: AppConfig = serde_json::from_value(minimal.clone()).expect("最小配置可反序列化");
+        assert_eq!(cfg.interpolation_tscale, "mitchell");
+        assert_eq!(AppConfig::default().interpolation_tscale, "mitchell");
+        // 手改值原样保留 (白名单由 player 侧校验)。
+        let mut overridden = minimal;
+        overridden["interpolation_tscale"] = serde_json::json!("robidouxsharp");
+        let cfg: AppConfig = serde_json::from_value(overridden).unwrap();
+        assert_eq!(cfg.interpolation_tscale, "robidouxsharp");
+        // 8 态补帧方法从默认 Off 走满一圈回起点。
+        use crate::domain::playback::InterpolationMode as M;
+        let mut m = M::Off;
+        for _ in 0..8 {
+            m = m.next();
+        }
+        assert_eq!(m, M::Off);
+    }
 
     #[test]
     fn legacy_config_receives_default_danmaku_settings() {

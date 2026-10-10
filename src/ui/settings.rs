@@ -52,6 +52,9 @@ pub struct SettingsPage {
     pub is_logged_in: bool,
     pub danmaku: DanmakuConfig,
     pub auto_play: bool,
+    /// 补帧方法 (播放栏目第 1 行, ←/→ 循环 8 态并经 SetInterpolationMode
+    /// 持久化) — 与详情页 `i` 键同一配置字段。
+    pub interpolation_mode: crate::domain::playback::InterpolationMode,
     pub video_quality: VideoQuality,
     pub super_res: crate::storage::SuperResConfig,
     pub selected_superres_index: usize,
@@ -68,6 +71,7 @@ impl SettingsPage {
         is_logged_in: bool,
         danmaku: DanmakuConfig,
         auto_play: bool,
+        interpolation_mode: crate::domain::playback::InterpolationMode,
         video_quality: VideoQuality,
         super_res: crate::storage::SuperResConfig,
     ) -> Self {
@@ -89,6 +93,7 @@ impl SettingsPage {
             is_logged_in,
             danmaku,
             auto_play,
+            interpolation_mode,
             video_quality,
             super_res,
             selected_superres_index: 0,
@@ -146,6 +151,7 @@ impl Default for SettingsPage {
             false,
             DanmakuConfig::default(),
             true,
+            crate::domain::playback::InterpolationMode::default(),
             VideoQuality::Best,
             crate::storage::SuperResConfig::default(),
         )
@@ -448,9 +454,23 @@ impl Component for SettingsPage {
 impl SettingsPage {
     const DANMAKU_ROWS: usize = 9;
 
-    fn adjust_playback(&mut self, _direction: i32) -> AppAction {
-        self.auto_play = !self.auto_play;
-        AppAction::SaveAutoPlay(self.auto_play)
+    /// 播放栏目 ←/→: 行 0 切自动播放, 行 1 循环补帧方法 (8 态, ← 用
+    /// prev 回退), 立即持久化。
+    fn adjust_playback(&mut self, direction: i32) -> AppAction {
+        match self.selected_playback_index {
+            0 => {
+                self.auto_play = !self.auto_play;
+                AppAction::SaveAutoPlay(self.auto_play)
+            }
+            _ => {
+                if direction < 0 {
+                    self.interpolation_mode = self.interpolation_mode.prev();
+                } else {
+                    self.interpolation_mode = self.interpolation_mode.next();
+                }
+                AppAction::SetInterpolationMode(self.interpolation_mode)
+            }
+        }
     }
 
     /// 超分栏目 ←/→: 按当前选中行调整对应参数, 立即持久化。
@@ -683,10 +703,13 @@ impl SettingsPage {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        let rows = [format!(
-            "进入视频自动播放：{}",
-            if self.auto_play { "开启" } else { "关闭" }
-        )];
+        let rows = [
+            format!(
+                "进入视频自动播放：{}",
+                if self.auto_play { "开启" } else { "关闭" }
+            ),
+            format!("补帧方法：{}", self.interpolation_mode.label()),
+        ];
 
         let chunks = Layout::vertical([
             Constraint::Length(2),
@@ -1076,6 +1099,87 @@ mod tests {
 
         let action = page.handle_input(KeyCode::Enter, &keys);
         assert!(matches!(action, Some(AppAction::SaveAutoPlay(false))));
+    }
+
+    #[test]
+    fn playback_row_cycles_interpolation_method() {
+        use crate::domain::playback::InterpolationMode as Mode;
+        let keys = Keybindings::default();
+        let mut page = SettingsPage {
+            current_section: SettingsSection::Playback,
+            section_index: 2,
+            selected_playback_index: 1,
+            interpolation_mode: Mode::Off,
+            ..SettingsPage::default()
+        };
+        // 行 1 右键 → 下一方法, 动作带载荷并立即持久化。
+        match page.handle_input(KeyCode::Right, &keys) {
+            Some(AppAction::SetInterpolationMode(m)) => assert_eq!(m, Mode::Blend),
+            other => panic!("unexpected action: {other:?}"),
+        }
+        assert_eq!(page.interpolation_mode, Mode::Blend);
+        // 左键 → prev 回退。
+        match page.handle_input(KeyCode::Left, &keys) {
+            Some(AppAction::SetInterpolationMode(m)) => assert_eq!(m, Mode::Off),
+            other => panic!("unexpected action: {other:?}"),
+        }
+        // 行 1 走满 8 圈回到起点 (与详情页 i 键同配置同序)。
+        let mut mode = page.interpolation_mode;
+        for step in 1..=8 {
+            mode = mode.next();
+            match page.handle_input(KeyCode::Right, &keys) {
+                Some(AppAction::SetInterpolationMode(m)) => assert_eq!(m, mode, "step {step}"),
+                other => panic!("unexpected action at {step}: {other:?}"),
+            }
+        }
+        assert_eq!(page.interpolation_mode, Mode::Off, "8 步回起点");
+        // 行 0 仍是自动播放 (选中行分派)。
+        page.selected_playback_index = 0;
+        assert!(
+            matches!(
+                page.handle_input(KeyCode::Enter, &keys),
+                Some(AppAction::SaveAutoPlay(_))
+            ),
+            "行 0 必须仍保存自动播放"
+        );
+    }
+
+    #[test]
+    fn playback_section_lists_two_rows_with_method_label() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let keys = Keybindings::default();
+        let mut page = SettingsPage {
+            current_section: SettingsSection::Playback,
+            section_index: 2,
+            ..SettingsPage::default()
+        };
+        let theme = Theme::default();
+        let mut terminal = Terminal::new(TestBackend::new(70, 14)).unwrap();
+        terminal
+            .draw(|frame| {
+                let area = frame.area();
+                page.draw(frame, area, &theme, &keys);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        let mut screen = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                screen.push_str(buf[(x, y)].symbol());
+            }
+            screen.push('\n');
+        }
+        // TestBackend 对宽字符填充 padding cell, 断言前去掉全部空白。
+        let flat: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            flat.contains("补帧方法："),
+            "第二行需显示补帧方法:\n{screen}"
+        );
+        assert!(
+            flat.contains("进入视频自动播放："),
+            "第一行自动播放:\n{screen}"
+        );
     }
 
     #[test]

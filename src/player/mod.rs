@@ -747,42 +747,78 @@ fn insert_guard_when(src: &str) -> String {
     out
 }
 
+/// mpv `--tscale` 合法取值白名单 (mpv 0.41 `--list-options` 实测输出)。
+/// **不在白名单的值是致命错误**: `--tscale=nonsense` 会让 mpv 拒绝启动
+/// ("Setting commandline option failed"), 手改配置填错词 = 黑屏无法播放
+/// — 所以必须白名单校验而不仅是字符过滤。
+const MPV_TSCALES: &[&str] = &[
+    "oversample",
+    "linear",
+    "spline16",
+    "spline36",
+    "spline64",
+    "sinc",
+    "lanczos",
+    "ginseng",
+    "bicubic",
+    "hermite",
+    "catmull_rom",
+    "mitchell",
+    "robidoux",
+    "robidouxsharp",
+    "box",
+    "nearest",
+    "triangle",
+    "gaussian",
+    "bartlett",
+    "cosine",
+    "hanning",
+    "tukey",
+    "hamming",
+    "quadric",
+    "welch",
+    "kaiser",
+    "blackman",
+    "sphinx",
+    "jinc",
+];
+
 /// 构造补帧相关的 mpv 参数 (纯函数, 便于测试)。
 ///
-/// - `off`: 无参数
-/// - `blend`: `--interpolation=yes` + tscale (手改配置可选 linear /
-///   mitchell 等)。默认/非法值回落 **mitchell** — 实测依据 (mpv 手册
-///   tscale 按"平滑↑模糊↑"排序: oversample 最锐最不平滑 ≈ 只走节奏
-///   不做内容补帧, 默认它等于混合模式白开); mitchell 居中, 24fps→165Hz
-///   每对源帧间平滑过渡。同场基准: mitchell 插值与关闭模式同价
-///   (GPU 30% vs 29%、CPU 24% vs 23%), 内容更新率满 165Hz (Wayland
-///   commit 实测)。
-/// - `smooth_motion`: 无 mpv 侧参数 — 由驱动层插帧 (见
-///   apply_video_enhancements 的环境变量), 叠加 mpv 插值会双重补帧
+/// - `off` / `smooth_motion`: 无 mpv 侧插值参数 — Off 仅 display-resample
+///   走节奏; SmoothMotion 由驱动层插帧 (见 apply_video_enhancements 的
+///   环境变量), 叠加 mpv 插值会双重补帧。
+/// - `blend`: `--interpolation=yes` + 手改 `interpolation_tscale` 核,
+///   **白名单校验** (非法值回落 mitchell — mpv 对表外 tscale 直接拒绝
+///   启动)。mitchell 居中, 24fps→165Hz 每对源帧间平滑过渡; 同场基准
+///   插值与关闭模式同价 (GPU 30% vs 29%), 内容更新率满 165Hz。
+/// - 5 种新方法 (sinc/lanczos/gaussian/catmull_rom/oversample): 与 blend
+///   同链, 固定核 (第8轮实测 1080p24/165Hz 全屏 GPU 27-30% = off 基线
+///   28-29%, ratio≥0.989 drops 0 — 与 blend 同价满速)。
 fn interpolation_args(config: &crate::storage::AppConfig) -> Vec<String> {
     use crate::domain::playback::InterpolationMode;
-    let tscale = {
-        let t = config.interpolation_tscale.trim();
-        if t.is_empty()
-            || !t
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        {
-            // 空 (未配置) 与非法值都回落 mitchell: oversample 是
-            // 手册口径下"最锐/最不平滑"的档, 拿它当默认会让混合模式
-            // 只有呈现节奏而没有内容补帧 (形同关闭)。
-            "mitchell".to_string()
-        } else {
-            t.to_string()
+    let tscale = match config.interpolation_mode.tscale() {
+        // 5 种新方法: 核由枚举固定, 不读手改配置 (设置/详情页不可调)。
+        Some(fixed) => fixed.to_string(),
+        None => {
+            let t = config.interpolation_tscale.trim();
+            if MPV_TSCALES.contains(&t) {
+                t.to_string()
+            } else {
+                // 空 (未配置) 与表外非法词都回落 mitchell: oversample 是
+                // 手册口径下"最锐/最不平滑"的档, 拿它当默认会让混合模式
+                // 只有呈现节奏而没有内容补帧 (形同关闭); 表外词 (含空格/
+                // 分号/任意拼写) 则会让 mpv 拒绝启动, 必须拦下。
+                "mitchell".to_string()
+            }
         }
     };
     match config.interpolation_mode {
-        InterpolationMode::Off => Vec::new(),
-        InterpolationMode::Blend => vec![
+        InterpolationMode::Off | InterpolationMode::SmoothMotion => Vec::new(),
+        _ => vec![
             "--interpolation=yes".to_string(),
             format!("--tscale={tscale}"),
         ],
-        InterpolationMode::SmoothMotion => Vec::new(),
     }
 }
 
@@ -3417,10 +3453,50 @@ mod playlist_tests {
         let dflt = interpolation_args(&config);
         assert!(dflt.contains(&"--tscale=mitchell".to_string()));
 
-        // 非法 tscale (含空格/分号) 同样回落 mitchell (mpv 合法值)
+        // 表外非法 tscale (含空格/分号/任意拼写) 同样回落 mitchell —
+        // mpv 对表外 tscale 是致命错误 (拒绝启动), 白名单必须拦下。
         config.interpolation_tscale = "bad value;rm -rf".to_string();
         let safe = interpolation_args(&config);
         assert!(safe.contains(&"--tscale=mitchell".to_string()));
+        config.interpolation_tscale = "nonsense".to_string();
+        assert!(
+            interpolation_args(&config).contains(&"--tscale=mitchell".to_string()),
+            "表外词 nonsense 必须回落 (mpv 会拒绝启动)"
+        );
+        // 白名单内的手改值原样通过。
+        config.interpolation_tscale = "robidouxsharp".to_string();
+        assert!(
+            interpolation_args(&config).contains(&"--tscale=robidouxsharp".to_string()),
+            "白名单值透传"
+        );
+
+        // 5 种新方法: 固定核, 不读手改配置 (配置故意设为非法词也不影响)。
+        config.interpolation_tscale = "nonsense".to_string();
+        for (mode, kernel) in [
+            (Mode::Sinc, "sinc"),
+            (Mode::Lanczos, "lanczos"),
+            (Mode::Gaussian, "gaussian"),
+            (Mode::CatmullRom, "catmull_rom"),
+            (Mode::Oversample, "oversample"),
+        ] {
+            config.interpolation_mode = mode;
+            let args = interpolation_args(&config);
+            assert!(
+                args.contains(&"--interpolation=yes".to_string()),
+                "{mode:?} 需要 interpolation"
+            );
+            assert!(
+                args.contains(&format!("--tscale={kernel}")),
+                "{mode:?} 核 = {kernel}, 得到 {args:?}"
+            );
+            assert!(
+                !args.iter().any(|a| a.starts_with("--vf=")),
+                "{mode:?} 无 vf"
+            );
+        }
+        // SmoothMotion 仍无 mpv 插值参数 (驱动层补帧, 防双重)。
+        config.interpolation_mode = Mode::SmoothMotion;
+        assert!(interpolation_args(&config).is_empty());
     }
 
     #[test]

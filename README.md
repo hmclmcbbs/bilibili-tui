@@ -317,19 +317,20 @@ cargo build --release --target x86_64-unknown-linux-musl
 | **视频详情页** |                     |                                |
 | 切换焦点       | `Tab`               | 在评论和相关推荐区域间切换     |
 | 展开收起回复   | `r`                 | 展开/收起评论回复              |
-| 补帧三态       | `i`                 | 循环 关→混合 (mpv 时间插值)→Smooth Motion (NVIDIA 驱动插帧) →关; 状态在「播放选项」块 (页头不放提示), 持久化 |
+| 补帧八态       | `i`                 | 循环 关→混合→sinc→lanczos→gaussian→catmullrom→oversample (5 种 mpv 时间核, 第8轮新增) →Smooth Motion→关; 状态在「播放选项」块 (页头不放提示), 持久化; 设置页「▶ 播放」栏目行 1 可选同一 8 态 |
 | 超分选择       | `e`                 | 循环 关→12 种超分算法 (Anime4K/NNEDI3/RAVU/FSRCNNX/FSR/CAS/…); 状态与说明在「播放选项」块, 细调在设置页「🔍 超分」栏目 |
 
 #### 🖼️ 超分辨率（12 算法） & 🎞 NVIDIA Smooth Motion
 
 详情页「播放选项」块（画质/HDR 下方）显示 `补帧:` 与 `超分:` 状态，
-快捷键与画质键 `m` 同组。**补帧三态实测真值**（同场 1080p24 全屏、nvdec、
+快捷键与画质键 `m` 同组。**补帧实测真值**（同场 1080p24 全屏、nvdec、
 Wayland commit 计数 + IPC 属性）：
 
   | 模式 | 内容更新率 | GPU | CPU | 备注 |
   |------|-----------|-----|-----|------|
-  | 关（display-resample） | 165 提交/秒，内容仍 24Hz 步进 | 29% | 23% | 呈现循环 = 弹幕平滑的代价（audio 节奏基线仅 20%/9%） |
-  | 混合（mpv 时间插值） | **165Hz 真补帧** | 30% | 24% | 插值本身 ≈ 免费（+1pp GPU、+1pp CPU，drops 0 / mist ≤3） |
+  | 关（display-resample） | 165 提交/秒，内容仍 24Hz 步进 | 28-29% | 23-28% | 呈现循环 = 弹幕平滑的代价（audio 节奏基线仅 20%/9%） |
+  | 混合（mpv 时间插值 mitchell） | **165Hz 真补帧** | 30% | 24% | 插值本身 ≈ 免费（+1pp GPU、+1pp CPU，drops 0 / mist ≤3） |
+  | **5 时间核** sinc/lanczos/gaussian/catmullrom/oversample | 165Hz 真补帧（同混合链） | **27-30%** | 25-31% | 第8轮实测：ratio≥0.989、drops 0、vo-delayed 5-7 —— **全部满速，与关闭同价**；60fps 源同样满速（lanczos 31%/30%、ratio 0.998） |
   | Smooth Motion（NVPRESENT） | **≈48Hz**（2× 设计） | 15-21% | 26% | GPU 最省；**到不了刷新率**（见下） |
   | SM + display-resample | 坏档：有效 82Hz、12s 掉 70 帧 | — | — | 驱动层与 vsync 节奏冲突，禁止组合 |
 
@@ -466,11 +467,31 @@ Wayland commit 计数 + IPC 属性）：
   `git clone --depth 1 https://github.com/bloc97/Anime4K.git ~/.local/share/bilibili-tui/anime4k`
 - **混合**（`i` 循环到第二态）：mpv 时间插值补到刷新率 —— 基础参数
   `display-resample` 定住 vsync 节奏，追加 `--interpolation=yes` + tscale。
-  **tscale 默认 mitchell**（本轮改，原默认 oversample）：mpv 手册按
+  **tscale 默认 mitchell**（原默认 oversample）：mpv 手册按
   "平滑↑模糊↑"排序，oversample 最锐最不平滑 ≈ 只有呈现节奏、不做内容
   补帧，默认它等于混合模式白开；mitchell 居中。手改 `interpolation_tscale`
   可选 linear/mitchell 等。实测：Wayland commit 满 165/s（真补帧）、
   GPU 30% / CPU 24%（对关闭 29%/23% ≈ 免费）。
+  **tscale 白名单校验（第8轮修复）**：mpv 对表外 tscale 值是**致命错误**
+  （`--tscale=nonsense` → "Setting commandline option failed" 拒绝启动，
+  黑屏无法播放），此前只做字符过滤（字母数字/`_`/`-`）拦不住任意拼写词
+  —— 现按 mpv 0.41 `--list-options` 的 29 个合法值做白名单，表外词
+  （含空格/分号注入）一律回落 mitchell。
+- **5 种时间核补帧方法**（第8轮新增，`i` 循环第 3-7 态 / 设置页播放
+  栏目行 1 可选）：`sinc`（最锐，振铃风险最高）/ `lanczos`（锐利均衡）/
+  `gaussian`（最平滑无振铃）/ `catmull_rom`（线条动画向）/
+  `oversample`（时域超采样，零拖影）。与混合同一条链
+  （`--interpolation=yes` + display-resample），核由枚举固定、不读手改
+  配置。**实测**（1080p24/165Hz 全屏）GPU 27-30% / CPU 25-31%、
+  ratio≥0.989、drops 0、vo-delayed 5-7 —— 与关闭模式同价满速；
+  60fps 源同样满速（lanczos GPU 31%、ratio 0.998）。
+  **候选排除（实测否决，"不能像之前一样的问题"）**：CPU 光流运动补偿
+  （libavfilter `minterpolate`，dup/blend/mci 三档）—— 离线处理 4s 内容
+  实测耗时 43.7s（**10 倍慢于实时**），实时播放 vfFPS 恒 24 根本不升帧
+  （decode→filter 路径 300 帧耗时 14.2s = 与无滤镜同，输出上限仅
+  ~72fps/2s@96fps 请求即崩到 35fps）—— 正是此前"光流补帧卡顿"的同源
+  根因；RIFE 依赖 vapoursynth（此前已删，e2e 断言无 vapoursynth）。
+  两者均不引入。
 - **Smooth Motion**（`i` 循环到第三态）：NVIDIA 驱动级插帧。播放进程注入
   `NVPRESENT_ENABLE_SMOOTH_MOTION=1` 启用 `VK_LAYER_NV_present` 隐式层，
   驱动 AI 在呈现层补帧（**RTX 40 系+，需 Vulkan** — 除环境变量外还

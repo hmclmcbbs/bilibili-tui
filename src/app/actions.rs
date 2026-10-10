@@ -1329,6 +1329,7 @@ impl App {
                     self.credentials.is_some(),
                     self.config.danmaku.clone(),
                     self.config.auto_play,
+                    self.config.interpolation_mode,
                     self.config.video_quality,
                     self.config.super_res.clone(),
                 );
@@ -2382,6 +2383,7 @@ impl App {
                         false,
                         self.config.danmaku.clone(),
                         self.config.auto_play,
+                        self.config.interpolation_mode,
                         self.config.video_quality,
                         self.config.super_res.clone(),
                     )));
@@ -2410,6 +2412,7 @@ impl App {
                         self.credentials.is_some(),
                         self.config.danmaku.clone(),
                         self.config.auto_play,
+                        self.config.interpolation_mode,
                         self.config.video_quality,
                         self.config.super_res.clone(),
                     );

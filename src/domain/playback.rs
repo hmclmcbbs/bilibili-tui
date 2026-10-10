@@ -446,18 +446,35 @@ pub enum PlayLoop {
     Item,
 }
 
-/// 补帧模式 (视频详情页 `i` 循环切换, 持久化于 `AppConfig::interpolation_mode`)。
+/// 补帧方法 (视频详情页 `i` 循环切换, 持久化于 `AppConfig::interpolation_mode`)。
+///
+/// 8 态: 关 → 混合 (mitchell) → 5 种 mpv 时间插值核 (第8轮新增, 实测
+/// 满速) → Smooth Motion → 关。除 Off/Blend/SmoothMotion 外的变体各自
+/// 固定一个 `--tscale` 核 (见 [`InterpolationMode::tscale`]), 与 Blend
+/// 共用 `--interpolation=yes` + display-resample 链。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InterpolationMode {
-    /// 不补帧。
+    /// 不补帧 (仅 display-resample 保持 vsync 节奏, 内容仍按源帧率步进)。
     #[default]
     Off,
     /// mpv 时间混合插值 (display-resample + --interpolation/--tscale)。
-    /// 零额外依赖; 相邻帧加权平均, 快速运动有轻微拖影。
+    /// 零额外依赖; 相邻帧加权平均, 快速运动有轻微拖影。核由手改
+    /// `interpolation_tscale` 决定 (默认 mitchell, 白名单校验)。
     /// alias: 旧配置值 "rife" (光流功能已移除) 映射为混合, 旧配置可读。
     #[serde(alias = "rife")]
     Blend,
+    /// 时间核 sinc — 最锐利, 运动边缘振铃风险最高。
+    Sinc,
+    /// 时间核 lanczos — 锐利与平滑均衡, 轻微振铃。
+    Lanczos,
+    /// 时间核 gaussian — 最平滑, 无振铃, 拖影略多。
+    Gaussian,
+    /// 时间核 catmull_rom — 中等锐度, 线条/动画向观感。
+    CatmullRom,
+    /// 时间核 oversample — 时域超采样, 零拖影零鬼影 (只平滑呈现节奏,
+    /// 内容混合最轻)。
+    Oversample,
     /// NVIDIA Smooth Motion: 驱动级插帧。启用环境变量
     /// `NVPRESENT_ENABLE_SMOOTH_MOTION=1` 加载 VK_LAYER_NV_present
     /// 隐式 Vulkan 层, 由驱动 AI 在呈现层补帧 (RTX 40 系+, 仅 Vulkan;
@@ -466,20 +483,58 @@ pub enum InterpolationMode {
 }
 
 impl InterpolationMode {
-    /// Off → Blend → SmoothMotion → Off 循环。
+    /// Off → Blend → Sinc → Lanczos → Gaussian → CatmullRom → Oversample
+    /// → SmoothMotion → Off 循环。
     pub fn next(self) -> Self {
         match self {
             Self::Off => Self::Blend,
-            Self::Blend => Self::SmoothMotion,
+            Self::Blend => Self::Sinc,
+            Self::Sinc => Self::Lanczos,
+            Self::Lanczos => Self::Gaussian,
+            Self::Gaussian => Self::CatmullRom,
+            Self::CatmullRom => Self::Oversample,
+            Self::Oversample => Self::SmoothMotion,
             Self::SmoothMotion => Self::Off,
         }
     }
 
-    /// 页头徽标用的短标签 ("关"/"混合"/"Smooth Motion")。
+    /// `next` 的逆 (设置页 ← 键回退)。
+    pub fn prev(self) -> Self {
+        match self {
+            Self::Off => Self::SmoothMotion,
+            Self::Blend => Self::Off,
+            Self::Sinc => Self::Blend,
+            Self::Lanczos => Self::Sinc,
+            Self::Gaussian => Self::Lanczos,
+            Self::CatmullRom => Self::Gaussian,
+            Self::Oversample => Self::CatmullRom,
+            Self::SmoothMotion => Self::Oversample,
+        }
+    }
+
+    /// 固定时间核 (仅 5 种新方法返回 Some; Blend 核手改配置, Off/Smooth
+    /// Motion 无核)。
+    pub fn tscale(self) -> Option<&'static str> {
+        match self {
+            Self::Sinc => Some("sinc"),
+            Self::Lanczos => Some("lanczos"),
+            Self::Gaussian => Some("gaussian"),
+            Self::CatmullRom => Some("catmull_rom"),
+            Self::Oversample => Some("oversample"),
+            Self::Off | Self::Blend | Self::SmoothMotion => None,
+        }
+    }
+
+    /// 状态行/设置行标签 ("关"/"混合"/"sinc·最锐"/…/"Smooth Motion")。
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "关",
             Self::Blend => "混合",
+            Self::Sinc => "sinc·最锐",
+            Self::Lanczos => "lanczos·锐利",
+            Self::Gaussian => "gaussian·平滑",
+            Self::CatmullRom => "catmullrom·均衡",
+            Self::Oversample => "oversample·零拖影",
             Self::SmoothMotion => "Smooth Motion",
         }
     }
