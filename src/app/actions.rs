@@ -512,6 +512,13 @@ impl App {
             AppAction::SetInterpolationMode(mode) => {
                 self.config.interpolation_mode = mode;
                 let _ = persistence::save_config(&self.config);
+                // 实时应用到运行中的播放 (第8轮修复"换模式不生效"): mpv 已
+                // 用启动参数在跑, 只存配置则当前播放纹丝不动; Off/混合/5 核
+                // 经 IPC set_property 即时生效, SmoothMotion 驱动层需重播。
+                let live_config = self.config.clone();
+                tokio::spawn(async move {
+                    crate::player::apply_interpolation_live(&live_config).await;
+                });
             }
             AppAction::SetAnime4kMode(mode) => {
                 self.config.anime4k_mode = mode;

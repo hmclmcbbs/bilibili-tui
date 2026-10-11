@@ -783,6 +783,89 @@ const MPV_TSCALES: &[&str] = &[
     "jinc",
 ];
 
+/// 解析混合模式的时间核: 手改值过白名单, 表外/空一律回落 mitchell —
+/// oversample 是手册口径下"最锐/最不平滑"的档, 拿它当默认会让混合模式
+/// 只有呈现节奏而没有内容补帧 (形同关闭); 表外词 (含空格/分号/任意拼写)
+/// 则会让 mpv 拒绝启动 (致命), 必须拦下。
+fn resolve_blend_tscale(configured: &str) -> String {
+    let t = configured.trim();
+    if MPV_TSCALES.contains(&t) {
+        t.to_string()
+    } else {
+        "mitchell".to_string()
+    }
+}
+
+/// 补帧的运行时属性集 (供 mpv IPC `set_property`): 与 `interpolation_args`
+/// 同源逻辑, 但产出运行时可写的键值对 — 第8轮修复"换模式不生效": 此前
+/// `SetInterpolationMode` 只存配置, 运行中的 mpv 仍用启动参数, 按 `i` 换
+/// 模式当前播放纹丝不动。Off/混合/5 核的 interpolation/tscale/video-sync
+/// 均运行时可写 (IPC 实测), 可即时生效; SmoothMotion 的 NVPRESENT env 无法
+/// 注入运行中进程, 故只同步 mpv 侧 (关插值+audio 节奏, 防双重), 驱动层
+/// 帧生成需重启播放才加载。
+fn interpolation_live_props(
+    config: &crate::storage::AppConfig,
+) -> Vec<(&'static str, serde_json::Value)> {
+    use crate::domain::playback::InterpolationMode;
+    match config.interpolation_mode {
+        InterpolationMode::Off => vec![("interpolation", serde_json::json!(false))],
+        InterpolationMode::SmoothMotion => vec![
+            ("interpolation", serde_json::json!(false)),
+            ("video-sync", serde_json::json!("audio")),
+        ],
+        _ => {
+            let tscale = match config.interpolation_mode.tscale() {
+                Some(fixed) => fixed.to_string(),
+                None => resolve_blend_tscale(&config.interpolation_tscale),
+            };
+            vec![
+                ("interpolation", serde_json::json!(true)),
+                ("tscale", serde_json::json!(tscale)),
+                ("video-sync", serde_json::json!("display-resample")),
+            ]
+        }
+    }
+}
+
+/// 发现当前应用进程的所有运行中 mpv IPC socket: 播放器 socket 命名为
+/// `bilibili-tui-<kind>-<app_pid>-<suffix>.sock` (见 mpv_ipc_path), 按
+/// 当前 pid 匹配即得视频/多P/番剧/本地/直播全部运行中播放。
+#[cfg(unix)]
+fn running_mpv_ipc_sockets() -> Vec<std::path::PathBuf> {
+    let pid = std::process::id();
+    let pat = format!("-{pid}-");
+    let mut out = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if let Some(rest) = name
+                .strip_prefix("bilibili-tui-")
+                .and_then(|r| r.strip_suffix(".sock"))
+            {
+                if rest.contains(&pat) {
+                    out.push(entry.path());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 实时把补帧设置应用到所有运行中的 mpv 播放 (第8轮修复"换模式不生效"):
+/// 换模式即时生效, 不需退出重播。对每个运行中 socket 逐条 `set_property`。
+pub async fn apply_interpolation_live(config: &crate::storage::AppConfig) {
+    #[cfg(unix)]
+    {
+        for sock in running_mpv_ipc_sockets() {
+            for (key, value) in interpolation_live_props(config) {
+                let _ = mpv_ipc(&sock, serde_json::json!(["set_property", key, value])).await;
+            }
+        }
+    }
+    #[cfg(windows)]
+    let _ = config;
+}
+
 /// 构造补帧相关的 mpv 参数 (纯函数, 便于测试)。
 ///
 /// - `off` / `smooth_motion`: 无 mpv 侧插值参数 — Off 仅 display-resample
@@ -800,18 +883,7 @@ fn interpolation_args(config: &crate::storage::AppConfig) -> Vec<String> {
     let tscale = match config.interpolation_mode.tscale() {
         // 5 种新方法: 核由枚举固定, 不读手改配置 (设置/详情页不可调)。
         Some(fixed) => fixed.to_string(),
-        None => {
-            let t = config.interpolation_tscale.trim();
-            if MPV_TSCALES.contains(&t) {
-                t.to_string()
-            } else {
-                // 空 (未配置) 与表外非法词都回落 mitchell: oversample 是
-                // 手册口径下"最锐/最不平滑"的档, 拿它当默认会让混合模式
-                // 只有呈现节奏而没有内容补帧 (形同关闭); 表外词 (含空格/
-                // 分号/任意拼写) 则会让 mpv 拒绝启动, 必须拦下。
-                "mitchell".to_string()
-            }
-        }
+        None => resolve_blend_tscale(&config.interpolation_tscale),
     };
     match config.interpolation_mode {
         InterpolationMode::Off | InterpolationMode::SmoothMotion => Vec::new(),
@@ -3427,6 +3499,59 @@ mod playlist_tests {
         assert_eq!(count("--input-terminal=no"), 1);
         assert_eq!(count("--force-window=no"), 1);
         assert_eq!(count("--hr-seek=yes"), 1);
+    }
+
+    #[test]
+    fn interpolation_live_props_by_mode() {
+        use crate::domain::playback::InterpolationMode as Mode;
+        // Off → 只关插值 (display-resample 由启动参数维持, 不重复设)。
+        let mut config = crate::storage::AppConfig {
+            interpolation_mode: Mode::Off,
+            ..Default::default()
+        };
+        let props = interpolation_live_props(&config);
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0].0, "interpolation");
+        assert_eq!(props[0].1, serde_json::json!(false));
+        // Blend/5 核 → 开插值 + 核 + display-resample。
+        config.interpolation_mode = Mode::Blend;
+        config.interpolation_tscale = "nonsense".to_string();
+        let props = interpolation_live_props(&config);
+        let m: std::collections::HashMap<_, _> = props.iter().cloned().collect();
+        assert_eq!(m["interpolation"], serde_json::json!(true));
+        assert_eq!(m["tscale"], serde_json::json!("mitchell"), "非法手改回落");
+        assert_eq!(m["video-sync"], serde_json::json!("display-resample"));
+        config.interpolation_mode = Mode::Sinc;
+        let props = interpolation_live_props(&config);
+        let m: std::collections::HashMap<_, _> = props.iter().cloned().collect();
+        assert_eq!(m["tscale"], serde_json::json!("sinc"), "固定核");
+        // SmoothMotion → 关插值 + audio (驱动层 env 无法注入运行中进程)。
+        config.interpolation_mode = Mode::SmoothMotion;
+        let props = interpolation_live_props(&config);
+        let m: std::collections::HashMap<_, _> = props.iter().cloned().collect();
+        assert_eq!(m["interpolation"], serde_json::json!(false));
+        assert_eq!(m["video-sync"], serde_json::json!("audio"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn running_mpv_ipc_sockets_discovers_by_pid() {
+        // 造两个假 socket: 一个匹配当前 pid, 一个不匹配。
+        let pid = std::process::id();
+        let dir = std::env::temp_dir();
+        let mine = dir.join(format!("bilibili-tui-mpv-{pid}-999.sock"));
+        let other = dir.join(format!("bilibili-tui-mpv-{}-888.sock", pid + 1));
+        let stray = dir.join("bilibili-tui-unrelated.sock");
+        for p in [&mine, &other, &stray] {
+            let _ = std::fs::write(p, b"");
+        }
+        let found = running_mpv_ipc_sockets();
+        assert!(found.contains(&mine), "应发现当前 pid 的 socket: {found:?}");
+        assert!(!found.contains(&other), "不应发现别的 pid: {found:?}");
+        assert!(!found.contains(&stray), "不应发现无 pid 段: {found:?}");
+        let _ = std::fs::remove_file(&mine);
+        let _ = std::fs::remove_file(&other);
+        let _ = std::fs::remove_file(&stray);
     }
 
     #[test]

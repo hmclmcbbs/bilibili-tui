@@ -485,7 +485,18 @@ Wayland commit 计数 + IPC 属性）：
   配置。**实测**（1080p24/165Hz 全屏）GPU 27-30% / CPU 25-31%、
   ratio≥0.989、drops 0、vo-delayed 5-7 —— 与关闭模式同价满速；
   60fps 源同样满速（lanczos GPU 31%、ratio 0.998）。
-  **候选排除（实测否决，"不能像之前一样的问题"）**：CPU 光流运动补偿
+- **换模式即时生效（第8轮修复"补帧没生效"）**：`SetInterpolationMode`
+  此前只存配置不重启播放 —— mpv 已用启动参数在跑，播放中按 `i` 换模式
+  **当前播放纹丝不动**（TUI 与 mpv 是两个窗口，全屏时按键还归 mpv，用户
+  更难察觉需重播），这就是"补帧没生效"的真因。实测排查确认参数链、
+  NVPRESENT 层加载、帧生成**全部正常**（off 23.7 新帧/s → sinc 52.7/s、
+  smooth_motion 46.3/s），唯独改模式不落地。修复：换模式时经 mpv IPC
+  `set_property` 实时应用到所有运行中播放（socket 按 `bilibili-tui-*-
+  <app_pid>-*.sock` 命名发现），`interpolation`/`tscale`/`video-sync`
+  三属性运行时全可写（实测逐条改全程生效）。Off/混合/5 核即时生效；
+  **Smooth Motion 的 NVPRESENT env 无法注入运行中进程**，切过去只同步
+  mpv 侧（关插值 + audio 节奏防双重），驱动层帧生成需重启播放才加载。
+- **候选排除（实测否决，"不能像之前一样的问题"）**：CPU 光流运动补偿
   （libavfilter `minterpolate`，dup/blend/mci 三档）—— 离线处理 4s 内容
   实测耗时 43.7s（**10 倍慢于实时**），实时播放 vfFPS 恒 24 根本不升帧
   （decode→filter 路径 300 帧耗时 14.2s = 与无滤镜同，输出上限仅
