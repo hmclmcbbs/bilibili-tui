@@ -1900,10 +1900,9 @@ mod detail_tests {
         let keys = crate::storage::Keybindings::default();
         // 自封闭: 不依赖磁盘配置的起始态 (磁盘可能停在任意态)。
         page.interpolation_mode = Mode::Off;
-        // 8 态一圈: 关→混合→sinc→lanczos→gaussian→catmullrom→oversample
-        // →Smooth Motion→关。
+        // 5 态一圈: 关→Smooth Motion→LSFG 2×→3×→4×→关 (只保留真·帧生成)。
         let mut expected = Mode::Off;
-        for step in 1..=8 {
+        for step in 1..=5 {
             expected = expected.next();
             // AppAction 只派生了 Debug, 用模式匹配断言变体与载荷。
             match page.handle_input(KeyCode::Char('i'), &keys) {
@@ -1912,58 +1911,51 @@ mod detail_tests {
             }
             assert_eq!(page.interpolation_mode, expected, "step {step}");
         }
-        assert_eq!(page.interpolation_mode, Mode::Off, "8 步回到起点");
+        assert_eq!(page.interpolation_mode, Mode::Off, "5 步回到起点");
         // 关键序与 prev 互逆 (设置页 ← 回退)。
-        assert_eq!(Mode::Off.next(), Mode::Blend);
-        assert_eq!(Mode::Blend.next(), Mode::Sinc);
-        assert_eq!(Mode::Oversample.next(), Mode::SmoothMotion);
-        assert_eq!(Mode::SmoothMotion.next(), Mode::Off);
+        assert_eq!(Mode::Off.next(), Mode::SmoothMotion);
+        assert_eq!(Mode::SmoothMotion.next(), Mode::Lsfg2x);
+        assert_eq!(Mode::Lsfg4x.next(), Mode::Off);
         let mut roundtrip = Mode::Off;
-        for _ in 0..8 {
+        for _ in 0..5 {
             roundtrip = roundtrip.next().prev();
         }
         assert_eq!(roundtrip, Mode::Off, "next/prev 互逆");
-        // 5 种新方法的固定核齐全。
-        for (m, k) in [
-            (Mode::Sinc, "sinc"),
-            (Mode::Lanczos, "lanczos"),
-            (Mode::Gaussian, "gaussian"),
-            (Mode::CatmullRom, "catmull_rom"),
-            (Mode::Oversample, "oversample"),
-        ] {
-            assert_eq!(m.tscale(), Some(k));
-        }
-        assert_eq!(Mode::Blend.tscale(), None);
-        assert_eq!(Mode::Off.tscale(), None);
-        // 标签互异且覆盖 8 态 (状态行可分辨)。
+        // LSFG 档倍率齐全。
+        assert_eq!(Mode::Lsfg2x.lsfg_multiplier(), Some(2));
+        assert_eq!(Mode::Lsfg3x.lsfg_multiplier(), Some(3));
+        assert_eq!(Mode::Lsfg4x.lsfg_multiplier(), Some(4));
+        // 标签互异且覆盖 5 态 (状态行可分辨)。
         let labels: std::collections::HashSet<_> = [
             Mode::Off,
-            Mode::Blend,
-            Mode::Sinc,
-            Mode::Lanczos,
-            Mode::Gaussian,
-            Mode::CatmullRom,
-            Mode::Oversample,
             Mode::SmoothMotion,
+            Mode::Lsfg2x,
+            Mode::Lsfg3x,
+            Mode::Lsfg4x,
         ]
         .iter()
         .map(|m| m.label())
         .collect();
-        assert_eq!(labels.len(), 8, "8 态标签互异");
-        // 旧配置值 (snake_case) 全部可反序列化。
+        assert_eq!(labels.len(), 5, "5 态标签互异");
+        // 当前配置值 (snake_case) 可反序列化。
+        for v in ["off", "smooth_motion", "lsfg2x", "lsfg3x", "lsfg4x"] {
+            let parsed: Mode =
+                serde_json::from_str(&format!("\"{v}\"")).unwrap_or_else(|e| panic!("{v}: {e}"));
+            assert_eq!(serde_json::to_string(&parsed).unwrap(), format!("\"{v}\""));
+        }
+        // 旧已删混合核值回落到 Off (旧配置仍可读)。
         for v in [
-            "off",
             "blend",
             "sinc",
             "lanczos",
             "gaussian",
             "catmull_rom",
             "oversample",
-            "smooth_motion",
+            "rife",
         ] {
-            let parsed: Mode =
-                serde_json::from_str(&format!("\"{v}\"")).unwrap_or_else(|e| panic!("{v}: {e}"));
-            assert_eq!(serde_json::to_string(&parsed).unwrap(), format!("\"{v}\""));
+            let parsed: Mode = serde_json::from_str(&format!("\"{v}\""))
+                .unwrap_or_else(|e| panic!("旧值 {v} 应可读: {e}"));
+            assert_eq!(parsed, Mode::Off, "旧混合值回落 Off");
         }
     }
 

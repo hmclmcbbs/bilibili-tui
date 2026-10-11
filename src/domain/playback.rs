@@ -448,94 +448,91 @@ pub enum PlayLoop {
 
 /// 补帧方法 (视频详情页 `i` 循环切换, 持久化于 `AppConfig::interpolation_mode`)。
 ///
-/// 8 态: 关 → 混合 (mitchell) → 5 种 mpv 时间插值核 (第8轮新增, 实测
-/// 满速) → Smooth Motion → 关。除 Off/Blend/SmoothMotion 外的变体各自
-/// 固定一个 `--tscale` 核 (见 [`InterpolationMode::tscale`]), 与 Blend
-/// 共用 `--interpolation=yes` + display-resample 链。
+/// 只保留**真·帧生成** (用运动矢量算出带正确运动的新帧), 删掉了第8轮的
+/// 6 种 mpv 时间混合核 (blend/sinc/lanczos/gaussian/catmull_rom/oversample
+/// — 相邻帧加权平均=鬼影, 实测不提流畅度, 用户确认无效)。5 态循环:
+/// 关 → Smooth Motion → LSFG 2× → 3× → 4× → 关。三者互斥 (都作用于
+/// mpv 的 Vulkan 呈现层, 靠环境变量隔离, 见 player 的 `interpolation_env`):
+/// - SmoothMotion: NVIDIA 驱动 NVPRESENT 层, 固定 2×。
+/// - Lsfg*: 第三方 lsfg-vk Vulkan 层 (Lossless Scaling 光流), 倍率可调。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InterpolationMode {
-    /// 不补帧 (仅 display-resample 保持 vsync 节奏, 内容仍按源帧率步进)。
+    /// 不补帧。同时设 `DISABLE_LSFGVK=1` 阻止 lsfg-vk 接管 (其 profile
+    /// 按进程名 "mpv" 匹配, 否则关补帧也会被它补)。
+    /// 别名: 旧配置里已删除的 6 种时间混合核 + "rife" 都回落到 Off,
+    /// 保证旧配置仍可反序列化 (混合=鬼影不提流畅度, 已弃用)。
     #[default]
+    #[serde(
+        alias = "blend",
+        alias = "sinc",
+        alias = "lanczos",
+        alias = "gaussian",
+        alias = "catmull_rom",
+        alias = "oversample",
+        alias = "rife"
+    )]
     Off,
-    /// mpv 时间混合插值 (display-resample + --interpolation/--tscale)。
-    /// 零额外依赖; 相邻帧加权平均, 快速运动有轻微拖影。核由手改
-    /// `interpolation_tscale` 决定 (默认 mitchell, 白名单校验)。
-    /// alias: 旧配置值 "rife" (光流功能已移除) 映射为混合, 旧配置可读。
-    #[serde(alias = "rife")]
-    Blend,
-    /// 时间核 sinc — 最锐利, 运动边缘振铃风险最高。
-    Sinc,
-    /// 时间核 lanczos — 锐利与平滑均衡, 轻微振铃。
-    Lanczos,
-    /// 时间核 gaussian — 最平滑, 无振铃, 拖影略多。
-    Gaussian,
-    /// 时间核 catmull_rom — 中等锐度, 线条/动画向观感。
-    CatmullRom,
-    /// 时间核 oversample — 时域超采样, 零拖影零鬼影 (只平滑呈现节奏,
-    /// 内容混合最轻)。
-    Oversample,
     /// NVIDIA Smooth Motion: 驱动级插帧。启用环境变量
     /// `NVPRESENT_ENABLE_SMOOTH_MOTION=1` 加载 VK_LAYER_NV_present
     /// 隐式 Vulkan 层, 由驱动 AI 在呈现层补帧 (RTX 40 系+, 仅 Vulkan;
-    /// Wayland 下 mpv 自动选 vulkan)。mpv 自身不叠加插值, 避免双重补帧。
+    /// Wayland 下 mpv 自动选 vulkan)。固定 2× (驱动设计, 无倍率开关)。
+    /// 同时设 `DISABLE_LSFGVK=1` 防止 lsfg-vk 叠加成双重补帧。
     SmoothMotion,
+    /// lsfg-vk 光流帧生成 2× (每 1 帧插 1 帧)。
+    Lsfg2x,
+    /// lsfg-vk 光流帧生成 3× (每 1 帧插 2 帧)。24fps → 72Hz。
+    Lsfg3x,
+    /// lsfg-vk 光流帧生成 4× (每 1 帧插 3 帧)。24fps → 96Hz。
+    Lsfg4x,
 }
 
 impl InterpolationMode {
-    /// Off → Blend → Sinc → Lanczos → Gaussian → CatmullRom → Oversample
-    /// → SmoothMotion → Off 循环。
+    /// Off → SmoothMotion → Lsfg2x → Lsfg3x → Lsfg4x → Off 循环。
     pub fn next(self) -> Self {
         match self {
-            Self::Off => Self::Blend,
-            Self::Blend => Self::Sinc,
-            Self::Sinc => Self::Lanczos,
-            Self::Lanczos => Self::Gaussian,
-            Self::Gaussian => Self::CatmullRom,
-            Self::CatmullRom => Self::Oversample,
-            Self::Oversample => Self::SmoothMotion,
-            Self::SmoothMotion => Self::Off,
+            Self::Off => Self::SmoothMotion,
+            Self::SmoothMotion => Self::Lsfg2x,
+            Self::Lsfg2x => Self::Lsfg3x,
+            Self::Lsfg3x => Self::Lsfg4x,
+            Self::Lsfg4x => Self::Off,
         }
     }
 
     /// `next` 的逆 (设置页 ← 键回退)。
     pub fn prev(self) -> Self {
         match self {
-            Self::Off => Self::SmoothMotion,
-            Self::Blend => Self::Off,
-            Self::Sinc => Self::Blend,
-            Self::Lanczos => Self::Sinc,
-            Self::Gaussian => Self::Lanczos,
-            Self::CatmullRom => Self::Gaussian,
-            Self::Oversample => Self::CatmullRom,
-            Self::SmoothMotion => Self::Oversample,
+            Self::Off => Self::Lsfg4x,
+            Self::SmoothMotion => Self::Off,
+            Self::Lsfg2x => Self::SmoothMotion,
+            Self::Lsfg3x => Self::Lsfg2x,
+            Self::Lsfg4x => Self::Lsfg3x,
         }
     }
 
-    /// 固定时间核 (仅 5 种新方法返回 Some; Blend 核手改配置, Off/Smooth
-    /// Motion 无核)。
-    pub fn tscale(self) -> Option<&'static str> {
+    /// 是否为帧生成模式 (Off 之外都算; 决定 mpv 走 audio+vulkan 呈现)。
+    pub fn is_frame_generation(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// lsfg-vk 倍率 (仅 Lsfg* 返回 Some; 其余 None)。
+    pub fn lsfg_multiplier(self) -> Option<u8> {
         match self {
-            Self::Sinc => Some("sinc"),
-            Self::Lanczos => Some("lanczos"),
-            Self::Gaussian => Some("gaussian"),
-            Self::CatmullRom => Some("catmull_rom"),
-            Self::Oversample => Some("oversample"),
-            Self::Off | Self::Blend | Self::SmoothMotion => None,
+            Self::Lsfg2x => Some(2),
+            Self::Lsfg3x => Some(3),
+            Self::Lsfg4x => Some(4),
+            Self::Off | Self::SmoothMotion => None,
         }
     }
 
-    /// 状态行/设置行标签 ("关"/"混合"/"sinc·最锐"/…/"Smooth Motion")。
+    /// 状态行/设置行标签 ("关"/"Smooth Motion"/"LSFG 2×"/…)。
     pub fn label(self) -> &'static str {
         match self {
             Self::Off => "关",
-            Self::Blend => "混合",
-            Self::Sinc => "sinc·最锐",
-            Self::Lanczos => "lanczos·锐利",
-            Self::Gaussian => "gaussian·平滑",
-            Self::CatmullRom => "catmullrom·均衡",
-            Self::Oversample => "oversample·零拖影",
-            Self::SmoothMotion => "Smooth Motion",
+            Self::SmoothMotion => "Smooth Motion·2×",
+            Self::Lsfg2x => "LSFG·2×",
+            Self::Lsfg3x => "LSFG·3×",
+            Self::Lsfg4x => "LSFG·4×",
         }
     }
 }
@@ -883,11 +880,25 @@ mod tests {
     }
 
     #[test]
-    fn legacy_rife_value_deserializes_to_blend() {
-        // 光流已移除: 旧配置里的 "rife" 不应让整个配置反序列化失败。
-        let mode: super::InterpolationMode = serde_json::from_str("\"rife\"").unwrap();
-        assert_eq!(mode, super::InterpolationMode::Blend);
-        assert_eq!(serde_json::to_string(&mode).unwrap(), "\"blend\"");
+    fn legacy_blend_values_deserialize_to_off() {
+        // 6 种时间混合核 + "rife" 已删除 (鬼影不提流畅度): 旧配置值一律
+        // 回落到 Off, 不应让整个配置反序列化失败。
+        for v in [
+            "blend",
+            "sinc",
+            "lanczos",
+            "gaussian",
+            "catmull_rom",
+            "oversample",
+            "rife",
+        ] {
+            let mode: super::InterpolationMode =
+                serde_json::from_str(&format!("\"{v}\"")).unwrap_or_else(|e| panic!("{v}: {e}"));
+            assert_eq!(mode, super::InterpolationMode::Off, "{v} → Off");
+        }
+        // LSFG 档可正常序列化。
+        let m = super::InterpolationMode::Lsfg4x;
+        assert_eq!(serde_json::to_string(&m).unwrap(), "\"lsfg4x\"");
     }
 
     use super::*;

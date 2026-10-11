@@ -317,22 +317,29 @@ cargo build --release --target x86_64-unknown-linux-musl
 | **视频详情页** |                     |                                |
 | 切换焦点       | `Tab`               | 在评论和相关推荐区域间切换     |
 | 展开收起回复   | `r`                 | 展开/收起评论回复              |
-| 补帧八态       | `i`                 | 循环 关→混合→sinc→lanczos→gaussian→catmullrom→oversample (5 种 mpv 时间核, 第8轮新增) →Smooth Motion→关; 状态在「播放选项」块 (页头不放提示), 持久化; 设置页「▶ 播放」栏目行 1 可选同一 8 态 |
+| 补帧五态       | `i`                 | 循环 关→Smooth Motion (NVIDIA 2×)→LSFG 2×→LSFG 3×→LSFG 4×→关 (只保留真·光流帧生成); 状态在「播放选项」块, 持久化; 设置页「▶ 播放」栏目行 1 可选同一 5 态 |
 | 超分选择       | `e`                 | 循环 关→12 种超分算法 (Anime4K/NNEDI3/RAVU/FSRCNNX/FSR/CAS/…); 状态与说明在「播放选项」块, 细调在设置页「🔍 超分」栏目 |
 
 #### 🖼️ 超分辨率（12 算法） & 🎞 NVIDIA Smooth Motion
 
 详情页「播放选项」块（画质/HDR 下方）显示 `补帧:` 与 `超分:` 状态，
-快捷键与画质键 `m` 同组。**补帧实测真值**（同场 1080p24 全屏、nvdec、
-Wayland commit 计数 + IPC 属性）：
+快捷键与画质键 `m` 同组。**只保留真·光流帧生成**（用运动矢量算出带正确
+运动的新帧）；删掉了第8轮的 6 种 mpv 时间混合核（blend/sinc/lanczos/
+gaussian/catmull_rom/oversample — 相邻帧加权平均=鬼影，实测不提流畅度）。
+**实测真值**（黑白位置直方图 + 内容变化率 + 实时比，本机 4060）：
 
-  | 模式 | 内容更新率 | GPU | CPU | 备注 |
-  |------|-----------|-----|-----|------|
-  | 关（display-resample） | 165 提交/秒，内容仍 24Hz 步进 | 28-29% | 23-28% | 呈现循环 = 弹幕平滑的代价（audio 节奏基线仅 20%/9%） |
-  | 混合（mpv 时间插值 mitchell） | **165Hz 真补帧** | 30% | 24% | 插值本身 ≈ 免费（+1pp GPU、+1pp CPU，drops 0 / mist ≤3） |
-  | **5 时间核** sinc/lanczos/gaussian/catmullrom/oversample | 165Hz 真补帧（同混合链） | **27-30%** | 25-31% | 第8轮实测：ratio≥0.989、drops 0、vo-delayed 5-7 —— **全部满速，与关闭同价**；60fps 源同样满速（lanczos 31%/30%、ratio 0.998） |
-  | Smooth Motion（NVPRESENT） | **≈48Hz**（2× 设计） | 15-21% | 26% | GPU 最省；**到不了刷新率**（见下） |
-  | SM + display-resample | 坏档：有效 82Hz、12s 掉 70 帧 | — | — | 驱动层与 vsync 节奏冲突，禁止组合 |
+  | 模式 | 独立帧位置（>源帧=真补帧） | 实时比 | 备注 |
+  |------|------------------------|--------|------|
+  | 关 | 53（=源帧，无补帧） | 0.99 | 基线 |
+  | **Smooth Motion**（NVPRESENT 2×） | **100** | 1.00 | NVIDIA 驱动光流，2×（24→48Hz）；GPU 最省 |
+  | **LSFG 4×**（lsfg-vk） | **99** | 1.00 | 第三方 Lossless Scaling 光流，4×（24→96Hz） |
+  | ~~blend/sinc/…~~（已删） | 鬼影非新帧 | — | 混合=拖影，实测不提流畅度 |
+
+  三者互斥（都作用于 mpv 的 Vulkan 呈现层，靠环境变量隔离，见下）。
+  LSFG 依赖：Steam 版 Lossless Scaling 切到 **"lsfg-vk" 分支**（提供
+  `lsfg-vk.dll` 帧生成模型），`lsfg-vk` Vulkan 层（`lsfg-vk-bin` 包）。
+  app 经环境变量 `LSFGVK_ENV=1 + LSFGVK_MULTIPLIER + LSFGVK_DLL_PATH`
+  纯 env 控制 LSFG（不依赖用户 conf 里恰好有同名 profile）。
 
 
 - **超分选择**（`e` 循环 关→12 算法→关）：Anime4K 原三档选项升级为
@@ -465,37 +472,24 @@ Wayland commit 计数 + IPC 属性）：
   多 P 播放列表、番剧、本地文件（番剧/本地曾漏挂，导致"没效果"）。
   着色器目录缺失/缺文件时静默不启用，播放不受影响。重建：
   `git clone --depth 1 https://github.com/bloc97/Anime4K.git ~/.local/share/bilibili-tui/anime4k`
-- **混合**（`i` 循环到第二态）：mpv 时间插值补到刷新率 —— 基础参数
-  `display-resample` 定住 vsync 节奏，追加 `--interpolation=yes` + tscale。
-  **tscale 默认 mitchell**（原默认 oversample）：mpv 手册按
-  "平滑↑模糊↑"排序，oversample 最锐最不平滑 ≈ 只有呈现节奏、不做内容
-  补帧，默认它等于混合模式白开；mitchell 居中。手改 `interpolation_tscale`
-  可选 linear/mitchell 等。实测：Wayland commit 满 165/s（真补帧）、
-  GPU 30% / CPU 24%（对关闭 29%/23% ≈ 免费）。
-  **tscale 白名单校验（第8轮修复）**：mpv 对表外 tscale 值是**致命错误**
-  （`--tscale=nonsense` → "Setting commandline option failed" 拒绝启动，
-  黑屏无法播放），此前只做字符过滤（字母数字/`_`/`-`）拦不住任意拼写词
-  —— 现按 mpv 0.41 `--list-options` 的 29 个合法值做白名单，表外词
-  （含空格/分号注入）一律回落 mitchell。
-- **5 种时间核补帧方法**（第8轮新增，`i` 循环第 3-7 态 / 设置页播放
-  栏目行 1 可选）：`sinc`（最锐，振铃风险最高）/ `lanczos`（锐利均衡）/
-  `gaussian`（最平滑无振铃）/ `catmull_rom`（线条动画向）/
-  `oversample`（时域超采样，零拖影）。与混合同一条链
-  （`--interpolation=yes` + display-resample），核由枚举固定、不读手改
-  配置。**实测**（1080p24/165Hz 全屏）GPU 27-30% / CPU 25-31%、
-  ratio≥0.989、drops 0、vo-delayed 5-7 —— 与关闭模式同价满速；
-  60fps 源同样满速（lanczos GPU 31%、ratio 0.998）。
-- **换模式即时生效（第8轮修复"补帧没生效"）**：`SetInterpolationMode`
-  此前只存配置不重启播放 —— mpv 已用启动参数在跑，播放中按 `i` 换模式
-  **当前播放纹丝不动**（TUI 与 mpv 是两个窗口，全屏时按键还归 mpv，用户
-  更难察觉需重播），这就是"补帧没生效"的真因。实测排查确认参数链、
-  NVPRESENT 层加载、帧生成**全部正常**（off 23.7 新帧/s → sinc 52.7/s、
-  smooth_motion 46.3/s），唯独改模式不落地。修复：换模式时经 mpv IPC
-  `set_property` 实时应用到所有运行中播放（socket 按 `bilibili-tui-*-
-  <app_pid>-*.sock` 命名发现），`interpolation`/`tscale`/`video-sync`
-  三属性运行时全可写（实测逐条改全程生效）。Off/混合/5 核即时生效；
-  **Smooth Motion 的 NVPRESENT env 无法注入运行中进程**，切过去只同步
-  mpv 侧（关插值 + audio 节奏防双重），驱动层帧生成需重启播放才加载。
+- **真·帧生成，删掉混合核**：只保留能算出带运动新帧的方案。Smooth
+  Motion（NVIDIA NVPRESENT，固定 2×）与 LSFG（第三方 lsfg-vk 光流，
+  2×/3×/4× 可调）都是 Vulkan 隐式层在呈现阶段插帧。**删除了 6 种 mpv
+  时间混合核**（`--interpolation`+tscale）：它们只是相邻帧加权平均，
+  黑白片上冒灰帧像"补帧强"，真实画面里是鬼影/拖影，不产生带正确运动
+  的新帧（用户确认无效）。旧配置的 blend/sinc/… 值 serde 别名回落 Off。
+- **三档互斥（环境变量隔离）**：三种补帧都作用于同一 mpv 进程的 Vulkan
+  呈现层，叠加会成双重补帧（画质崩/过载）。`interpolation_env` 按模式
+  注入：Off → `DISABLE_LSFGVK=1`（lsfg-vk 按进程名 "mpv" 自动匹配，
+  不禁用则"关"也会被它补）；SmoothMotion → `NVPRESENT_ENABLE_SMOOTH_MOTION=1`
+  + `DISABLE_LSFGVK=1`（防 lsfg 叠加）；Lsfg* → `LSFGVK_ENV=1` +
+  `LSFGVK_MULTIPLIER`（纯 env 配置，绕过 conf 同名 profile）+ `LSFGVK_DLL_PATH`
+  （`discover_lsfg_dll` 在常见 Steam 库路径找 `Lossless Scaling/lsfg-vk.dll`，
+  找不到则静默不补帧、不坏播放），不设 NVPRESENT。三档都用
+  `--video-sync=audio --gpu-api=vulkan`（补帧层接管呈现；display-resample
+  与补帧层双重节奏会把播放拖到 0.4× 实时，实测必须避开）。
+- **换模式需重启播放**：补帧层靠环境变量在 mpv 进程启动时加载，无法向
+  运行中进程注入（与超分换算法一致）——按 `i` 换模式后需退出重播生效。
 - **候选排除（实测否决，"不能像之前一样的问题"）**：CPU 光流运动补偿
   （libavfilter `minterpolate`，dup/blend/mci 三档）—— 离线处理 4s 内容
   实测耗时 43.7s（**10 倍慢于实时**），实时播放 vfFPS 恒 24 根本不升帧

@@ -1114,10 +1114,10 @@ mod tests {
         };
         // 行 1 右键 → 下一方法, 动作带载荷并立即持久化。
         match page.handle_input(KeyCode::Right, &keys) {
-            Some(AppAction::SetInterpolationMode(m)) => assert_eq!(m, Mode::Blend),
+            Some(AppAction::SetInterpolationMode(m)) => assert_eq!(m, Mode::SmoothMotion),
             other => panic!("unexpected action: {other:?}"),
         }
-        assert_eq!(page.interpolation_mode, Mode::Blend);
+        assert_eq!(page.interpolation_mode, Mode::SmoothMotion);
         // 左键 → prev 回退。
         match page.handle_input(KeyCode::Left, &keys) {
             Some(AppAction::SetInterpolationMode(m)) => assert_eq!(m, Mode::Off),
@@ -1125,14 +1125,14 @@ mod tests {
         }
         // 行 1 走满 8 圈回到起点 (与详情页 i 键同配置同序)。
         let mut mode = page.interpolation_mode;
-        for step in 1..=8 {
+        for step in 1..=5 {
             mode = mode.next();
             match page.handle_input(KeyCode::Right, &keys) {
                 Some(AppAction::SetInterpolationMode(m)) => assert_eq!(m, mode, "step {step}"),
                 other => panic!("unexpected action at {step}: {other:?}"),
             }
         }
-        assert_eq!(page.interpolation_mode, Mode::Off, "8 步回起点");
+        assert_eq!(page.interpolation_mode, Mode::Off, "5 步回起点");
         // 行 0 仍是自动播放 (选中行分派)。
         page.selected_playback_index = 0;
         assert!(

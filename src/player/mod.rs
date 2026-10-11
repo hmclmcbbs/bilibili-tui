@@ -213,21 +213,14 @@ fn apply_video_enhancements(cmd: &mut tokio::process::Command) {
     let Ok(config) = crate::storage::load_config() else {
         return;
     };
-    for arg in interpolation_args(&config) {
+    // 帧生成模式 (Off 之外) 的 mpv 呈现参数: audio+vulkan (见 frame_gen_args)。
+    for arg in frame_gen_args(&config.interpolation_mode) {
         cmd.arg(arg);
     }
-    if config.interpolation_mode == crate::domain::playback::InterpolationMode::SmoothMotion {
-        // NVIDIA Smooth Motion (RTX 40+): 置此变量启用 VK_LAYER_NV_present
-        // 隐式层, 驱动 AI 在呈现层补帧 (仅 Vulkan; Wayland 下 mpv 自动选
-        // vulkan VO, 见驱动 README "NVIDIA Smooth Motion" 章)。
-        cmd.env("NVPRESENT_ENABLE_SMOOTH_MOTION", "1");
-        // 呈现节奏让位驱动层: mpv 按音频时钟、只在新帧时提交 present。
-        // 实测 (1080p24) 较 display-resample: GPU 41%→31%,
-        // vo-delayed 11→0, 实时比 0.999→1.003。仅本模式生效,
-        // 其余模式的 display-resample (弹幕平滑) 保持不动。
-        for arg in smooth_motion_args(&config.interpolation_mode) {
-            cmd.arg(arg);
-        }
+    // 互斥环境变量 (见 interpolation_env): Smooth Motion 走 NVPRESENT,
+    // LSFG 走 lsfg-vk 层, Off 两者都关。同一 mpv 进程只允许一种补帧。
+    for (key, value) in interpolation_env(&config.interpolation_mode) {
+        cmd.env(key, value);
     }
     // 超分总入口 (Anime4K 三档也在其中, 由 super_res.algorithm 仲裁 —
     // 旧 anime4k_mode 仅作配置迁移源, 不再直接加载, 避免双份链)。
@@ -236,30 +229,78 @@ fn apply_video_enhancements(cmd: &mut tokio::process::Command) {
     }
 }
 
-/// Smooth Motion 模式的追加参数 (纯函数, 便于测试):
-/// 实测真值 (Wayland commit 计数): NVPRESENT 按 NVIDIA 官方设计只做
-/// "两帧之间插一帧" (2×) — 24fps 源输出 ≈48Hz, **到不了刷新率** (无
-/// 目标帧率开关, 官方 README nvpresent 章); 与 display-resample 组合
-/// 实测坏档 (有效 82Hz、12s 掉 70 帧) 禁止搭配。要满 165Hz 用 blend。
-/// - `--video-sync=audio`: 驱动层接管呈现后 mpv 不再按 vsync 重排 —
+/// 帧生成模式的 mpv 呈现参数 (纯函数, 便于测试)。Off 返回空 (保持基础
+/// args 的 display-resample 弹幕平滑)。所有帧生成层 (NVPRESENT /
+/// lsfg-vk) 都要求:
+/// - `--video-sync=audio`: 补帧层接管呈现后 mpv 不再按 vsync 重排 —
 ///   后传参数覆盖基础 args 里的 display-resample。对帧生成本身也是
-///   最优输入: 只在新帧时提交 present, 驱动在真实帧间插值; vsync 节奏
-///   会插入同帧重复 present, 插值退化为无效功 (mpv#17140 同配)。
-///   实测收益: GPU 41%→31%、vo-delayed 11→0、实时比 0.999→1.003。
-/// - `--gpu-api=vulkan`: `NVPRESENT_ENABLE_SMOOTH_MOTION` 的隐式层
-///   仅支持 Vulkan (驱动 README 明示)。auto 在 Wayland 下本就选
-///   waylandvk, 但显式锁定防回退会话落到 opengl 时层静默不加载、
-///   Smooth Motion 变哑。生成帧生效实证 (本机录屏): 开 ≈71 唯一帧/s
-///   vs 关 ≈36 (2×), mpv 进程 Wayland commit 率同为 2×。
-fn smooth_motion_args(
-    mode: &crate::domain::playback::InterpolationMode,
-) -> &'static [&'static str] {
-    match mode {
-        crate::domain::playback::InterpolationMode::SmoothMotion => {
-            &["--video-sync=audio", "--gpu-api=vulkan"]
-        }
-        _ => &[],
+///   最优输入: 只在新帧时提交 present, 补帧层在真实帧间插值; vsync
+///   节奏会插入同帧重复 present, 插值退化为无效功 (mpv#17140 同配)。
+///   实测: 较 display-resample GPU 41%→31%、vo-delayed 11→0、
+///   实时比 0.999→1.003; 且 display-resample 与补帧层双重节奏会把
+///   播放拖到 0.4× 实时 (实测), 必须避开。
+/// - `--gpu-api=vulkan`: 两个补帧层都仅支持 Vulkan (驱动/lsfg-vk 文档
+///   明示)。auto 在 Wayland 下本就选 waylandvk, 但显式锁定防回退会话
+///   落到 opengl 时层静默不加载、补帧变哑。
+fn frame_gen_args(mode: &crate::domain::playback::InterpolationMode) -> &'static [&'static str] {
+    if mode.is_frame_generation() {
+        &["--video-sync=audio", "--gpu-api=vulkan"]
+    } else {
+        &[]
     }
+}
+
+/// 帧生成互斥环境变量 (纯函数, 便于测试)。三种补帧都作用于同一 mpv
+/// 进程的 Vulkan 呈现层, 必须靠环境变量隔离, 否则会叠加成双重补帧
+/// (画质崩/过载):
+/// - Off: `DISABLE_LSFGVK=1` — lsfg-vk 的 profile 按进程名 "mpv" 自动
+///   匹配, 不禁用则"关补帧"仍会被 lsfg 接管。
+/// - SmoothMotion: `NVPRESENT_ENABLE_SMOOTH_MOTION=1` 启用 NVIDIA 层 +
+///   `DISABLE_LSFGVK=1` 防 lsfg 叠加。
+/// - Lsfg*: `LSFGVK_ENV=1` 让 lsfg-vk 纯环境变量配置 (绕过用户 conf 里
+///   可能不存在的同名 profile), `LSFGVK_MULTIPLIER` 设倍率, 不设
+///   NVPRESENT。DLL 路径由 `LSFGVK_DLL_PATH` 提供 (见 discover_lsfg_dll)。
+fn interpolation_env(
+    mode: &crate::domain::playback::InterpolationMode,
+) -> Vec<(&'static str, String)> {
+    use crate::domain::playback::InterpolationMode as M;
+    match mode {
+        M::Off => vec![("DISABLE_LSFGVK", "1".to_string())],
+        M::SmoothMotion => vec![
+            ("NVPRESENT_ENABLE_SMOOTH_MOTION", "1".to_string()),
+            ("DISABLE_LSFGVK", "1".to_string()),
+        ],
+        _ => {
+            let mut env = vec![
+                ("LSFGVK_ENV", "1".to_string()),
+                (
+                    "LSFGVK_MULTIPLIER",
+                    mode.lsfg_multiplier().unwrap_or(2).to_string(),
+                ),
+            ];
+            if let Some(dll) = discover_lsfg_dll() {
+                env.push(("LSFGVK_DLL_PATH", dll.to_string_lossy().into_owned()));
+            }
+            env
+        }
+    }
+}
+
+/// 定位 lsfg-vk 的帧生成模型 `lsfg-vk.dll` (来自 Steam 的 Lossless
+/// Scaling "lsfg-vk" 分支)。找不到返回 None (此时 LSFG 档静默不补帧,
+/// 不会让播放坏掉)。搜索顺序: 常见 Steam 库路径下的 Lossless Scaling
+/// 安装目录。路径含空格, 用环境变量传给 lsfg-vk 层 (免命令行引号问题)。
+fn discover_lsfg_dll() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let home = std::path::PathBuf::from(home);
+    const REL: &str = "Lossless Scaling/lsfg-vk.dll";
+    let candidates = [
+        home.join(".local/share/Steam/steamapps/common").join(REL),
+        home.join(".steam/steam/steamapps/common").join(REL),
+        home.join(".steam/root/steamapps/common").join(REL),
+        home.join("Steam/steamapps/common").join(REL),
+    ];
+    candidates.into_iter().find(|p| p.is_file())
 }
 
 /// 各模式的着色器清单 (相对 anime4k/glsl 目录), 官方 Fast (CTRL+1/2/3)
@@ -745,153 +786,6 @@ fn insert_guard_when(src: &str) -> String {
         }
     }
     out
-}
-
-/// mpv `--tscale` 合法取值白名单 (mpv 0.41 `--list-options` 实测输出)。
-/// **不在白名单的值是致命错误**: `--tscale=nonsense` 会让 mpv 拒绝启动
-/// ("Setting commandline option failed"), 手改配置填错词 = 黑屏无法播放
-/// — 所以必须白名单校验而不仅是字符过滤。
-const MPV_TSCALES: &[&str] = &[
-    "oversample",
-    "linear",
-    "spline16",
-    "spline36",
-    "spline64",
-    "sinc",
-    "lanczos",
-    "ginseng",
-    "bicubic",
-    "hermite",
-    "catmull_rom",
-    "mitchell",
-    "robidoux",
-    "robidouxsharp",
-    "box",
-    "nearest",
-    "triangle",
-    "gaussian",
-    "bartlett",
-    "cosine",
-    "hanning",
-    "tukey",
-    "hamming",
-    "quadric",
-    "welch",
-    "kaiser",
-    "blackman",
-    "sphinx",
-    "jinc",
-];
-
-/// 解析混合模式的时间核: 手改值过白名单, 表外/空一律回落 mitchell —
-/// oversample 是手册口径下"最锐/最不平滑"的档, 拿它当默认会让混合模式
-/// 只有呈现节奏而没有内容补帧 (形同关闭); 表外词 (含空格/分号/任意拼写)
-/// 则会让 mpv 拒绝启动 (致命), 必须拦下。
-fn resolve_blend_tscale(configured: &str) -> String {
-    let t = configured.trim();
-    if MPV_TSCALES.contains(&t) {
-        t.to_string()
-    } else {
-        "mitchell".to_string()
-    }
-}
-
-/// 补帧的运行时属性集 (供 mpv IPC `set_property`): 与 `interpolation_args`
-/// 同源逻辑, 但产出运行时可写的键值对 — 第8轮修复"换模式不生效": 此前
-/// `SetInterpolationMode` 只存配置, 运行中的 mpv 仍用启动参数, 按 `i` 换
-/// 模式当前播放纹丝不动。Off/混合/5 核的 interpolation/tscale/video-sync
-/// 均运行时可写 (IPC 实测), 可即时生效; SmoothMotion 的 NVPRESENT env 无法
-/// 注入运行中进程, 故只同步 mpv 侧 (关插值+audio 节奏, 防双重), 驱动层
-/// 帧生成需重启播放才加载。
-fn interpolation_live_props(
-    config: &crate::storage::AppConfig,
-) -> Vec<(&'static str, serde_json::Value)> {
-    use crate::domain::playback::InterpolationMode;
-    match config.interpolation_mode {
-        InterpolationMode::Off => vec![("interpolation", serde_json::json!(false))],
-        InterpolationMode::SmoothMotion => vec![
-            ("interpolation", serde_json::json!(false)),
-            ("video-sync", serde_json::json!("audio")),
-        ],
-        _ => {
-            let tscale = match config.interpolation_mode.tscale() {
-                Some(fixed) => fixed.to_string(),
-                None => resolve_blend_tscale(&config.interpolation_tscale),
-            };
-            vec![
-                ("interpolation", serde_json::json!(true)),
-                ("tscale", serde_json::json!(tscale)),
-                ("video-sync", serde_json::json!("display-resample")),
-            ]
-        }
-    }
-}
-
-/// 发现当前应用进程的所有运行中 mpv IPC socket: 播放器 socket 命名为
-/// `bilibili-tui-<kind>-<app_pid>-<suffix>.sock` (见 mpv_ipc_path), 按
-/// 当前 pid 匹配即得视频/多P/番剧/本地/直播全部运行中播放。
-#[cfg(unix)]
-fn running_mpv_ipc_sockets() -> Vec<std::path::PathBuf> {
-    let pid = std::process::id();
-    let pat = format!("-{pid}-");
-    let mut out = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) {
-        for entry in rd.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(rest) = name
-                .strip_prefix("bilibili-tui-")
-                .and_then(|r| r.strip_suffix(".sock"))
-            {
-                if rest.contains(&pat) {
-                    out.push(entry.path());
-                }
-            }
-        }
-    }
-    out
-}
-
-/// 实时把补帧设置应用到所有运行中的 mpv 播放 (第8轮修复"换模式不生效"):
-/// 换模式即时生效, 不需退出重播。对每个运行中 socket 逐条 `set_property`。
-pub async fn apply_interpolation_live(config: &crate::storage::AppConfig) {
-    #[cfg(unix)]
-    {
-        for sock in running_mpv_ipc_sockets() {
-            for (key, value) in interpolation_live_props(config) {
-                let _ = mpv_ipc(&sock, serde_json::json!(["set_property", key, value])).await;
-            }
-        }
-    }
-    #[cfg(windows)]
-    let _ = config;
-}
-
-/// 构造补帧相关的 mpv 参数 (纯函数, 便于测试)。
-///
-/// - `off` / `smooth_motion`: 无 mpv 侧插值参数 — Off 仅 display-resample
-///   走节奏; SmoothMotion 由驱动层插帧 (见 apply_video_enhancements 的
-///   环境变量), 叠加 mpv 插值会双重补帧。
-/// - `blend`: `--interpolation=yes` + 手改 `interpolation_tscale` 核,
-///   **白名单校验** (非法值回落 mitchell — mpv 对表外 tscale 直接拒绝
-///   启动)。mitchell 居中, 24fps→165Hz 每对源帧间平滑过渡; 同场基准
-///   插值与关闭模式同价 (GPU 30% vs 29%), 内容更新率满 165Hz。
-/// - 5 种新方法 (sinc/lanczos/gaussian/catmull_rom/oversample): 与 blend
-///   同链, 固定核 (第8轮实测 1080p24/165Hz 全屏 GPU 27-30% = off 基线
-///   28-29%, ratio≥0.989 drops 0 — 与 blend 同价满速)。
-fn interpolation_args(config: &crate::storage::AppConfig) -> Vec<String> {
-    use crate::domain::playback::InterpolationMode;
-    let tscale = match config.interpolation_mode.tscale() {
-        // 5 种新方法: 核由枚举固定, 不读手改配置 (设置/详情页不可调)。
-        Some(fixed) => fixed.to_string(),
-        None => resolve_blend_tscale(&config.interpolation_tscale),
-    };
-    match config.interpolation_mode {
-        InterpolationMode::Off | InterpolationMode::SmoothMotion => Vec::new(),
-        _ => vec![
-            "--interpolation=yes".to_string(),
-            format!("--tscale={tscale}"),
-        ],
-    }
 }
 
 /// Split a user-supplied argument string on whitespace, honoring single and
@@ -3502,126 +3396,78 @@ mod playlist_tests {
     }
 
     #[test]
-    fn interpolation_live_props_by_mode() {
+    fn frame_gen_args_by_mode() {
         use crate::domain::playback::InterpolationMode as Mode;
-        // Off → 只关插值 (display-resample 由启动参数维持, 不重复设)。
-        let mut config = crate::storage::AppConfig {
-            interpolation_mode: Mode::Off,
-            ..Default::default()
-        };
-        let props = interpolation_live_props(&config);
-        assert_eq!(props.len(), 1);
-        assert_eq!(props[0].0, "interpolation");
-        assert_eq!(props[0].1, serde_json::json!(false));
-        // Blend/5 核 → 开插值 + 核 + display-resample。
-        config.interpolation_mode = Mode::Blend;
-        config.interpolation_tscale = "nonsense".to_string();
-        let props = interpolation_live_props(&config);
-        let m: std::collections::HashMap<_, _> = props.iter().cloned().collect();
-        assert_eq!(m["interpolation"], serde_json::json!(true));
-        assert_eq!(m["tscale"], serde_json::json!("mitchell"), "非法手改回落");
-        assert_eq!(m["video-sync"], serde_json::json!("display-resample"));
-        config.interpolation_mode = Mode::Sinc;
-        let props = interpolation_live_props(&config);
-        let m: std::collections::HashMap<_, _> = props.iter().cloned().collect();
-        assert_eq!(m["tscale"], serde_json::json!("sinc"), "固定核");
-        // SmoothMotion → 关插值 + audio (驱动层 env 无法注入运行中进程)。
-        config.interpolation_mode = Mode::SmoothMotion;
-        let props = interpolation_live_props(&config);
-        let m: std::collections::HashMap<_, _> = props.iter().cloned().collect();
-        assert_eq!(m["interpolation"], serde_json::json!(false));
-        assert_eq!(m["video-sync"], serde_json::json!("audio"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn running_mpv_ipc_sockets_discovers_by_pid() {
-        // 造两个假 socket: 一个匹配当前 pid, 一个不匹配。
-        let pid = std::process::id();
-        let dir = std::env::temp_dir();
-        let mine = dir.join(format!("bilibili-tui-mpv-{pid}-999.sock"));
-        let other = dir.join(format!("bilibili-tui-mpv-{}-888.sock", pid + 1));
-        let stray = dir.join("bilibili-tui-unrelated.sock");
-        for p in [&mine, &other, &stray] {
-            let _ = std::fs::write(p, b"");
+        assert!(frame_gen_args(&Mode::Off).is_empty());
+        for mode in [Mode::SmoothMotion, Mode::Lsfg2x, Mode::Lsfg3x, Mode::Lsfg4x] {
+            let args = frame_gen_args(&mode);
+            assert!(
+                args.contains(&"--video-sync=audio"),
+                "{mode:?} 需要 audio 呈现"
+            );
+            assert!(args.contains(&"--gpu-api=vulkan"), "{mode:?} 需要 vulkan");
         }
-        let found = running_mpv_ipc_sockets();
-        assert!(found.contains(&mine), "应发现当前 pid 的 socket: {found:?}");
-        assert!(!found.contains(&other), "不应发现别的 pid: {found:?}");
-        assert!(!found.contains(&stray), "不应发现无 pid 段: {found:?}");
-        let _ = std::fs::remove_file(&mine);
-        let _ = std::fs::remove_file(&other);
-        let _ = std::fs::remove_file(&stray);
     }
 
     #[test]
-    fn interpolation_args_by_mode() {
+    fn interpolation_env_is_mutually_exclusive() {
         use crate::domain::playback::InterpolationMode as Mode;
-        let config = crate::storage::AppConfig {
-            interpolation_mode: Mode::Off,
-            ..Default::default()
+        let envmap = |m: &Mode| {
+            interpolation_env(m)
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>()
         };
-        assert!(interpolation_args(&config).is_empty());
-
-        let mut config = config;
-
-        // blend → interpolation + tscale, 无 vf
-        config.interpolation_mode = Mode::Blend;
-        let blend = interpolation_args(&config);
-        assert!(blend.contains(&"--interpolation=yes".to_string()));
-        assert!(blend.iter().any(|arg| arg.starts_with("--tscale=")));
-        assert!(!blend.iter().any(|arg| arg.starts_with("--vf=")));
-
-        // 空 (默认未配置) → mitchell: 真补帧滤镜 (mpv 手册: oversample
-        // 最锐最不平滑 ≈ 不做内容补帧, 曾为默认导致混合模式形同关闭)。
-        config.interpolation_tscale = String::new();
-        let dflt = interpolation_args(&config);
-        assert!(dflt.contains(&"--tscale=mitchell".to_string()));
-
-        // 表外非法 tscale (含空格/分号/任意拼写) 同样回落 mitchell —
-        // mpv 对表外 tscale 是致命错误 (拒绝启动), 白名单必须拦下。
-        config.interpolation_tscale = "bad value;rm -rf".to_string();
-        let safe = interpolation_args(&config);
-        assert!(safe.contains(&"--tscale=mitchell".to_string()));
-        config.interpolation_tscale = "nonsense".to_string();
-        assert!(
-            interpolation_args(&config).contains(&"--tscale=mitchell".to_string()),
-            "表外词 nonsense 必须回落 (mpv 会拒绝启动)"
+        let m = envmap(&Mode::Off);
+        assert_eq!(m.get("DISABLE_LSFGVK").map(String::as_str), Some("1"));
+        assert!(!m.contains_key("NVPRESENT_ENABLE_SMOOTH_MOTION"));
+        assert!(!m.contains_key("LSFGVK_ENV"));
+        let m = envmap(&Mode::SmoothMotion);
+        assert_eq!(
+            m.get("NVPRESENT_ENABLE_SMOOTH_MOTION").map(String::as_str),
+            Some("1")
         );
-        // 白名单内的手改值原样通过。
-        config.interpolation_tscale = "robidouxsharp".to_string();
-        assert!(
-            interpolation_args(&config).contains(&"--tscale=robidouxsharp".to_string()),
-            "白名单值透传"
-        );
-
-        // 5 种新方法: 固定核, 不读手改配置 (配置故意设为非法词也不影响)。
-        config.interpolation_tscale = "nonsense".to_string();
-        for (mode, kernel) in [
-            (Mode::Sinc, "sinc"),
-            (Mode::Lanczos, "lanczos"),
-            (Mode::Gaussian, "gaussian"),
-            (Mode::CatmullRom, "catmull_rom"),
-            (Mode::Oversample, "oversample"),
+        assert_eq!(m.get("DISABLE_LSFGVK").map(String::as_str), Some("1"));
+        assert!(!m.contains_key("LSFGVK_ENV"), "不得叠加 lsfg");
+        for (mode, mult) in [
+            (Mode::Lsfg2x, "2"),
+            (Mode::Lsfg3x, "3"),
+            (Mode::Lsfg4x, "4"),
         ] {
-            config.interpolation_mode = mode;
-            let args = interpolation_args(&config);
+            let m = envmap(&mode);
+            assert_eq!(m.get("LSFGVK_ENV").map(String::as_str), Some("1"));
+            assert_eq!(m.get("LSFGVK_MULTIPLIER").map(String::as_str), Some(mult));
             assert!(
-                args.contains(&"--interpolation=yes".to_string()),
-                "{mode:?} 需要 interpolation"
+                !m.contains_key("NVPRESENT_ENABLE_SMOOTH_MOTION"),
+                "{mode:?} 不得叠加 NVPRESENT"
             );
             assert!(
-                args.contains(&format!("--tscale={kernel}")),
-                "{mode:?} 核 = {kernel}, 得到 {args:?}"
-            );
-            assert!(
-                !args.iter().any(|a| a.starts_with("--vf=")),
-                "{mode:?} 无 vf"
+                !m.contains_key("DISABLE_LSFGVK"),
+                "{mode:?} 不能禁用自身 lsfg"
             );
         }
-        // SmoothMotion 仍无 mpv 插值参数 (驱动层补帧, 防双重)。
-        config.interpolation_mode = Mode::SmoothMotion;
-        assert!(interpolation_args(&config).is_empty());
+    }
+
+    #[test]
+    fn lsfg_multiplier_matches_variant() {
+        use crate::domain::playback::InterpolationMode as Mode;
+        assert_eq!(Mode::Lsfg2x.lsfg_multiplier(), Some(2));
+        assert_eq!(Mode::Lsfg3x.lsfg_multiplier(), Some(3));
+        assert_eq!(Mode::Lsfg4x.lsfg_multiplier(), Some(4));
+        assert_eq!(Mode::Off.lsfg_multiplier(), None);
+        assert_eq!(Mode::SmoothMotion.lsfg_multiplier(), None);
+        assert!(!Mode::Off.is_frame_generation());
+        assert!(Mode::SmoothMotion.is_frame_generation());
+        assert!(Mode::Lsfg4x.is_frame_generation());
+    }
+
+    #[test]
+    fn interpolation_env_lsfg_dll_is_optional() {
+        use crate::domain::playback::InterpolationMode as Mode;
+        let env = interpolation_env(&Mode::Lsfg4x);
+        let dll = env.iter().find(|(k, _)| *k == "LSFGVK_DLL_PATH");
+        if let Some((_, path)) = dll {
+            assert!(std::path::Path::new(path).is_absolute(), "DLL 路径应绝对");
+        }
     }
 
     #[test]
@@ -3970,21 +3816,23 @@ mod playlist_tests {
     fn smooth_motion_overrides_video_sync_and_locks_vulkan() {
         use crate::domain::playback::InterpolationMode as M;
         assert_eq!(
-            smooth_motion_args(&M::SmoothMotion),
+            frame_gen_args(&M::SmoothMotion),
             &["--video-sync=audio", "--gpu-api=vulkan"]
         );
-        assert!(smooth_motion_args(&M::Off).is_empty());
-        assert!(smooth_motion_args(&M::Blend).is_empty());
+        assert!(frame_gen_args(&M::Off).is_empty());
     }
 
     #[test]
-    fn smooth_motion_args_are_empty() {
-        // Smooth Motion 不带 mpv 侧插值参数 (驱动层接管), 避免双重补帧。
-        let config = crate::storage::AppConfig {
-            interpolation_mode: crate::domain::playback::InterpolationMode::SmoothMotion,
-            ..Default::default()
-        };
-        assert!(interpolation_args(&config).is_empty());
+    fn smooth_motion_has_no_mpv_interpolation() {
+        // Smooth Motion 不带 mpv 侧 --interpolation/--tscale (驱动层接管),
+        // 避免双重补帧。frame_gen_args 只给呈现参数。
+        use crate::domain::playback::InterpolationMode as Mode;
+        assert!(frame_gen_args(&Mode::SmoothMotion).contains(&"--video-sync=audio"));
+        assert!(
+            !frame_gen_args(&Mode::SmoothMotion)
+                .iter()
+                .any(|a| a.contains("tscale"))
+        );
     }
 
     #[test]
