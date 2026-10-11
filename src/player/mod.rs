@@ -277,6 +277,13 @@ fn interpolation_env(
                     "LSFGVK_MULTIPLIER",
                     mode.lsfg_multiplier().unwrap_or(2).to_string(),
                 ),
+                // 双显卡笔记本防坑: lsfg-vk 默认枚举会落到集成核显
+                // (本机 benchmark 实测核显 216ms/帧 vs 独显 1.48ms —
+                // 差 146 倍, 核显上光流必然降质)。这两个 env 让 lsfg-vk
+                // 的 Vulkan device 枚举优先独显 (NVIDIA PRIME offload),
+                // 运行时无副作用 (实测 NV 利用率不变), 跨会话保底。
+                ("__NV_PRIME_RENDER_OFFLOAD", "1".to_string()),
+                ("__VK_LAYER_NV_optimus", "NVIDIA_only".to_string()),
             ];
             if let Some(dll) = discover_lsfg_dll() {
                 env.push(("LSFGVK_DLL_PATH", dll.to_string_lossy().into_owned()));
@@ -3444,7 +3451,19 @@ mod playlist_tests {
                 !m.contains_key("DISABLE_LSFGVK"),
                 "{mode:?} 不能禁用自身 lsfg"
             );
+            // 双显卡防坑: 强制 NVIDIA PRIME offload (防 lsfg-vk 落到核显)。
+            assert_eq!(
+                m.get("__NV_PRIME_RENDER_OFFLOAD").map(String::as_str),
+                Some("1")
+            );
+            assert_eq!(
+                m.get("__VK_LAYER_NV_optimus").map(String::as_str),
+                Some("NVIDIA_only")
+            );
         }
+        // Off / SmoothMotion 不设 NVIDIA offload (驱动层/无补帧)。
+        assert!(!envmap(&Mode::Off).contains_key("__NV_PRIME_RENDER_OFFLOAD"));
+        assert!(!envmap(&Mode::SmoothMotion).contains_key("__NV_PRIME_RENDER_OFFLOAD"));
     }
 
     #[test]

@@ -336,6 +336,17 @@ gaussian/catmull_rom/oversample — 相邻帧加权平均=鬼影，实测不提�
   | ~~blend/sinc/…~~（已删） | 鬼影非新帧 | — | 混合=拖影，实测不提流畅度 |
 
   三者互斥（都作用于 mpv 的 Vulkan 呈现层，靠环境变量隔离，见下）。
+
+  **LSFG 质量不如 Smooth Motion（实测结论）**：第三方 `lsfg-vk` 重实现的
+  光流画质明显弱于 NVIDIA 驱动原生（用户实测确认）。本机 1080p：
+  LSFG-4× 用 58% GPU，Smooth Motion 仅 32%，但后者画面更干净 —— 差距在
+  算法本身，非配置问题（已排查：非节奏抖动、非核显、非参数）。
+  **唯一可修的坑（双显卡笔记本）**：`lsfg-vk` 的 Vulkan device 枚举默认
+  会落到集成核显（本机 `lsfg-vk-cli benchmark` 实测核显 216ms/帧 vs
+  独显 1.48ms，**差 146 倍**）。LSFG 档已注入
+  `__NV_PRIME_RENDER_OFFLOAD=1 + __VK_LAYER_NV_optimus=NVIDIA_only`
+  强制走独显（运行时无副作用）。**推荐默认用 Smooth Motion**，LSFG 仅
+  在需要 >2× 补帧倍率时选用。
   LSFG 依赖：Steam 版 Lossless Scaling 切到 **"lsfg-vk" 分支**（提供
   `lsfg-vk.dll` 帧生成模型），`lsfg-vk` Vulkan 层（`lsfg-vk-bin` 包）。
   app 经环境变量 `LSFGVK_ENV=1 + LSFGVK_MULTIPLIER + LSFGVK_DLL_PATH`
